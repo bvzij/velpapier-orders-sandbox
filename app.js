@@ -12,6 +12,7 @@ function formatMXN(n) { if (n === undefined || n === null || n === '') return 'â
 function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit' }); }
 function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
 function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
+function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim() === 'Sin Nombre'; }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 function renderNotas(notas) {
@@ -115,7 +116,7 @@ function runSearch(name) {
     order.forEach(cliente => {
       const items = groups[cliente];
       const group = document.createElement('div'); group.className = 'customer-group';
-      group.innerHTML = `<div class="customer-header"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div></div>`;
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div></div>`;
       items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
       results.appendChild(group);
     });
@@ -462,7 +463,7 @@ function renderGrouped(records, containerId, showActions) {
     const hasPaid = items.some(r => r.Status === 'Pagado');
 
     const group = document.createElement('div'); group.className = 'customer-group';
-    const header = document.createElement('div'); header.className = 'customer-header';
+    const header = document.createElement('div'); header.className = 'customer-header' + (isUnnamedCliente(cliente) ? ' customer-header--unnamed' : '');
     header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div><span class="customer-owed">${unpaid > 0 ? 'Â· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
 
     const bulk = header.querySelector('.customer-bulk-actions');
