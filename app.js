@@ -1,4 +1,35 @@
-const API = 'https://script.google.com/macros/s/AKfycbxdqapCNaT6OwB89nvql-nGuVC06wH3V6lR8g9BjQdf4D-RQWMXrWxXqP4Y_uvtCJJJ/exec';
+const API = 'https://script.google.com/macros/s/AKfycbwfNI4lYple4BPRNkFLyFyMuoW9no6kRna_nuq1eDNbnPrrx6yeqooEy3s-sVJiJmrczg/exec';
+
+// Maps internal field names (used throughout the UI) to the new Orders sheet column names.
+const FIELD_MAP = {
+  ID: 'Order ID',
+  Cliente: 'Primary Username',
+  Producto: 'Products',
+  Precio: 'Price',
+  Notas: 'Notes',
+  Status: 'Status',
+  'Fecha Creación': 'Created Date'
+};
+
+function mapFromApi(r) {
+  return {
+    ID: r['Order ID'],
+    Cliente: r['Primary Username'] || '',
+    Producto: r['Products'] || '',
+    Precio: Number(r['Price']) || 0,
+    Notas: r['Notes'] || '',
+    Status: r['Status'] || 'No Pagado',
+    'Fecha Creación': r['Created Date']
+  };
+}
+
+function mapToApiFields(fields) {
+  const out = {};
+  Object.entries(fields).forEach(([k, v]) => { out[FIELD_MAP[k] || k] = v; });
+  return out;
+}
+
+function isShipped(status) { return status === 'Enviado' || status === 'Archivado'; }
 
 let allRecords = [];
 let currentTab = 'activos';
@@ -104,8 +135,8 @@ function runSearch(name) {
   const val = name.toLowerCase();
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
-  const active = allRecords.filter(r => r.Status !== 'Enviado' && (r.Cliente || '').toLowerCase() === val);
-  const archived = allRecords.filter(r => r.Status === 'Enviado' && (r.Cliente || '').toLowerCase() === val);
+  const active = allRecords.filter(r => r.Status !== 'Archivado' && (r.Cliente || '').toLowerCase() === val);
+  const archived = allRecords.filter(r => r.Status === 'Archivado' && (r.Cliente || '').toLowerCase() === val);
   const results = document.getElementById('search-results');
   results.innerHTML = '';
   if (!active.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
@@ -182,7 +213,7 @@ function showEditModal(id) {
     <input type="text" id="edit-cliente" value="${(r.Cliente || '').replace(/"/g, '&quot;')}" placeholder="Usuario TikTok" />
     <input type="text" id="edit-producto" value="${(r.Producto || '').replace(/"/g, '&quot;')}" placeholder="Producto" />
     <input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />
-    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option></select>
+    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Empacado" ${r.Status === 'Empacado' ? 'selected' : ''}>Empacado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
     <input type="text" id="edit-notas" value="${(r.Notas || '').replace(/"/g, '&quot;')}" placeholder="Notas (opcional)" />
   </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
   document.getElementById('edit-cancel-btn').addEventListener('click', closeModal);
@@ -208,10 +239,7 @@ async function loadRecords() {
   try {
     const res = await fetch(API + '?action=getAll');
     const data = await res.json();
-    allRecords = (data.records || []).map(r => ({
-      ...r,
-      Precio: Number(r.Precio) || 0
-    }));
+    allRecords = (data.records || []).map(mapFromApi);
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
@@ -223,7 +251,7 @@ async function loadRecords() {
 
 async function updateStatus(id, status) {
   try {
-    const result = await apiPost({ action: 'update', id: id, fields: { Status: status } });
+    const result = await apiPost({ action: 'update', id: id, fields: mapToApiFields({ Status: status }) });
     if (!result.success) throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
     if (rec) rec.Status = status;
@@ -267,7 +295,7 @@ function requestRenameCliente(oldName) {
     closeModal();
     try {
       for (const r of targets) {
-        await apiPost({ action: 'update', id: r.ID, fields: { Cliente: newName } });
+        await apiPost({ action: 'update', id: r.ID, fields: mapToApiFields({ Cliente: newName }) });
         r.Cliente = newName;
       }
       renderAll();
@@ -284,7 +312,7 @@ function requestBulkUpdate(cliente, fromStatus, toStatus, toLabel) {
   showConfirmModal(`¿Marcar todos los pedidos de <strong>${cliente}</strong> como <strong>${toLabel}</strong>? (${targets.length} items)`, async () => {
     try {
       for (const r of targets) {
-        const result = await apiPost({ action: 'update', id: r.ID, fields: { Status: toStatus } });
+        const result = await apiPost({ action: 'update', id: r.ID, fields: mapToApiFields({ Status: toStatus }) });
         if (result.success) r.Status = toStatus;
       }
       renderAll();
@@ -316,7 +344,7 @@ async function saveEdit(id) {
   const notas = document.getElementById('edit-notas').value.trim();
   if (!cliente || !producto) { showToast('Faltan datos'); return; }
   try {
-    const result = await apiPost({ action: 'update', id: id, fields: { Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas } });
+    const result = await apiPost({ action: 'update', id: id, fields: mapToApiFields({ Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas }) });
     if (!result.success) throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
     if (rec) { rec.Cliente = cliente; rec.Producto = producto; rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
@@ -336,7 +364,7 @@ async function createRecord() {
   if (!items.length) { showToast('Falta al menos un producto'); return; }
   try {
     for (const item of items) {
-      const result = await apiPost({ action: 'create', fields: { Cliente: cliente, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Status: status, ...(item.notas && { Notas: item.notas }) } });
+      const result = await apiPost({ action: 'create', fields: mapToApiFields({ Cliente: cliente, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Status: status, ...(item.notas && { Notas: item.notas }) }) });
       if (result.success) {
         allRecords.push({ ID: result.id, Cliente: cliente, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: status, 'Fecha Creación': new Date().toISOString() });
       }
@@ -377,11 +405,13 @@ function renderOrderRow(r, showActions) {
   let rowClass = 'order-row';
   if (isOverdueUnpaid) rowClass += ' overdue-unpaid';
   else if (isOverduePaid) rowClass += ' overdue-paid';
-  if (status === 'Enviado') rowClass += ' shipped-row';
+  if (isShipped(status)) rowClass += ' shipped-row';
 
   let pillClass = 'pill-nopagado', pillText = `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}`;
   if (status === 'Pagado') { pillClass = 'pill-pagado'; pillText = `Pagado${isOverduePaid ? ' ⚠' : ''}`; }
+  if (status === 'Empacado') { pillClass = 'pill-enviado'; pillText = 'Empacado'; }
   if (status === 'Enviado') { pillClass = 'pill-enviado'; pillText = 'Enviado'; }
+  if (status === 'Archivado') { pillClass = 'pill-enviado'; pillText = 'Archivado'; }
 
   const metaParts = [formatDate(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
   const notasHtml = renderNotas(r.Notas);
@@ -488,7 +518,7 @@ function renderGrouped(records, containerId, showActions) {
 }
 
 function renderAnalytics() {
-  const shipped = allRecords.filter(r => r.Status === 'Enviado');
+  const shipped = allRecords.filter(r => isShipped(r.Status));
   const paid = allRecords.filter(r => r.Status === 'Pagado');
   const unpaid = allRecords.filter(r => r.Status === 'No Pagado');
   const shippedRev = shipped.reduce((s, r) => s + (r.Precio || 0), 0);
@@ -527,7 +557,7 @@ function renderAnalytics() {
 function renderClientList() {
   const el = document.getElementById('client-list-scroll');
   if (!el) return;
-  const active = allRecords.filter(r => r.Status !== 'Enviado');
+  const active = allRecords.filter(r => r.Status !== 'Archivado');
   const seen = {};
   active.forEach(r => {
     const c = r.Cliente || 'Sin nombre';
@@ -555,10 +585,10 @@ function renderClientList() {
 
 function renderAll() {
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000);
-  const activos = allRecords.filter(r => r.Status !== 'Enviado');
+  const activos = allRecords.filter(r => r.Status !== 'Archivado');
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado');
   const enviar = allRecords.filter(r => r.Status === 'Pagado');
-  const archivo = allRecords.filter(r => r.Status === 'Enviado' && new Date(r['Fecha Creación']) >= twoWeeksAgo);
+  const archivo = allRecords.filter(r => r.Status === 'Archivado' && new Date(r['Fecha Creación']) >= twoWeeksAgo);
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
