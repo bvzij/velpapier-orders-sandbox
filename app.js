@@ -237,7 +237,7 @@ async function loadRecords() {
   const icon = document.getElementById('refresh-icon');
   icon.classList.add('spinning');
   try {
-    const res = await fetch(API + '?action=getAll');
+    const res = await fetch(API + '?action=orders');
     const data = await res.json();
     allRecords = (data.records || []).map(mapFromApi);
     renderAll();
