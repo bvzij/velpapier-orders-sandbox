@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Pedidos Externos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<script>
+  (function() {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const key = 'vp_auth';
+
+  if (localStorage.getItem(key) === correctHash) return;
+
+  const input = prompt('Contraseña requerida:');
+  if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; return; }
+
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash === correctHash) {
+      localStorage.setItem(key, correctHash);
+      location.reload();
+    } else {
+      document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+    }
+  });
+})();
+</script>
+
+<div class="app-layout">
+
+  <header class="app-header">
+    <div class="app-logo">Vel Papier <span>· Pedidos Externos</span></div>
+    <div class="header-right">
+      <div class="search-wrap">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input class="search-input" type="text" id="global-search" placeholder="Buscar cliente..." autocomplete="off"
+          oninput="handleSearchInput()" onblur="hideSearchAutocomplete()" />
+        <button class="search-clear-btn" id="search-clear-btn" onclick="clearSearch()" style="display:none" title="Limpiar búsqueda">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+        <div class="autocomplete-list" id="search-autocomplete-list" style="display:none"></div>
+      </div>
+      <select class="sort-select" onchange="setSort(this.value)">
+        <option value="default">Orden: por defecto</option>
+        <option value="az">Nombre: A → Z</option>
+        <option value="za">Nombre: Z → A</option>
+        <option value="most">Mayor deuda primero</option>
+        <option value="least">Menor deuda primero</option>
+        <option value="newest">Más reciente primero</option>
+        <option value="oldest">Más antiguo primero</option>
+      </select>
+      <button class="refresh-btn" onclick="loadRecords()">
+        <svg id="refresh-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+        Actualizar
+      </button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="client-list-card">
+  <div class="card-title">Clientes activos</div>
+  <div class="client-list-scroll" id="client-list-scroll"></div>
+</div>
+    <div class="new-order-card">
+      <div class="card-title">Nuevo pedido</div>
+      <div class="form-group" style="position:relative">
+        <label>Usuario TikTok</label>
+        <input type="text" id="new-cliente" placeholder="@usuario" autocomplete="off"
+          oninput="handleClienteInput()" onblur="hideAutocomplete()" />
+        <div class="autocomplete-list" id="autocomplete-list" style="display:none"></div>
+      </div>
+      <div class="form-group">
+        <label>Estado inicial</label>
+        <select id="new-status">
+          <option value="No Pagado">No Pagado</option>
+          <option value="Pagado">Pagado</option>
+        </select>
+      </div>
+      <div id="bulk-items-container"></div>
+      <button class="btn add-bulk-btn" onclick="addBulkItem()">+ Agregar otro producto</button>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-block" onclick="createRecord()">Guardar pedido</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Por cobrar</div>
+        <div class="stat-value danger" id="stat-unpaid-amount">—</div>
+        <div class="stat-sub" id="stat-unpaid-count">— items</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Pagado, sin enviar</div>
+        <div class="stat-value warn" id="stat-paid-pending">—</div>
+        <div class="stat-sub" id="stat-paid-count">— items</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Alertas activas</div>
+        <div class="stat-value danger" id="stat-alerts">—</div>
+        <div class="stat-sub">+3d sin pagar / +7d sin enviar</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total en sistema</div>
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-sub">No pagado + pagado</div>
+      </div>
+    </div>
+
+    <div id="search-panel" style="display:none">
+      <div class="section-label">Resultados de búsqueda</div>
+      <div id="search-results"></div>
+    </div>
+
+    <div id="main-panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="activos" onclick="switchTab('activos')">Activos <span class="tab-badge" id="badge-activos">0</span></button>
+        <button class="tab" data-tab="cobrar" onclick="switchTab('cobrar')">Por cobrar <span class="tab-badge" id="badge-cobrar">0</span></button>
+        <button class="tab" data-tab="enviar" onclick="switchTab('enviar')">Por enviar <span class="tab-badge" id="badge-enviar">0</span></button>
+        <button class="tab" data-tab="archivo" onclick="switchTab('archivo')">Archivo <span class="tab-badge" id="badge-archivo">0</span></button>
+        <button class="tab" data-tab="analytics" onclick="switchTab('analytics')">Análisis <span class="tab-badge" id="badge-analytics" style="background:var(--purple-bg);color:var(--purple-text)">↗</span></button>
+      </div>
+
+      <div id="tab-activos"><div class="section-label">Todos los pedidos activos</div><div id="activos-list"></div></div>
+      <div id="tab-cobrar" style="display:none"><div class="section-label">Sin pagar · alerta después de 3 días</div><div id="cobrar-list"></div></div>
+      <div id="tab-enviar" style="display:none"><div class="section-label">Pagado · sin enviar · alerta después de 7 días</div><div id="enviar-list"></div></div>
+      <div id="tab-archivo" style="display:none"><div class="section-label">Enviados · últimas 2 semanas</div><div id="archivo-list"></div></div>
+
+      <div id="tab-analytics" style="display:none">
+        <div class="section-label">Resumen general</div>
+        <div class="analytics-grid">
+          <div class="analytics-card">
+            <div class="analytics-card-title">Ingresos enviados</div>
+            <div class="analytics-big" id="an-shipped-revenue">—</div>
+            <div class="analytics-sub" id="an-shipped-count">—</div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Dinero recibido (total)</div>
+            <div class="analytics-big" id="an-received-revenue">—</div>
+            <div class="analytics-sub" id="an-pending-ship">—</div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Este mes</div>
+            <div class="analytics-big" id="an-month-revenue">—</div>
+            <div class="analytics-sub" id="an-month-count">—</div>
+          </div>
+          <div class="analytics-card">
+            <div class="analytics-card-title">Esta semana</div>
+            <div class="analytics-big" id="an-week-revenue">—</div>
+            <div class="analytics-sub" id="an-week-count">—</div>
+          </div>
+        </div>
+        <div class="analytics-card" style="margin-bottom:1rem">
+          <div class="analytics-card-title">Desglose pendiente</div>
+          <div class="pending-breakdown">
+            <div class="breakdown-row">
+              <span class="breakdown-label"><span class="breakdown-dot" style="background:var(--red-text)"></span>Por cobrar (no pagado)</span>
+              <span id="an-breakdown-unpaid" style="font-weight:600">—</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-label"><span class="breakdown-dot" style="background:var(--amber-text)"></span>Pagado, pendiente de envío</span>
+              <span id="an-breakdown-paid" style="font-weight:600">—</span>
+            </div>
+            <div class="breakdown-row" style="border-top:0.5px solid var(--border);padding-top:8px;margin-top:4px">
+              <span style="font-weight:600">Total en sistema</span>
+              <span id="an-breakdown-total" style="font-weight:600">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="analytics-card">
+          <div class="analytics-card-title">Top clientes (por valor total)</div>
+          <div id="an-top-clients"></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<div id="modal-container"></div>
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
