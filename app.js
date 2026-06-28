@@ -12,7 +12,7 @@ function formatMXN(n) { if (n === undefined || n === null || n === '') return 'â
 function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit' }); }
 function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
 function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
-function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim() === 'Sin Nombre'; }
+function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 function renderNotas(notas) {
