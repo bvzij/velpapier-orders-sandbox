@@ -33,8 +33,9 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 .app-header { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 0.5px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 50; }
 
-.app-logo { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; color: red; }
+.app-logo { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; color: black; }
 .app-logo span { font-weight: 400; color: var(--text-muted); }
+.app-logo-sandbox { color: red; }
 
 .header-right { display: flex; align-items: center; gap: 10px; }
 
