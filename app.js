@@ -14,11 +14,68 @@ const FIELD_MAP = {
   'Fecha Creación': 'Created Date'
 };
 
-const STATUS_FLOW = ['No Pagado', 'Pagado', 'Empacado', 'Enviado'];
+const STATUS_FLOW = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
 function nextStatuses(current) {
   const idx = STATUS_FLOW.indexOf(current);
   if (idx === -1 || idx === STATUS_FLOW.length - 1) return [];
   return STATUS_FLOW.slice(idx + 1);
+}
+
+// ── UNDO / REDO (status changes only) ───────────────────────
+let undoStack = [];
+let redoStack = [];
+const MAX_UNDO_DEPTH = 20;
+
+function pushUndoEntry(entry) {
+  undoStack.push(entry);
+  if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+}
+
+async function performStatusUpdate(orderId, status) {
+  return apiPost({ action: 'update_order_status', order_id: orderId, status: status });
+}
+
+async function performUndo() {
+  if (!undoStack.length) return;
+  const entry = undoStack.pop();
+  try {
+    const result = await performStatusUpdate(entry.order_id, entry.from_status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
+    if (rec) rec.Status = entry.from_status;
+    redoStack.push(entry);
+    if (redoStack.length > MAX_UNDO_DEPTH) redoStack.shift();
+    updateUndoRedoButtons();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`↩ Deshecho: ${entry.to_status} → ${entry.from_status}`);
+  } catch (e) { undoStack.push(entry); showToast('Error: ' + e.message); }
+}
+
+async function performRedo() {
+  if (!redoStack.length) return;
+  const entry = redoStack.pop();
+  try {
+    const result = await performStatusUpdate(entry.order_id, entry.to_status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
+    if (rec) rec.Status = entry.to_status;
+    undoStack.push(entry);
+    if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
+    updateUndoRedoButtons();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`↪ Rehecho: ${entry.from_status} → ${entry.to_status}`);
+  } catch (e) { redoStack.push(entry); showToast('Error: ' + e.message); }
 }
 
 function statusPillClass(status) {
@@ -159,7 +216,7 @@ function runSearch(name) {
   const val = name.toLowerCase();
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
-  const active = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
   const archived = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
   const results = document.getElementById('search-results');
   results.innerHTML = '';
@@ -237,7 +294,7 @@ function showEditModal(id) {
     <input type="text" id="edit-cliente" value="${(r.Cliente || '').replace(/"/g, '&quot;')}" placeholder="Usuario TikTok" />
     <input type="text" id="edit-producto" value="${(r.Producto || '').replace(/"/g, '&quot;')}" placeholder="Producto" />
     <input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />
-    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Empacado" ${r.Status === 'Empacado' ? 'selected' : ''}>Empacado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
+    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
     <input type="text" id="edit-notas" value="${(r.Notas || '').replace(/"/g, '&quot;')}" placeholder="Notas (opcional)" />
   </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
   document.getElementById('edit-cancel-btn').addEventListener('click', closeModal);
@@ -296,46 +353,67 @@ function showStatusModal(id, currentStatus) {
 
 async function updateOrderStatusNew(id, status) {
   try {
-    const result = await apiPost({ action: 'update_order_status', id: id, status: status });
-    if (result.result !== 'updated') throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
+    const fromStatus = rec ? rec.Status : null;
+    const result = await performStatusUpdate(id, status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) rec.Status = status;
+    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast(`✓ Estado actualizado a ${status}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
+let bulkModalSelectedStatus = null;
+
 function showBulkStatusModal(cliente) {
-  const orders = allRecords.filter(r => (r.Cliente || '').toLowerCase() === cliente.toLowerCase() && ['No Pagado', 'Pagado', 'Empacado', 'Enviado'].includes(r.Status));
-  if (!orders.length) { showToast('Sin pedidos activos'); return; }
+  bulkModalSelectedStatus = null;
+  const orders = allRecords.filter(r => (r.Cliente || '').toLowerCase() === cliente.toLowerCase() && ['No Pagado', 'Pagado'].includes(r.Status));
+  if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
     <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
-    <div class="status-options">${['Pagado', 'Empacado', 'Enviado'].map(s => `<button class="btn btn-sm bulk-status-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
+    <div class="status-pills">${['No Pagado', 'Pagado', 'Enviado'].map(s => `<button class="status-pill-toggle" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
     <div class="bulk-order-list">${orders.map(r => `<label class="bulk-order-item"><input type="checkbox" class="bulk-order-check" data-id="${escapeHtml(String(r.ID))}" checked /><span class="bulk-order-product">${escapeHtml(r.Producto) || '—'}</span><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span></label>`).join('')}</div>
-    <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button></div>
+    <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button><button class="btn btn-primary" id="bulk-status-confirm-btn" disabled>Confirmar</button></div>
   </div></div>`;
   document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
   document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
-  c.querySelectorAll('.bulk-status-btn').forEach(btn => btn.addEventListener('click', () => applyBulkStatus(btn.dataset.status)));
+  c.querySelectorAll('.status-pill-toggle').forEach(btn => btn.addEventListener('click', () => {
+    bulkModalSelectedStatus = btn.dataset.status;
+    c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b === btn));
+    updateBulkConfirmState();
+  }));
+  c.querySelectorAll('.bulk-order-check').forEach(chk => chk.addEventListener('change', updateBulkConfirmState));
+  document.getElementById('bulk-status-confirm-btn').addEventListener('click', () => { if (bulkModalSelectedStatus) applyBulkStatus(bulkModalSelectedStatus); });
+}
+
+function updateBulkConfirmState() {
+  const anyChecked = document.querySelectorAll('.bulk-order-check:checked').length > 0;
+  const btn = document.getElementById('bulk-status-confirm-btn');
+  if (btn) btn.disabled = !(anyChecked && bulkModalSelectedStatus);
 }
 
 async function applyBulkStatus(status) {
   const ids = Array.from(document.querySelectorAll('.bulk-order-check:checked')).map(ch => ch.dataset.id);
   if (!ids.length) { showToast('Selecciona al menos un pedido'); return; }
   try {
+    const entries = [];
     for (const id of ids) {
-      const result = await apiPost({ action: 'update_order_status', id: id, status: status });
+      const rec = allRecords.find(r => String(r.ID) === id);
+      const fromStatus = rec ? rec.Status : null;
+      const result = await performStatusUpdate(id, status);
       if (result.result === 'updated') {
-        const rec = allRecords.find(r => String(r.ID) === id);
         if (rec) rec.Status = status;
+        entries.push({ order_id: id, from_status: fromStatus, to_status: status });
       }
     }
+    entries.forEach(pushUndoEntry);
     closeModal();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`✓ ${ids.length} pedidos actualizados a ${status}`);
+    showToast(`✓ ${entries.length} pedidos actualizados a ${status}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
@@ -449,8 +527,8 @@ function requestDelete(id, producto) {
   const label = /^https?:\/\/admin\.shopify\.com\//.test(producto || '') ? 'este pedido de Shopify' : producto;
   showConfirmModal(`¿Eliminar <strong>${label}</strong>? Esta acción no se puede deshacer.`, async () => {
     try {
-      const result = await apiPost({ action: 'delete', id: id });
-      if (!result.success) throw new Error(result.error || 'Error');
+      const result = await apiPost({ action: 'delete_order', order_id: id });
+      if (result.result !== 'deleted') throw new Error(result.error || 'Error');
       allRecords = allRecords.filter(r => r.ID !== id);
       renderAll();
       if (searchSelectedCliente) runSearch(searchSelectedCliente);
@@ -667,7 +745,7 @@ function renderAnalytics() {
 function renderClientList() {
   const el = document.getElementById('client-list-scroll');
   if (!el) return;
-  const active = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status));
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
   const seen = {};
   active.forEach(r => {
     const c = r.Cliente || 'Sin nombre';
@@ -695,7 +773,7 @@ function renderClientList() {
 
 function renderAll() {
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000);
-  const activos = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status));
+  const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado');
   const enviar = allRecords.filter(r => r.Status === 'Pagado');
   const archivo = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && new Date(r['Fecha Creación']) >= twoWeeksAgo);
@@ -739,5 +817,6 @@ function switchTab(tab) {
 
 // ── INIT ─────────────────────────────────────────────────────
 renderBulkItems();
+updateUndoRedoButtons();
 loadRecords();
 setInterval(loadRecords, 30000);

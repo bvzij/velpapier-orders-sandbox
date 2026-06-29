@@ -56,6 +56,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 .refresh-btn { background: none; border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; cursor: pointer; color: var(--text-muted); font-size: 13px; display: flex; align-items: center; gap: 5px; font-family: inherit; transition: all 0.15s; }
 .refresh-btn:hover { background: var(--surface2); color: var(--text); }
+.refresh-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.refresh-btn:disabled:hover { background: none; color: var(--text-muted); }
 
 .sidebar { padding: 1.25rem; border-right: 0.5px solid var(--border); background: var(--surface); position: sticky; top: 57px; height: calc(100vh - 57px); overflow-y: auto; }
 
@@ -188,11 +190,14 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .status-options { display: flex; flex-direction: column; gap: 6px; margin-bottom: 1rem; }
 
 .bulk-status-modal { width: 400px; }
-.bulk-status-modal .status-options { flex-direction: row; }
-.bulk-status-modal .status-options .btn { flex: 1; justify-content: center; }
+.status-pills { display: flex; gap: 6px; margin-bottom: 1rem; }
+.status-pill-toggle { flex: 1; padding: 7px 10px; font-size: 12px; font-weight: 500; border-radius: 20px; border: 0.5px solid var(--border-strong); background: var(--surface); color: var(--text-muted); cursor: pointer; font-family: inherit; transition: all 0.15s; }
+.status-pill-toggle:hover { background: var(--surface2); }
+.status-pill-toggle.active { background: var(--text); color: var(--surface); border-color: var(--text); }
 .bulk-order-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-bottom: 1rem; }
 .bulk-order-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; }
 .bulk-order-product { flex: 1; }
+.btn-primary:disabled { background: var(--surface2); color: var(--text-faint); border-color: var(--border); cursor: not-allowed; opacity: 1; }
 
 .customer-history-modal { width: 420px; }
 .customer-history-list { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 1rem; }
