@@ -8,8 +8,29 @@ const FIELD_MAP = {
   Precio: 'Price',
   Notas: 'Notes',
   Status: 'Status',
+  Channel: 'Channel',
+  CustomerId: 'Customer ID',
+  ShopifyOrderId: 'Shopify Order ID',
   'Fecha Creación': 'Created Date'
 };
+
+const STATUS_FLOW = ['No Pagado', 'Pagado', 'Empacado', 'Enviado'];
+function nextStatuses(current) {
+  const idx = STATUS_FLOW.indexOf(current);
+  if (idx === -1 || idx === STATUS_FLOW.length - 1) return [];
+  return STATUS_FLOW.slice(idx + 1);
+}
+
+function statusPillClass(status) {
+  if (status === 'No Pagado') return 'pill-nopagado';
+  if (status === 'Pagado') return 'pill-pagado';
+  return 'pill-enviado';
+}
+
+function channelTag(channel) {
+  const cls = channel === 'TikTok' ? 'channel-tiktok' : channel === 'Shopify' ? 'channel-shopify' : 'channel-manual';
+  return `<span class="channel-tag ${cls}">${escapeHtml(channel || 'Manual')}</span>`;
+}
 
 function mapFromApi(r) {
   return {
@@ -19,6 +40,9 @@ function mapFromApi(r) {
     Precio: Number(r['Price']) || 0,
     Notas: r['Notes'] || '',
     Status: r['Status'] || 'No Pagado',
+    Channel: r['Channel'] || 'Manual',
+    CustomerId: r['Customer ID'] || '',
+    ShopifyOrderId: r['Shopify Order ID'] || '',
     'Fecha Creación': r['Created Date']
   };
 }
@@ -223,6 +247,92 @@ function showEditModal(id) {
 
 function closeModal() { document.getElementById('modal-container').innerHTML = ''; pendingAction = null; }
 
+function showNewOrderModal() {
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div><div class="edit-form">
+    <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" />
+    <select id="no-channel">
+      <option value="Manual" selected>Manual</option>
+      <option value="TikTok">TikTok</option>
+      <option value="Shopify">Shopify</option>
+    </select>
+    <textarea id="no-products" rows="3" placeholder="2x Libreta A5 - Cobre&#10;1x Libreta A5 - Cafe"></textarea>
+    <input type="number" id="no-price" placeholder="Precio" min="0" step="1" />
+    <input type="text" id="no-notes" placeholder="Notas (opcional)" />
+    <input type="text" id="no-shopify-id" placeholder="Shopify Order ID (opcional)" />
+  </div><div class="modal-actions"><button class="btn" id="no-cancel-btn">Cancelar</button><button class="btn btn-primary" id="no-save-btn">Guardar</button></div></div></div>`;
+  document.getElementById('no-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('no-save-btn').addEventListener('click', submitNewOrder);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+}
+
+async function submitNewOrder() {
+  const username = document.getElementById('no-username').value.trim();
+  const channel = document.getElementById('no-channel').value;
+  const products = document.getElementById('no-products').value.trim();
+  const price = parseFloat(document.getElementById('no-price').value) || 0;
+  const notes = document.getElementById('no-notes').value.trim();
+  const shopifyId = document.getElementById('no-shopify-id').value.trim();
+  if (!username || !products) { showToast('Faltan datos'); return; }
+  try {
+    const fields = { 'Primary Username': username, Channel: channel, Products: products, Price: price, Status: 'No Pagado' };
+    if (notes) fields['Notes'] = notes;
+    if (shopifyId) fields['Shopify Order ID'] = shopifyId;
+    const result = await apiPost({ action: 'create_order', fields });
+    if (!result.success) throw new Error(result.error || 'Error');
+    allRecords.push({ ID: result.id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: 'No Pagado', CustomerId: '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
+    closeModal();
+    renderAll();
+    showToast('✓ Orden agregada');
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+function showStatusModal(id, currentStatus) {
+  const next = nextStatuses(currentStatus);
+  if (!next.length) { showToast('Sin siguiente estado'); return; }
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div><div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
+  c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => { updateOrderStatusNew(id, btn.dataset.status); closeModal(); }));
+  document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+}
+
+async function updateOrderStatusNew(id, status) {
+  try {
+    const result = await apiPost({ action: 'update_order_status', id: id, status: status });
+    if (!result.success) throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => r.ID === id);
+    if (rec) rec.Status = status;
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`✓ Estado actualizado a ${status}`);
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+function openCustomerHistory(customerId, displayName) {
+  if (!customerId) { showToast('Cliente sin ID asociado'); return; }
+  showCustomerHistoryModal(customerId, displayName);
+}
+
+async function showCustomerHistoryModal(customerId, displayName) {
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal customer-history-modal"><div class="modal-title">Historial de ${escapeHtml(displayName || customerId)}</div><div id="customer-history-list" class="customer-history-list"><div class="empty-state">Cargando...</div></div><div class="modal-actions"><button class="btn" id="history-close-btn">Cerrar</button></div></div></div>`;
+  document.getElementById('history-close-btn').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+  try {
+    const res = await fetch(`${API}?action=orders&customer_id=${encodeURIComponent(customerId)}`);
+    const data = await res.json();
+    const records = (data.records || []).map(mapFromApi).sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
+    const list = document.getElementById('customer-history-list');
+    if (!list) return;
+    if (!records.length) { list.innerHTML = '<div class="empty-state">Sin pedidos</div>'; return; }
+    list.innerHTML = records.map(r => `<div class="history-row"><div class="history-row-top"><span class="order-producto">${escapeHtml(r.Producto) || '—'}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}</span></div></div>`).join('');
+  } catch (e) {
+    const list = document.getElementById('customer-history-list');
+    if (list) list.innerHTML = '<div class="empty-state">Error al cargar historial</div>';
+  }
+}
+
 // ── API CALLS ────────────────────────────────────────────────
 async function apiPost(data) {
   const res = await fetch(API, {
@@ -262,7 +372,6 @@ async function updateStatus(id, status) {
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
-function requestStatusChange(id, status, label) { showConfirmModal(`¿Marcar este pedido como <strong>${label}</strong>?`, () => updateStatus(id, status)); }
 function requestUndo(id, currentStatus) { const p = previousStatus(currentStatus); if (!p) return; showConfirmModal(`¿Revertir a <strong>${p}</strong>?`, () => updateStatus(id, p)); }
 
 function requestRenameCliente(oldName) {
@@ -407,11 +516,7 @@ function renderOrderRow(r, showActions) {
   else if (isOverduePaid) rowClass += ' overdue-paid';
   if (isShipped(status)) rowClass += ' shipped-row';
 
-  let pillClass = 'pill-nopagado', pillText = `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}`;
-  if (status === 'Pagado') { pillClass = 'pill-pagado'; pillText = `Pagado${isOverduePaid ? ' ⚠' : ''}`; }
-  if (status === 'Empacado') { pillClass = 'pill-enviado'; pillText = 'Empacado'; }
-  if (status === 'Enviado') { pillClass = 'pill-enviado'; pillText = 'Enviado'; }
-  if (status === 'Archivado') { pillClass = 'pill-enviado'; pillText = 'Archivado'; }
+  let pillClass = statusPillClass(status), pillText = status === 'No Pagado' ? `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}` : status === 'Pagado' ? `Pagado${isOverduePaid ? ' ⚠' : ''}` : status;
 
   const metaParts = [formatDate(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
   const notasHtml = renderNotas(r.Notas);
@@ -421,7 +526,9 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  info.innerHTML = `<div class="order-producto">${escapeHtml(r.Producto) || '—'}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${escapeHtml(r.Producto) || '—'}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  const usernameEl = info.querySelector('.order-username');
+  if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
 
   const hoverZone = document.createElement('div');
   hoverZone.className = 'row-hover-zone';
@@ -452,13 +559,9 @@ function renderOrderRow(r, showActions) {
 
   const actionCell = document.createElement('div');
   actionCell.className = 'order-actions';
-  if (showActions && status === 'No Pagado') {
-    const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-pagado'; btn.textContent = 'Pagado';
-    btn.addEventListener('click', () => requestStatusChange(id, 'Pagado', 'Pagado'));
-    actionCell.appendChild(btn);
-  } else if (showActions && status === 'Pagado') {
-    const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Enviado';
-    btn.addEventListener('click', () => requestStatusChange(id, 'Enviado', 'Enviado'));
+  if (showActions && nextStatuses(status).length) {
+    const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Estado ▾';
+    btn.addEventListener('click', () => showStatusModal(id, status));
     actionCell.appendChild(btn);
   }
 
