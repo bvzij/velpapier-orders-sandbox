@@ -56,7 +56,6 @@
         <option value="newest">Más reciente primero</option>
         <option value="oldest">Más antiguo primero</option>
       </select>
-      <button class="btn btn-primary" onclick="showNewOrderModal()">+ Nueva orden</button>
       <button class="refresh-btn" onclick="loadRecords()">
         <svg id="refresh-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
         Actualizar
@@ -78,10 +77,11 @@
         <div class="autocomplete-list" id="autocomplete-list" style="display:none"></div>
       </div>
       <div class="form-group">
-        <label>Estado inicial</label>
-        <select id="new-status">
-          <option value="No Pagado">No Pagado</option>
-          <option value="Pagado">Pagado</option>
+        <label>Canal</label>
+        <select id="new-channel">
+          <option value="Manual" selected>Manual</option>
+          <option value="TikTok">TikTok</option>
+          <option value="Shopify">Shopify</option>
         </select>
       </div>
       <div id="bulk-items-container"></div>

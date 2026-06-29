@@ -187,6 +187,13 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 .status-options { display: flex; flex-direction: column; gap: 6px; margin-bottom: 1rem; }
 
+.bulk-status-modal { width: 400px; }
+.bulk-status-modal .status-options { flex-direction: row; }
+.bulk-status-modal .status-options .btn { flex: 1; justify-content: center; }
+.bulk-order-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-bottom: 1rem; }
+.bulk-order-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; }
+.bulk-order-product { flex: 1; }
+
 .customer-history-modal { width: 420px; }
 .customer-history-list { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 1rem; }
 .history-row { border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }

@@ -275,12 +275,9 @@ async function submitNewOrder() {
   const shopifyId = document.getElementById('no-shopify-id').value.trim();
   if (!username || !products) { showToast('Faltan datos'); return; }
   try {
-    const fields = { 'Primary Username': username, Channel: channel, Products: products, Price: price, Status: 'No Pagado' };
-    if (notes) fields['Notes'] = notes;
-    if (shopifyId) fields['Shopify Order ID'] = shopifyId;
-    const result = await apiPost({ action: 'create_order', fields });
-    if (!result.success) throw new Error(result.error || 'Error');
-    allRecords.push({ ID: result.id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: 'No Pagado', CustomerId: '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
+    const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
+    if (result.result !== 'created') throw new Error(result.error || 'Error');
+    allRecords.push({ ID: result.order_id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
     closeModal();
     renderAll();
     showToast('✓ Orden agregada');
@@ -300,12 +297,45 @@ function showStatusModal(id, currentStatus) {
 async function updateOrderStatusNew(id, status) {
   try {
     const result = await apiPost({ action: 'update_order_status', id: id, status: status });
-    if (!result.success) throw new Error(result.error || 'Error');
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
     if (rec) rec.Status = status;
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast(`✓ Estado actualizado a ${status}`);
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+function showBulkStatusModal(cliente) {
+  const orders = allRecords.filter(r => (r.Cliente || '').toLowerCase() === cliente.toLowerCase() && ['No Pagado', 'Pagado', 'Empacado', 'Enviado'].includes(r.Status));
+  if (!orders.length) { showToast('Sin pedidos activos'); return; }
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
+    <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
+    <div class="status-options">${['Pagado', 'Empacado', 'Enviado'].map(s => `<button class="btn btn-sm bulk-status-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
+    <div class="bulk-order-list">${orders.map(r => `<label class="bulk-order-item"><input type="checkbox" class="bulk-order-check" data-id="${escapeHtml(String(r.ID))}" checked /><span class="bulk-order-product">${escapeHtml(r.Producto) || '—'}</span><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span></label>`).join('')}</div>
+    <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button></div>
+  </div></div>`;
+  document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+  c.querySelectorAll('.bulk-status-btn').forEach(btn => btn.addEventListener('click', () => applyBulkStatus(btn.dataset.status)));
+}
+
+async function applyBulkStatus(status) {
+  const ids = Array.from(document.querySelectorAll('.bulk-order-check:checked')).map(ch => ch.dataset.id);
+  if (!ids.length) { showToast('Selecciona al menos un pedido'); return; }
+  try {
+    for (const id of ids) {
+      const result = await apiPost({ action: 'update_order_status', id: id, status: status });
+      if (result.result === 'updated') {
+        const rec = allRecords.find(r => String(r.ID) === id);
+        if (rec) rec.Status = status;
+      }
+    }
+    closeModal();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`✓ ${ids.length} pedidos actualizados a ${status}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
@@ -415,22 +445,6 @@ function requestRenameCliente(oldName) {
   document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
-function requestBulkUpdate(cliente, fromStatus, toStatus, toLabel) {
-  const targets = allRecords.filter(r => (r.Cliente || '').toLowerCase() === cliente.toLowerCase() && r.Status === fromStatus);
-  if (!targets.length) { showToast('Sin pedidos para actualizar'); return; }
-  showConfirmModal(`¿Marcar todos los pedidos de <strong>${cliente}</strong> como <strong>${toLabel}</strong>? (${targets.length} items)`, async () => {
-    try {
-      for (const r of targets) {
-        const result = await apiPost({ action: 'update', id: r.ID, fields: mapToApiFields({ Status: toStatus }) });
-        if (result.success) r.Status = toStatus;
-      }
-      renderAll();
-      if (searchSelectedCliente) runSearch(searchSelectedCliente);
-      showToast(`✓ ${targets.length} pedidos actualizados`);
-    } catch (e) { showToast('Error: ' + e.message); }
-  });
-}
-
 function requestDelete(id, producto) {
   const label = /^https?:\/\/admin\.shopify\.com\//.test(producto || '') ? 'este pedido de Shopify' : producto;
   showConfirmModal(`¿Eliminar <strong>${label}</strong>? Esta acción no se puede deshacer.`, async () => {
@@ -466,20 +480,20 @@ async function saveEdit(id) {
 
 async function createRecord() {
   const cliente = document.getElementById('new-cliente').value.trim();
-  const status = document.getElementById('new-status').value;
+  const channel = document.getElementById('new-channel').value;
   if (!cliente) { showToast('Falta el usuario TikTok'); return; }
   saveBulkState();
   const items = bulkItems.filter(item => item.producto.trim());
   if (!items.length) { showToast('Falta al menos un producto'); return; }
   try {
     for (const item of items) {
-      const result = await apiPost({ action: 'create', fields: mapToApiFields({ Cliente: cliente, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Status: status, ...(item.notas && { Notas: item.notas }) }) });
-      if (result.success) {
-        allRecords.push({ ID: result.id, Cliente: cliente, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: status, 'Fecha Creación': new Date().toISOString() });
+      const result = await apiPost({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '' });
+      if (result.result === 'created') {
+        allRecords.push({ ID: result.order_id, Cliente: cliente, Channel: channel, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', 'Fecha Creación': new Date().toISOString() });
       }
     }
     document.getElementById('new-cliente').value = '';
-    document.getElementById('new-status').value = 'No Pagado';
+    document.getElementById('new-channel').value = 'Manual';
     bulkItems = [{ producto: '', precio: '', notas: '' }];
     renderBulkItems();
     renderAll();
@@ -592,8 +606,6 @@ function renderGrouped(records, containerId, showActions) {
   order.forEach(cliente => {
     const items = groups[cliente];
     const unpaid = items.filter(r => r.Status === 'No Pagado').reduce((s, r) => s + (r.Precio || 0), 0);
-    const hasUnpaid = items.some(r => r.Status === 'No Pagado');
-    const hasPaid = items.some(r => r.Status === 'Pagado');
 
     const group = document.createElement('div'); group.className = 'customer-group';
     const header = document.createElement('div'); header.className = 'customer-header' + (isUnnamedCliente(cliente) ? ' customer-header--unnamed' : '');
@@ -604,14 +616,9 @@ function renderGrouped(records, containerId, showActions) {
     renameBtn.className = 'btn btn-xs btn-edit'; renameBtn.textContent = '✎'; renameBtn.title = 'Cambiar nombre';
     renameBtn.addEventListener('click', () => requestRenameCliente(cliente));
     bulk.appendChild(renameBtn);
-    if (showActions && hasUnpaid) {
-      const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-pagado'; btn.textContent = 'Todo pagado';
-      btn.addEventListener('click', () => requestBulkUpdate(cliente, 'No Pagado', 'Pagado', 'Pagado'));
-      bulk.appendChild(btn);
-    }
-    if (showActions && hasPaid) {
-      const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Todo enviado';
-      btn.addEventListener('click', () => requestBulkUpdate(cliente, 'Pagado', 'Enviado', 'Enviado'));
+    if (showActions) {
+      const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
+      btn.addEventListener('click', () => showBulkStatusModal(cliente));
       bulk.appendChild(btn);
     }
     group.appendChild(header);
