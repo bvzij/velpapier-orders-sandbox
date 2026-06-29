@@ -135,8 +135,8 @@ function runSearch(name) {
   const val = name.toLowerCase();
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
-  const active = allRecords.filter(r => r.Status !== 'Archivado' && (r.Cliente || '').toLowerCase() === val);
-  const archived = allRecords.filter(r => r.Status === 'Archivado' && (r.Cliente || '').toLowerCase() === val);
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
+  const archived = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
   const results = document.getElementById('search-results');
   results.innerHTML = '';
   if (!active.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
@@ -557,7 +557,7 @@ function renderAnalytics() {
 function renderClientList() {
   const el = document.getElementById('client-list-scroll');
   if (!el) return;
-  const active = allRecords.filter(r => r.Status !== 'Archivado');
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status));
   const seen = {};
   active.forEach(r => {
     const c = r.Cliente || 'Sin nombre';
@@ -585,10 +585,10 @@ function renderClientList() {
 
 function renderAll() {
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000);
-  const activos = allRecords.filter(r => r.Status !== 'Archivado');
+  const activos = allRecords.filter(r => ['No Pagado', 'Pagado', 'Empacado'].includes(r.Status));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado');
   const enviar = allRecords.filter(r => r.Status === 'Pagado');
-  const archivo = allRecords.filter(r => r.Status === 'Archivado' && new Date(r['Fecha Creación']) >= twoWeeksAgo);
+  const archivo = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && new Date(r['Fecha Creación']) >= twoWeeksAgo);
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
