@@ -42,7 +42,11 @@ function updateUndoRedoButtons() {
 }
 
 async function performStatusUpdate(orderId, status) {
-  return apiPost({ action: 'update_order_status', order_id: orderId, status: status });
+  const payload = { action: 'update_order_status', order_id: orderId, status: status };
+  alert('Sending: ' + JSON.stringify(payload));
+  const result = await apiPost(payload);
+  alert('Received: ' + JSON.stringify(result));
+  return result;
 }
 
 async function performUndo() {
