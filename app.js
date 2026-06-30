@@ -224,12 +224,11 @@ function runSearch(name) {
   function appendGroup(records, labelText, showActs) {
     if (!records.length) return;
     if (labelText) { const l = document.createElement('div'); l.className = 'section-label'; l.textContent = labelText; results.appendChild(l); }
-    const { groups, order } = groupByCliente(records);
-    order.forEach(cliente => {
-      const items = groups[cliente];
+    groupByCliente(records).forEach(grp => {
+      const cliente = grp.name;
       const group = document.createElement('div'); group.className = 'customer-group';
       group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div></div>`;
-      items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
+      grp.items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
       results.appendChild(group);
     });
   }
@@ -367,9 +366,10 @@ async function updateOrderStatusNew(id, status) {
 
 let bulkModalSelectedStatus = null;
 
-function showBulkStatusModal(cliente) {
+function showBulkStatusModal(group) {
   bulkModalSelectedStatus = null;
-  const orders = allRecords.filter(r => (r.Cliente || '').toLowerCase() === cliente.toLowerCase() && ['No Pagado', 'Pagado'].includes(r.Status));
+  const cliente = group.name;
+  const orders = group.items.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
   if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
@@ -482,7 +482,9 @@ async function updateStatus(id, status) {
 
 function requestUndo(id, currentStatus) { const p = previousStatus(currentStatus); if (!p) return; showConfirmModal(`¿Revertir a <strong>${p}</strong>?`, () => updateStatus(id, p)); }
 
-function requestRenameCliente(oldName) {
+function requestRenameCliente(group) {
+  const oldName = group.name;
+  const targets = group.items;
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Cambiar nombre de cliente</div><div class="edit-form" style="position:relative"><input type="text" id="rename-cliente" value="${oldName.replace(/"/g, '&quot;')}" placeholder="Nuevo nombre" autocomplete="off" /><div class="autocomplete-list" id="rename-autocomplete-list" style="display:none"></div></div><div class="modal-actions"><button class="btn" id="rename-cancel-btn">Cancelar</button><button class="btn btn-primary" id="rename-save-btn">Guardar</button></div></div></div>`;
   const input = document.getElementById('rename-cliente');
@@ -508,7 +510,6 @@ function requestRenameCliente(oldName) {
     const newName = input.value.trim();
     if (!newName) { showToast('Falta el nombre'); return; }
     if (newName === oldName) { closeModal(); return; }
-    const targets = allRecords.filter(r => (r.Cliente || 'Sin nombre').toLowerCase() === oldName.toLowerCase());
     closeModal();
     try {
       for (const r of targets) {
@@ -663,26 +664,34 @@ function renderOrderRow(r, showActions) {
   return row;
 }
 
+// Grouping key: Customer ID when present, otherwise fall back to the
+// username (for orders whose customer hasn't been resolved yet).
+function customerGroupKey(r) {
+  const cid = (r.CustomerId || '').trim();
+  if (cid) return 'cid:' + cid.toLowerCase();
+  return 'user:' + (r.Cliente || 'Sin nombre').trim().toLowerCase();
+}
+
+// Returns an ordered array of { key, name, items }. Orders are grouped by
+// Customer ID so aliases of the same customer collapse into one group; the
+// representative Primary Username is kept as the display label.
 function groupByCliente(records) {
   const groups = {}, order = [];
   sortRecords(records).forEach(r => {
-    const c = r.Cliente || 'Sin nombre';
-    const key = c.toLowerCase();
-    if (!groups[key]) { groups[key] = { name: c, items: [] }; order.push(key); }
+    const key = customerGroupKey(r);
+    if (!groups[key]) { groups[key] = { key, name: r.Cliente || 'Sin nombre', items: [] }; order.push(key); }
     groups[key].items.push(r);
   });
-  const out = {};
-  order.forEach(k => { out[groups[k].name] = groups[k].items; });
-  return { groups: out, order: order.map(k => groups[k].name) };
+  return order.map(k => groups[k]);
 }
 
 function renderGrouped(records, containerId, showActions) {
   const el = document.getElementById(containerId);
   el.innerHTML = '';
   if (!records.length) { el.innerHTML = '<div class="empty-state">Sin pedidos aquí</div>'; return; }
-  const { groups, order } = groupByCliente(records);
-  order.forEach(cliente => {
-    const items = groups[cliente];
+  groupByCliente(records).forEach(grp => {
+    const cliente = grp.name;
+    const items = grp.items;
     const unpaid = items.filter(r => r.Status === 'No Pagado').reduce((s, r) => s + (r.Precio || 0), 0);
 
     const group = document.createElement('div'); group.className = 'customer-group';
@@ -692,11 +701,11 @@ function renderGrouped(records, containerId, showActions) {
     const bulk = header.querySelector('.customer-bulk-actions');
     const renameBtn = document.createElement('button');
     renameBtn.className = 'btn btn-xs btn-edit'; renameBtn.textContent = '✎'; renameBtn.title = 'Cambiar nombre';
-    renameBtn.addEventListener('click', () => requestRenameCliente(cliente));
+    renameBtn.addEventListener('click', () => requestRenameCliente(grp));
     bulk.appendChild(renameBtn);
     if (showActions) {
       const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
-      btn.addEventListener('click', () => showBulkStatusModal(cliente));
+      btn.addEventListener('click', () => showBulkStatusModal(grp));
       bulk.appendChild(btn);
     }
     group.appendChild(header);
