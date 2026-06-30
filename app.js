@@ -469,10 +469,12 @@ async function loadRecords() {
 
 async function updateStatus(id, status) {
   try {
-    const result = await apiPost({ action: 'update', id: id, fields: mapToApiFields({ Status: status }) });
-    if (!result.success) throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
+    const fromStatus = rec ? rec.Status : null;
+    const result = await performStatusUpdate(id, status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) rec.Status = status;
+    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     const msgs = { 'Pagado': '✓ Marcado como pagado', 'Enviado': '✓ Marcado como enviado', 'No Pagado': '↩ Revertido a No Pagado' };
@@ -513,7 +515,8 @@ function requestRenameCliente(group) {
     closeModal();
     try {
       for (const r of targets) {
-        await apiPost({ action: 'update', id: r.ID, fields: mapToApiFields({ Cliente: newName }) });
+        const result = await apiPost({ action: 'update_order', order_id: r.ID, fields: mapToApiFields({ Cliente: newName }) });
+        if (result.result !== 'updated') throw new Error(result.error || 'Error');
         r.Cliente = newName;
       }
       renderAll();
@@ -546,8 +549,8 @@ async function saveEdit(id) {
   const notas = document.getElementById('edit-notas').value.trim();
   if (!cliente || !producto) { showToast('Faltan datos'); return; }
   try {
-    const result = await apiPost({ action: 'update', id: id, fields: mapToApiFields({ Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas }) });
-    if (!result.success) throw new Error(result.error || 'Error');
+    const result = await apiPost({ action: 'update_order', order_id: id, fields: mapToApiFields({ Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas }) });
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
     if (rec) { rec.Cliente = cliente; rec.Producto = producto; rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
     closeModal();
