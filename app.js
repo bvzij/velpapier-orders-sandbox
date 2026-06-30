@@ -1,4 +1,4 @@
-const API = 'https://script.google.com/macros/s/AKfycbyxJCmskK_AcYLEW_jBd7qE3nFG4gt1vZn5SJHJhXJ3BXG3VBzSddTv8H2IW_AKGJA0eA/exec';
+const API = 'https://script.google.com/macros/s/AKfycbyDArHQIjYhN_Hy_U1CrXbklXLjGabNIuk7u9eisNrQHXG3v_UBGZcXgZm8ipm4bI7c/exec';
 
 // Maps internal field names (used throughout the UI) to the new Orders sheet column names.
 const FIELD_MAP = {
@@ -43,10 +43,7 @@ function updateUndoRedoButtons() {
 
 async function performStatusUpdate(orderId, status) {
   const payload = { action: 'update_order_status', order_id: orderId, status: status };
-  alert('Sending: ' + JSON.stringify(payload));
-  const result = await apiPost(payload);
-  alert('Received: ' + JSON.stringify(result));
-  return result;
+  return apiPost(payload);
 }
 
 async function performUndo() {
@@ -580,19 +577,21 @@ async function saveEdit(id) {
 async function createRecord() {
   const cliente = document.getElementById('new-cliente').value.trim();
   const channel = document.getElementById('new-channel').value;
+  const status = document.getElementById('new-status').value;
   if (!cliente) { showToast('Falta el usuario TikTok'); return; }
   saveBulkState();
   const items = bulkItems.filter(item => item.producto.trim());
   if (!items.length) { showToast('Falta al menos un producto'); return; }
   try {
     for (const item of items) {
-      const result = await apiPost({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '' });
+      const result = await apiPost({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '', status });
       if (result.result === 'created') {
         allRecords.push({ ID: result.order_id, Cliente: cliente, Channel: channel, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', 'Fecha Creación': new Date().toISOString() });
       }
     }
     document.getElementById('new-cliente').value = '';
     document.getElementById('new-channel').value = 'Manual';
+    document.getElementById('new-status').value = 'No Pagado';
     bulkItems = [{ producto: '', precio: '', notas: '' }];
     renderBulkItems();
     renderAll();
