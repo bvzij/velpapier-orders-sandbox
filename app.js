@@ -455,16 +455,17 @@ async function loadRecords() {
   const icon = document.getElementById('refresh-icon');
   icon.classList.add('spinning');
   try {
-    // Two server-filtered requests instead of one unfiltered fetch — the Apps
-    // Script skips JSON-ifying any row that doesn't match. Together these
-    // statuses cover every record (active flow + archived), matching what a
-    // full unfiltered fetch used to return.
-    const [activeRes, archivedRes] = await Promise.all([
-      fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado,Enviado')),
+    // Three server-filtered requests instead of one unfiltered fetch — the
+    // Apps Script skips JSON-ifying any row that doesn't match. Together
+    // these statuses cover every record (active, shipped, archived),
+    // matching what a full unfiltered fetch used to return.
+    const [activeRes, enviadoRes, archivedRes] = await Promise.all([
+      fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+      fetch(API + '?action=orders&status=Enviado'),
       fetch(API + '?action=orders&status=Archivado')
     ]);
-    const [activeData, archivedData] = await Promise.all([activeRes.json(), archivedRes.json()]);
-    allRecords = [...(activeData.records || []), ...(archivedData.records || [])].map(mapFromApi);
+    const [activeData, enviadoData, archivedData] = await Promise.all([activeRes.json(), enviadoRes.json(), archivedRes.json()]);
+    allRecords = [...(activeData.records || []), ...(enviadoData.records || []), ...(archivedData.records || [])].map(mapFromApi);
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
@@ -791,15 +792,16 @@ function renderClientList() {
 }
 
 function renderAll() {
-  const twoWeeksAgo = new Date(Date.now() - 14 * 86400000);
   const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado');
   const enviar = allRecords.filter(r => r.Status === 'Pagado');
-  const archivo = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && new Date(r['Fecha Creación']) >= twoWeeksAgo);
+  const enviado = allRecords.filter(r => r.Status === 'Enviado');
+  const archivo = allRecords.filter(r => r.Status === 'Archivado');
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
   document.getElementById('badge-enviar').textContent = enviar.length;
+  document.getElementById('badge-enviado').textContent = enviado.length;
   document.getElementById('badge-archivo').textContent = archivo.length;
 
   const unpaidTotal = cobrar.reduce((s, r) => s + (r.Precio || 0), 0);
@@ -820,6 +822,7 @@ function renderAll() {
   renderGrouped(activos, 'activos-list', true);
   renderGrouped(cobrar, 'cobrar-list', true);
   renderGrouped(enviar, 'enviar-list', true);
+  renderGrouped(enviado, 'enviado-list', true);
   renderGrouped(archivo, 'archivo-list', false);
   renderAnalytics();
   renderClientList();
@@ -829,7 +832,7 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'archivo', 'analytics'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'analytics'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
   });
 }
