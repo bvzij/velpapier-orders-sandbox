@@ -277,6 +277,7 @@ function createOrder(body) {
     nowISO(),
     '',   // Packed Date — filled later from mobile QC
     '',   // Shipped Date — filled later via API or manually
+    '',   // Archive Date — filled later when archived
     body.linked_shipment || ''
   ];
 
@@ -437,6 +438,7 @@ function migrateOrder(body) {
     body.created_date || nowISO(),
     body.packed_date || '',
     body.shipped_date || '',
+    body.archive_date || '',    // Archive Date
     ''                           // Linked Shipment
   ];
 

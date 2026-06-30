@@ -11,7 +11,8 @@ const FIELD_MAP = {
   Channel: 'Channel',
   CustomerId: 'Customer ID',
   ShopifyOrderId: 'Shopify Order ID',
-  'Fecha Creación': 'Created Date'
+  'Fecha Creación': 'Created Date',
+  ArchiveDate: 'Archive Date'
 };
 
 const STATUS_FLOW = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
@@ -100,6 +101,7 @@ function mapFromApi(r) {
     Channel: r['Channel'] || 'Manual',
     CustomerId: r['Customer ID'] || '',
     ShopifyOrderId: r['Shopify Order ID'] || '',
+    ArchiveDate: r['Archive Date'] || '',
     'Fecha Creación': r['Created Date']
   };
 }
@@ -121,7 +123,7 @@ let bulkItems = [{ producto: '', precio: '', notas: '' }];
 // ── HELPERS ──────────────────────────────────────────────────
 function daysSince(dateStr) { if (!dateStr) return 0; return Math.floor((new Date() - new Date(dateStr)) / 86400000); }
 function formatMXN(n) { if (n === undefined || n === null || n === '') return '—'; return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 }); }
-function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit' }); }
+function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'America/Mexico_City' }); }
 function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
 function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
@@ -434,7 +436,10 @@ async function showCustomerHistoryModal(customerId, displayName) {
     const list = document.getElementById('customer-history-list');
     if (!list) return;
     if (!records.length) { list.innerHTML = '<div class="empty-state">Sin pedidos</div>'; return; }
-    list.innerHTML = records.map(r => `<div class="history-row"><div class="history-row-top"><span class="order-producto">${escapeHtml(r.Producto) || '—'}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}</span></div></div>`).join('');
+    list.innerHTML = records.map(r => {
+      const archiveInfo = r.ArchiveDate ? ` · Archivado: ${formatDate(r.ArchiveDate)}` : '';
+      return `<div class="history-row"><div class="history-row-top"><span class="order-producto">${escapeHtml(r.Producto) || '—'}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}${archiveInfo}</span></div></div>`;
+    }).join('');
   } catch (e) {
     const list = document.getElementById('customer-history-list');
     if (list) list.innerHTML = '<div class="empty-state">Error al cargar historial</div>';
