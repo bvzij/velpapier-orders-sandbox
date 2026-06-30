@@ -455,9 +455,16 @@ async function loadRecords() {
   const icon = document.getElementById('refresh-icon');
   icon.classList.add('spinning');
   try {
-    const res = await fetch(API + '?action=orders');
-    const data = await res.json();
-    allRecords = (data.records || []).map(mapFromApi);
+    // Two server-filtered requests instead of one unfiltered fetch — the Apps
+    // Script skips JSON-ifying any row that doesn't match. Together these
+    // statuses cover every record (active flow + archived), matching what a
+    // full unfiltered fetch used to return.
+    const [activeRes, archivedRes] = await Promise.all([
+      fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado,Enviado')),
+      fetch(API + '?action=orders&status=Archivado')
+    ]);
+    const [activeData, archivedData] = await Promise.all([activeRes.json(), archivedRes.json()]);
+    allRecords = [...(activeData.records || []), ...(archivedData.records || [])].map(mapFromApi);
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
