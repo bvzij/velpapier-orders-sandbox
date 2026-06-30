@@ -116,6 +116,7 @@ function mapToApiFields(fields) {
 function isShipped(status) { return status === 'Enviado' || status === 'Archivado'; }
 
 let allRecords = [];
+let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let currentTab = 'activos';
 let currentSort = 'default';
 let pendingAction = null;
@@ -181,10 +182,10 @@ function handleSearchInput() {
   const list = document.getElementById('search-autocomplete-list');
   updateClearBtn();
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().includes(val));
+  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().startsWith(val)).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
-  clientes.slice(0, 8).forEach(c => {
+  clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
     item.innerHTML = `<span>${c.name}</span><span class="autocomplete-freq">${c.count} pedido${c.count !== 1 ? 's' : ''}</span>`;
@@ -247,10 +248,10 @@ function handleClienteInput() {
   const val = document.getElementById('new-cliente').value.trim().toLowerCase();
   const list = document.getElementById('autocomplete-list');
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().includes(val));
+  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().startsWith(val)).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
-  clientes.slice(0, 6).forEach(c => {
+  clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
     item.innerHTML = `<span>${c.name}</span><span class="autocomplete-freq">${c.count} pedido${c.count !== 1 ? 's' : ''}</span>`;
@@ -273,7 +274,10 @@ function getUniqueClientes() {
   const seen = {};
   allRecords.forEach(r => {
     const c = r.Cliente;
-    if (c) { const k = c.toLowerCase(); if (!seen[k]) seen[k] = { name: c, count: 0 }; seen[k].count++; }
+    if (!c) return;
+    const k = c.toLowerCase();
+    if (!seen[k]) seen[k] = { name: c, count: 0 };
+    if (r.Channel === 'TikTok' || r.Channel === 'Shopify') seen[k].count++;
   });
   return Object.values(seen).sort((a, b) => b.count - a.count);
 }
@@ -465,13 +469,19 @@ async function loadRecords() {
     // Apps Script skips JSON-ifying any row that doesn't match. Together
     // these statuses cover every record (active, shipped, archived),
     // matching what a full unfiltered fetch used to return.
-    const [activeRes, enviadoRes, archivedRes] = await Promise.all([
+    const [activeRes, enviadoRes, archivedRes, customersRes] = await Promise.all([
       fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
       fetch(API + '?action=orders&status=Enviado'),
-      fetch(API + '?action=orders&status=Archivado')
+      fetch(API + '?action=orders&status=Archivado'),
+      fetch(API + '?action=customers')
     ]);
-    const [activeData, enviadoData, archivedData] = await Promise.all([activeRes.json(), enviadoRes.json(), archivedRes.json()]);
+    const [activeData, enviadoData, archivedData, customersData] = await Promise.all([activeRes.json(), enviadoRes.json(), archivedRes.json(), customersRes.json()]);
     allRecords = [...(activeData.records || []), ...(enviadoData.records || []), ...(archivedData.records || [])].map(mapFromApi);
+    allCustomers = {};
+    (customersData.records || []).forEach(c => {
+      const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
+      aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
+    });
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
@@ -508,10 +518,10 @@ function requestRenameCliente(group) {
   input.addEventListener('input', () => {
     const val = input.value.trim().toLowerCase();
     if (!val) { list.style.display = 'none'; return; }
-    const clientes = getUniqueClientes().filter(cl => cl.name.toLowerCase().includes(val) && cl.name !== oldName);
+    const clientes = getUniqueClientes().filter(cl => cl.name.toLowerCase().startsWith(val) && cl.name !== oldName).slice(0, 8);
     if (!clientes.length) { list.style.display = 'none'; return; }
     list.innerHTML = '';
-    clientes.slice(0, 6).forEach(cl => {
+    clientes.forEach(cl => {
       const item = document.createElement('div');
       item.className = 'autocomplete-item';
       item.innerHTML = `<span>${cl.name}</span><span class="autocomplete-freq">${cl.count} pedido${cl.count !== 1 ? 's' : ''}</span>`;
@@ -715,7 +725,9 @@ function renderGrouped(records, containerId, showActions) {
 
     const group = document.createElement('div'); group.className = 'customer-group';
     const header = document.createElement('div'); header.className = 'customer-header' + (isUnnamedCliente(cliente) ? ' customer-header--unnamed' : '');
-    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+    const custData = allCustomers[(cliente || '').toLowerCase()];
+    const shipBadge = custData && custData.shipmentCount > 0 ? ` <span class="shipment-count">(${custData.shipmentCount})</span>` : '';
+    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
 
     const bulk = header.querySelector('.customer-bulk-actions');
     const renameBtn = document.createElement('button');
