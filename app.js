@@ -122,7 +122,7 @@ let archivedRecords = [];
 let tabDataLoaded = { enviado: false, archivo: false };
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let currentTab = 'activos';
-let currentSort = 'default';
+let currentSort = 'newest';
 let pendingAction = null;
 let bulkItems = [{ producto: '', precio: '', notas: '' }];
 
