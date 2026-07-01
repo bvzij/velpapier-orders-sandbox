@@ -116,19 +116,11 @@ function mapToApiFields(fields) {
 function isShipped(status) { return status === 'Enviado' || status === 'Archivado'; }
 
 let allRecords = [];
-let activeRecords = [];   // No Pagado + Pagado — loaded on init
-let enviadoRecords = [];  // Enviado — loaded lazily on first tab visit
-let archivedRecords = []; // Archivado — loaded lazily on first tab visit
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
-let tabDataLoaded = { enviado: false, archivo: false };
 let currentTab = 'activos';
 let currentSort = 'default';
 let pendingAction = null;
 let bulkItems = [{ producto: '', precio: '', notas: '' }];
-
-function rebuildAllRecords() {
-  allRecords = [...activeRecords, ...enviadoRecords, ...archivedRecords];
-}
 
 // ── HELPERS ──────────────────────────────────────────────────
 function daysSince(dateStr) { if (!dateStr) return 0; return Math.floor((new Date() - new Date(dateStr)) / 86400000); }
@@ -469,47 +461,27 @@ async function apiPost(data) {
   return res.json();
 }
 
-// ── DATA FETCHING ─────────────────────────────────────────────
-async function fetchActive() {
-  const [ordersRes, customersRes] = await Promise.all([
-    fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
-    fetch(API + '?action=customers')
-  ]);
-  const [ordersData, customersData] = await Promise.all([ordersRes.json(), customersRes.json()]);
-  activeRecords = (ordersData.records || []).map(mapFromApi);
-  allCustomers = {};
-  (customersData.records || []).forEach(c => {
-    const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
-    aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
-  });
-  rebuildAllRecords();
-}
-
-async function fetchEnviado() {
-  const res = await fetch(API + '?action=orders&status=Enviado');
-  const data = await res.json();
-  enviadoRecords = (data.records || []).map(mapFromApi);
-  tabDataLoaded.enviado = true;
-  rebuildAllRecords();
-}
-
-async function fetchArchivo() {
-  const res = await fetch(API + '?action=orders&status=Archivado');
-  const data = await res.json();
-  archivedRecords = (data.records || []).map(mapFromApi);
-  tabDataLoaded.archivo = true;
-  rebuildAllRecords();
-}
-
-// Manual refresh: re-fetches active + customers and any lazy tabs already loaded.
 async function loadRecords() {
   const icon = document.getElementById('refresh-icon');
   icon.classList.add('spinning');
   try {
-    const fetches = [fetchActive()];
-    if (tabDataLoaded.enviado) fetches.push(fetchEnviado());
-    if (tabDataLoaded.archivo) fetches.push(fetchArchivo());
-    await Promise.all(fetches);
+    // Three server-filtered requests instead of one unfiltered fetch — the
+    // Apps Script skips JSON-ifying any row that doesn't match. Together
+    // these statuses cover every record (active, shipped, archived),
+    // matching what a full unfiltered fetch used to return.
+    const [activeRes, enviadoRes, archivedRes, customersRes] = await Promise.all([
+      fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+      fetch(API + '?action=orders&status=Enviado'),
+      fetch(API + '?action=orders&status=Archivado'),
+      fetch(API + '?action=customers')
+    ]);
+    const [activeData, enviadoData, archivedData, customersData] = await Promise.all([activeRes.json(), enviadoRes.json(), archivedRes.json(), customersRes.json()]);
+    allRecords = [...(activeData.records || []), ...(enviadoData.records || []), ...(archivedData.records || [])].map(mapFromApi);
+    allCustomers = {};
+    (customersData.records || []).forEach(c => {
+      const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
+      aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
+    });
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
@@ -517,51 +489,6 @@ async function loadRecords() {
   } finally {
     icon.classList.remove('spinning');
   }
-}
-
-// Lazy-load the Enviado tab on first visit.
-async function loadEnviadoTab() {
-  const el = document.getElementById('enviado-list');
-  if (el) el.innerHTML = '<div class="tab-loading"><span class="tab-loading-spinner"></span>Cargando enviados...</div>';
-  try {
-    await fetchEnviado();
-    renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
-  } catch (e) {
-    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadEnviadoTab();return false">Reintentar</a></div>';
-    showToast('Error al cargar pedidos enviados');
-  }
-}
-
-// Lazy-load the Archivo tab on first visit.
-async function loadArchivoTab() {
-  const el = document.getElementById('archivo-list');
-  if (el) el.innerHTML = '<div class="tab-loading"><span class="tab-loading-spinner"></span>Cargando archivo...</div>';
-  try {
-    await fetchArchivo();
-    renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
-  } catch (e) {
-    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadArchivoTab();return false">Reintentar</a></div>';
-    showToast('Error al cargar archivo');
-  }
-}
-
-// Auto-refresh: only fetches data relevant to the currently visible tab.
-async function autoRefresh() {
-  try {
-    if (['activos', 'cobrar', 'enviar', 'analytics'].includes(currentTab)) {
-      await fetchActive();
-      renderAll();
-    } else if (currentTab === 'enviado' && tabDataLoaded.enviado) {
-      await fetchEnviado();
-      renderAll();
-    } else if (currentTab === 'archivo' && tabDataLoaded.archivo) {
-      await fetchArchivo();
-      renderAll();
-    }
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
-  } catch (_) {}
 }
 
 async function updateStatus(id, status) {
@@ -915,8 +842,8 @@ function renderAll() {
   renderGrouped(activos, 'activos-list', true);
   renderGrouped(cobrar, 'cobrar-list', true);
   renderGrouped(enviar, 'enviar-list', true);
-  if (tabDataLoaded.enviado) renderGrouped(enviado, 'enviado-list', true);
-  if (tabDataLoaded.archivo) renderGrouped(archivo, 'archivo-list', false);
+  renderGrouped(enviado, 'enviado-list', true);
+  renderGrouped(archivo, 'archivo-list', false);
   renderAnalytics();
   renderClientList();
 }
@@ -928,12 +855,10 @@ function switchTab(tab) {
   ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'analytics'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
   });
-  if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
-  else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
 }
 
 // ── INIT ─────────────────────────────────────────────────────
 renderBulkItems();
 updateUndoRedoButtons();
 loadRecords();
-setInterval(autoRefresh, 30000);
+setInterval(loadRecords, 30000);
