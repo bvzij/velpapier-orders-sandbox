@@ -116,6 +116,10 @@ function mapToApiFields(fields) {
 function isShipped(status) { return status === 'Enviado' || status === 'Archivado'; }
 
 let allRecords = [];
+let activeRecords = [];
+let enviadoRecords = [];
+let archivedRecords = [];
+let tabDataLoaded = { enviado: false, archivo: false };
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let currentTab = 'activos';
 let currentSort = 'default';
@@ -461,33 +465,109 @@ async function apiPost(data) {
   return res.json();
 }
 
+function rebuildAllRecords() {
+  allRecords = [...activeRecords, ...enviadoRecords, ...archivedRecords];
+}
+
+async function fetchActive() {
+  const [activeRes, customersRes] = await Promise.all([
+    fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+    fetch(API + '?action=customers')
+  ]);
+  const [activeData, customersData] = await Promise.all([activeRes.json(), customersRes.json()]);
+  activeRecords = (activeData.records || []).map(mapFromApi);
+  allCustomers = {};
+  (customersData.records || []).forEach(c => {
+    const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
+    aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
+  });
+  rebuildAllRecords();
+}
+
+async function fetchEnviado() {
+  const res = await fetch(API + '?action=orders&status=Enviado');
+  const data = await res.json();
+  enviadoRecords = (data.records || []).map(mapFromApi);
+  tabDataLoaded.enviado = true;
+  rebuildAllRecords();
+}
+
+async function fetchArchivo() {
+  const res = await fetch(API + '?action=orders&status=Archivado');
+  const data = await res.json();
+  archivedRecords = (data.records || []).map(mapFromApi);
+  tabDataLoaded.archivo = true;
+  rebuildAllRecords();
+}
+
 async function loadRecords() {
   const icon = document.getElementById('refresh-icon');
   icon.classList.add('spinning');
   try {
-    // Three server-filtered requests instead of one unfiltered fetch — the
-    // Apps Script skips JSON-ifying any row that doesn't match. Together
-    // these statuses cover every record (active, shipped, archived),
-    // matching what a full unfiltered fetch used to return.
-    const [activeRes, enviadoRes, archivedRes, customersRes] = await Promise.all([
-      fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
-      fetch(API + '?action=orders&status=Enviado'),
-      fetch(API + '?action=orders&status=Archivado'),
-      fetch(API + '?action=customers')
-    ]);
-    const [activeData, enviadoData, archivedData, customersData] = await Promise.all([activeRes.json(), enviadoRes.json(), archivedRes.json(), customersRes.json()]);
-    allRecords = [...(activeData.records || []), ...(enviadoData.records || []), ...(archivedData.records || [])].map(mapFromApi);
-    allCustomers = {};
-    (customersData.records || []).forEach(c => {
-      const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
-      aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
-    });
+    await fetchActive();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
     showToast('Error al cargar datos');
   } finally {
     icon.classList.remove('spinning');
+  }
+}
+
+async function manualRefresh() {
+  const icon = document.getElementById('refresh-icon');
+  icon.classList.add('spinning');
+  try {
+    tabDataLoaded.enviado = false;
+    tabDataLoaded.archivo = false;
+    enviadoRecords = [];
+    archivedRecords = [];
+    const fetches = [fetchActive()];
+    if (currentTab === 'enviado') fetches.push(fetchEnviado());
+    else if (currentTab === 'archivo') fetches.push(fetchArchivo());
+    await Promise.all(fetches);
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    showToast('Error al cargar datos');
+  } finally {
+    icon.classList.remove('spinning');
+  }
+}
+
+async function autoRefresh() {
+  try {
+    if (currentTab === 'enviado' && tabDataLoaded.enviado) await fetchEnviado();
+    else if (currentTab === 'archivo' && tabDataLoaded.archivo) await fetchArchivo();
+    else if (currentTab !== 'enviado' && currentTab !== 'archivo') await fetchActive();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) { /* silent */ }
+}
+
+async function loadEnviadoTab() {
+  const el = document.getElementById('enviado-list');
+  if (el) el.innerHTML = '<div class="empty-state">Cargando enviados...</div>';
+  try {
+    await fetchEnviado();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadEnviadoTab();return false">Reintentar</a></div>';
+    showToast('Error al cargar pedidos enviados');
+  }
+}
+
+async function loadArchivoTab() {
+  const el = document.getElementById('archivo-list');
+  if (el) el.innerHTML = '<div class="empty-state">Cargando archivo...</div>';
+  try {
+    await fetchArchivo();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadArchivoTab();return false">Reintentar</a></div>';
+    showToast('Error al cargar archivo');
   }
 }
 
@@ -557,7 +637,10 @@ function requestDelete(id, producto) {
     try {
       const result = await apiPost({ action: 'delete_order', order_id: id });
       if (result.result !== 'deleted') throw new Error(result.error || 'Error');
-      allRecords = allRecords.filter(r => r.ID !== id);
+      activeRecords = activeRecords.filter(r => r.ID !== id);
+      enviadoRecords = enviadoRecords.filter(r => r.ID !== id);
+      archivedRecords = archivedRecords.filter(r => r.ID !== id);
+      rebuildAllRecords();
       renderAll();
       if (searchSelectedCliente) runSearch(searchSelectedCliente);
       showToast('✓ Pedido eliminado');
@@ -596,7 +679,8 @@ async function createRecord() {
     for (const item of items) {
       const result = await apiPost({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '', status });
       if (result.result === 'created') {
-        allRecords.push({ ID: result.order_id, Cliente: cliente, Channel: channel, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', 'Fecha Creación': new Date().toISOString() });
+        activeRecords.push({ ID: result.order_id, Cliente: cliente, Channel: channel, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', 'Fecha Creación': new Date().toISOString() });
+        rebuildAllRecords();
       }
     }
     document.getElementById('new-cliente').value = '';
@@ -821,8 +905,8 @@ function renderAll() {
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
   document.getElementById('badge-enviar').textContent = enviar.length;
-  document.getElementById('badge-enviado').textContent = enviado.length;
-  document.getElementById('badge-archivo').textContent = archivo.length;
+  document.getElementById('badge-enviado').textContent = tabDataLoaded.enviado ? enviado.length : '';
+  document.getElementById('badge-archivo').textContent = tabDataLoaded.archivo ? archivo.length : '';
 
   const unpaidTotal = cobrar.reduce((s, r) => s + (r.Precio || 0), 0);
   const paidTotal = enviar.reduce((s, r) => s + (r.Precio || 0), 0);
@@ -855,10 +939,12 @@ function switchTab(tab) {
   ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'analytics'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
   });
+  if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
+  else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
 }
 
 // ── INIT ─────────────────────────────────────────────────────
 renderBulkItems();
 updateUndoRedoButtons();
 loadRecords();
-setInterval(loadRecords, 30000);
+setInterval(autoRefresh, 30000);
