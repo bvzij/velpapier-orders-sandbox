@@ -1,30 +1,7 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Canonical copy of the Apps Script bound to the Orders/Customers sheets.
-//
-// IMPORTANT: This file is NOT executed by the website. It must be pasted into
-// the Apps Script editor for the project bound to ORDERS_SHEET_ID /
-// CUSTOMERS_SHEET_ID below, replacing the existing script content. After
-// pasting, go to Deploy > Manage deployments > Edit (pencil icon) > Version:
-// "New version" > Deploy. A code-only change like this does NOT require a new
-// deployment URL — the existing /exec URL keeps working. (Only "New
-// deployment" instead of "New version" would change the URL, and that's not
-// needed here.)
-//
-// Changes vs. the previous version (performance optimization, no behavior
-// change):
-//   1. updateOrder, deleteOrder, updateOrderStatus, updatePackedDate now use
-//      findOrderRow() (TextFinder on column A) instead of sheetToObjects()
-//      + .find() to locate a single row. This avoids reading/JSON-ifying the
-//      entire sheet just to find one row by Order ID.
-//   2. doGet's `action=orders` branch now filters rows BEFORE building
-//      response objects, using the raw getValues() grid directly. Rows that
-//      don't match status/channel/customer_id are never converted to JSON.
-//      `status` now accepts a comma-separated list, e.g.
-//      ?status=No Pagado,Pagado,Enviado
-// ─────────────────────────────────────────────────────────────────────────────
-
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
+
+const SCRIPT_VERSION = '2026-07-06.1';
 
 // ─── Sheet accessors ───────────────────────────────────────────────────────────
 
@@ -57,11 +34,8 @@ function sheetToObjects(sheet) {
   });
 }
 
-// Locates a single row by Order ID without scanning the whole sheet into
-// memory. Order ID lives in column A. Returns the 1-based sheet row number,
-// or null if not found.
 function findOrderRow(sheet, orderID) {
-  const idColumn = sheet.getRange('A:A'); // Order ID is column A
+  const idColumn = sheet.getRange('A:A');
   const finder = idColumn.createTextFinder(orderID).matchEntireCell(true);
   const found = finder.findNext();
   if (!found) return null;
@@ -104,20 +78,17 @@ function findCustomerByUsername(customers, rawUsername) {
   const normalized = normalizeUsername(rawUsername);
   if (!normalized) return null;
 
-  // 1. Exact match on Primary Username
   let match = customers.find(c =>
     normalizeUsername(c['Primary Username']) === normalized
   );
   if (match) return { customer: match, confidence: 'exact' };
 
-  // 2. Exact match in Aliases
   match = customers.find(c => {
     const aliases = (c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim()));
     return aliases.includes(normalized);
   });
   if (match) return { customer: match, confidence: 'alias' };
 
-  // 3. Fuzzy match (simple prefix / substring for now — flag for review)
   match = customers.find(c => {
     const primary = normalizeUsername(c['Primary Username']);
     const aliases = (c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim()));
@@ -137,6 +108,8 @@ function findCustomerByUsername(customers, rawUsername) {
 function doGet(e) {
   try {
     const action = e.parameter.action || 'orders';
+
+    if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -161,7 +134,6 @@ function doGet(e) {
         if (channelFilter && row[channelCol] !== channelFilter) continue;
         if (customerIdFilter && row[customerIdCol] !== customerIdFilter) continue;
 
-        // Only rows that survive every filter get converted to objects.
         const obj = { _rowIndex: i + 1 };
         headers.forEach((h, j) => { obj[h] = row[j]; });
         records.push(obj);
@@ -224,12 +196,10 @@ function createOrder(body) {
   const ordersSheet = getOrdersSheet();
   const customersSheet = getCustomersSheet();
 
-  // Dedup check for TikTok orders (by Tracking ID)
   if (body.channel === 'TikTok' && body.tracking_id) {
     const existing = sheetToObjects(ordersSheet);
     const dup = existing.find(o => o['Tracking ID'] === body.tracking_id);
     if (dup) {
-      // Safety net: cross-check Order ID
       const sameOrderID = dup['Order ID'] === body.order_id;
       return jsonResponse({
         result: 'duplicate',
@@ -242,7 +212,6 @@ function createOrder(body) {
     }
   }
 
-  // Identity resolution
   const customers = sheetToObjects(customersSheet);
   let customerID = '';
   let primaryUsername = body.username || '';
@@ -255,14 +224,11 @@ function createOrder(body) {
       primaryUsername = resolution.customer['Primary Username'];
       if (resolution.confidence === 'fuzzy') mergeFlag = true;
     }
-    // If no match: customerID stays blank — dashboard will flag for manual customer creation
   }
 
-  // Status logic
   let status = body.status || 'No Pagado';
   if (body.channel === 'TikTok') status = 'Pagado';
 
-  // Build row
   const row = [
     body.order_id || generateUUID(),
     body.tracking_id || '',
@@ -275,9 +241,9 @@ function createOrder(body) {
     body.shopify_order_id || '',
     body.notes || '',
     nowISO(),
-    '',   // Packed Date — filled later from mobile QC
-    '',   // Shipped Date — filled later via API or manually
-    '',   // Archive Date — filled later when archived
+    '',   // Packed Date
+    '',   // Shipped Date
+    '',   // Archive Date
     body.linked_shipment || ''
   ];
 
@@ -298,7 +264,6 @@ function createCustomer(body) {
   const sheet = getCustomersSheet();
   const customers = sheetToObjects(sheet);
 
-  // Check if already exists
   if (body.primary_username) {
     const existing = findCustomerByUsername(customers, body.primary_username);
     if (existing && existing.confidence === 'exact') {
@@ -327,9 +292,9 @@ function createCustomer(body) {
     body.phone_full || '',
     body.email || '',
     nowISO(),
-    0,   // Shipment Count starts at 0
+    0,
     body.notes || '',
-    false // Merge Flag
+    false
   ];
 
   sheet.appendRow(row);
@@ -340,7 +305,7 @@ function createCustomer(body) {
   });
 }
 
-// ─── Update order status ───────────────────────────────────────────────────────
+// ─── Update order status (rewritten — recalculates true shipment count) ───────
 
 function updateOrderStatus(body) {
   const sheet = getOrdersSheet();
@@ -349,41 +314,49 @@ function updateOrderStatus(body) {
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const statusCol = headers.indexOf('Status') + 1;
-  const packedCol = headers.indexOf('Packed Date') + 1;
-  const shippedCol = headers.indexOf('Shipped Date') + 1;
-  const customerIdCol = headers.indexOf('Customer ID') + 1;
 
   sheet.getRange(rowIndex, statusCol).setValue(body.status);
-
-  if (body.status === 'Empacado' && packedCol > 0) {
-    sheet.getRange(rowIndex, packedCol).setValue(nowISO());
-  }
-  if (body.status === 'Enviado' && shippedCol > 0) {
-    sheet.getRange(rowIndex, shippedCol).setValue(nowISO());
-  }
-
-  // Increment shipment count on customer when packed
-  if (body.status === 'Empacado' && customerIdCol > 0) {
-    const customerID = sheet.getRange(rowIndex, customerIdCol).getValue();
-    if (customerID) incrementShipmentCount(customerID);
-  }
+  applyStatusSideEffects(sheet, rowIndex, body.status, headers);
 
   return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
 }
 
-// ─── Increment shipment count ──────────────────────────────────────────────────
+// ─── Recalculate shipment count (replaces incrementShipmentCount) ─────────────
 
-function incrementShipmentCount(customerID) {
-  const sheet = getCustomersSheet();
-  const customers = sheetToObjects(sheet);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const countCol = headers.indexOf('Shipment Count') + 1;
+function recalculateShipmentCount(customerID) {
+  const ordersSheet = getOrdersSheet();
+  const data = ordersSheet.getDataRange().getValues();
+  const headers = data[0];
 
-  const customer = customers.find(c => c['Customer ID'] === customerID);
-  if (!customer || countCol === 0) return;
+  const channelCol = headers.indexOf('Channel');
+  const statusCol = headers.indexOf('Status');
+  const customerIdCol = headers.indexOf('Customer ID');
 
-  const current = parseInt(customer['Shipment Count'], 10) || 0;
-  sheet.getRange(customer._rowIndex, countCol).setValue(current + 1);
+  let count = 0;
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[customerIdCol] !== customerID) continue;
+    if (row[channelCol] !== 'TikTok') continue;
+    if (row[statusCol] === 'Enviado' || row[statusCol] === 'Archivado') count++;
+  }
+
+  Logger.log('Counted: ' + count + ' for customer: ' + customerID);
+
+  const customersSheet = getCustomersSheet();
+  const custData = customersSheet.getDataRange().getValues();
+  const custHeaders = custData[0];
+  const custIdCol = custHeaders.indexOf('Customer ID');
+  const countCol = custHeaders.indexOf('Shipment Count');
+
+  Logger.log('custIdCol: ' + custIdCol + ' countCol: ' + countCol);
+
+  for (let i = 1; i < custData.length; i++) {
+    if (custData[i][custIdCol] === customerID) {
+      Logger.log('Writing ' + count + ' to row ' + (i+1));
+      customersSheet.getRange(i + 1, countCol + 1).setValue(count);
+      break;
+    }
+  }
 }
 
 // ─── Add alias ─────────────────────────────────────────────────────────────────
@@ -421,14 +394,16 @@ function updatePackedDate(body) {
   return jsonResponse({ result: 'packed_date_updated', order_id: body.order_id });
 }
 
+// ─── Migrate order ──────────────────────────────────────────────────────────────
+
 function migrateOrder(body) {
   const ordersSheet = getOrdersSheet();
 
   const row = [
     body.order_id || generateUUID(),
     body.tracking_id || '',
-    '',                          // Customer ID — resolved separately
-    body.username || '',         // Primary Username as-is for now
+    '',
+    body.username || '',
     body.channel || 'Manual',
     body.status || 'No Pagado',
     body.products || '',
@@ -438,13 +413,15 @@ function migrateOrder(body) {
     body.created_date || nowISO(),
     body.packed_date || '',
     body.shipped_date || '',
-    body.archive_date || '',    // Archive Date
-    ''                           // Linked Shipment
+    body.archive_date || '',
+    ''
   ];
 
   ordersSheet.appendRow(row);
   return jsonResponse({ result: 'migrated', order_id: row[0] });
 }
+
+// ─── Stamp customer IDs ──────────────────────────────────────────────────────
 
 function stampCustomerIDs() {
   const ordersSheet = getOrdersSheet();
@@ -455,14 +432,13 @@ function stampCustomerIDs() {
   const headers = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
 
   const customerIDCol = headers.indexOf('Customer ID') + 1;
-  const primaryUsernameCol = headers.indexOf('Primary Username') + 1;
 
   let stamped = 0;
   let notFound = 0;
   let notFoundList = [];
 
   orders.forEach(order => {
-    if (order['Customer ID']) return; // already has one, skip
+    if (order['Customer ID']) return;
 
     const username = order['Primary Username'];
     if (!username) return;
@@ -498,6 +474,11 @@ function updateOrder(body) {
     }
   });
 
+  // If status was among the changed fields, fire the same side-effects
+  if (body.fields && body.fields['Status']) {
+    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
+  }
+
   return jsonResponse({ result: 'updated', order_id: body.order_id });
 }
 
@@ -508,4 +489,97 @@ function deleteOrder(body) {
 
   sheet.deleteRow(rowIndex);
   return jsonResponse({ result: 'deleted', order_id: body.order_id });
+}
+
+// ─── Auto-archive ───────────────────────────────────────────────────────────────
+
+function autoArchiveOldOrders() {
+  const sheet = getOrdersSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return;
+
+  const headers = data[0];
+  const statusCol = headers.indexOf('Status');
+  const shippedCol = headers.indexOf('Shipped Date');
+
+  const DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+  const now = new Date().getTime();
+
+  let archived = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[statusCol] !== 'Enviado') continue;
+
+    const shippedDate = row[shippedCol];
+    if (!shippedDate) continue;
+
+    const shippedTime = new Date(shippedDate).getTime();
+    if (isNaN(shippedTime)) continue;
+
+    if (now - shippedTime >= DAYS_MS) {
+      sheet.getRange(i + 1, statusCol + 1).setValue('Archivado');
+      archived++;
+    }
+  }
+
+  Logger.log(`Auto-archived ${archived} orders.`);
+}
+
+// Shared side-effects for ANY status change, regardless of which endpoint caused it.
+function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
+  const shippedCol = headers.indexOf('Shipped Date') + 1;
+  const archiveCol = headers.indexOf('Archive Date') + 1;
+  const channelCol = headers.indexOf('Channel') + 1;
+  const customerIdCol = headers.indexOf('Customer ID') + 1;
+
+  if (newStatus === 'Enviado' && shippedCol > 0) {
+    sheet.getRange(rowIndex, shippedCol).setValue(nowISO());
+  }
+  if (newStatus === 'Archivado' && archiveCol > 0) {
+    sheet.getRange(rowIndex, archiveCol).setValue(nowISO());
+  }
+
+  const channel = channelCol > 0 ? sheet.getRange(rowIndex, channelCol).getValue() : '';
+  const customerID = customerIdCol > 0 ? sheet.getRange(rowIndex, customerIdCol).getValue() : '';
+  if (channel === 'TikTok' && customerID) {
+    recalculateShipmentCount(customerID);
+  }
+}
+
+// Full recompute of every customer's TikTok shipment count from scratch.
+// Run manually to fix drift, and set on a once-a-day trigger as a safety net.
+function recalculateAllShipmentCounts() {
+  const ordersSheet = getOrdersSheet();
+  const data = ordersSheet.getDataRange().getValues();
+  const headers = data[0];
+  const channelCol = headers.indexOf('Channel');
+  const statusCol = headers.indexOf('Status');
+  const customerIdCol = headers.indexOf('Customer ID');
+
+  const counts = {};
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[channelCol] !== 'TikTok') continue;
+    if (row[statusCol] !== 'Enviado' && row[statusCol] !== 'Archivado') continue;
+    const cid = row[customerIdCol];
+    if (!cid) continue;
+    counts[cid] = (counts[cid] || 0) + 1;
+  }
+
+  const customersSheet = getCustomersSheet();
+  const custData = customersSheet.getDataRange().getValues();
+  const custHeaders = custData[0];
+  const custIdCol = custHeaders.indexOf('Customer ID');
+  const countCol = custHeaders.indexOf('Shipment Count');
+
+  const out = [];
+  for (let i = 1; i < custData.length; i++) {
+    out.push([counts[custData[i][custIdCol]] || 0]);
+  }
+  if (out.length > 0) {
+    customersSheet.getRange(2, countCol + 1, out.length, 1).setValues(out);
+  }
+
+  Logger.log('Recalculated counts for ' + out.length + ' customers.');
 }
