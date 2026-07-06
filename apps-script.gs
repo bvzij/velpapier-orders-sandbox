@@ -1,7 +1,9 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-06.1';
+const SCRIPT_VERSION = '2026-07-06.2';
+
+const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
 // ─── Sheet accessors ───────────────────────────────────────────────────────────
 
@@ -582,4 +584,29 @@ function recalculateAllShipmentCounts() {
   }
 
   Logger.log('Recalculated counts for ' + out.length + ' customers.');
+}
+
+// ─── Nightly Backups ───────────────────────────────────────────────────────────
+
+function nightlyBackup() {
+  const folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);
+  const stamp = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy-MM-dd');
+  [['Orders', ORDERS_SHEET_ID], ['Customers', CUSTOMERS_SHEET_ID]].forEach(([name, id]) => {
+    try {
+      DriveApp.getFileById(id).makeCopy('bk_' + stamp + '_' + name, folder);
+    } catch (err) {
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
+        'VP backup FAILED: ' + name, String(err));
+    }
+  });
+  // Prune copies older than 30 days
+  const cutoff = Date.now() - 30 * 86400000;
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    if (f.getName().startsWith('bk_') && f.getDateCreated().getTime() < cutoff) {
+      f.setTrashed(true);
+    }
+  }
+  Logger.log('Backup complete: ' + stamp);
 }
