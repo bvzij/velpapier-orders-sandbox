@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-06.2';
+const SCRIPT_VERSION = '2026-07-06.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -111,6 +111,9 @@ function doGet(e) {
   try {
     const action = e.parameter.action || 'orders';
 
+    if (action === 'ping') return jsonResponse({ ok: true });
+    if (action !== 'version' && !authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
+
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
 
     if (action === 'orders') {
@@ -174,6 +177,7 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const action = body.action;
+    if (!authOk(body.token)) return jsonResponse({ error: 'unauthorized' });
 
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
@@ -609,4 +613,9 @@ function nightlyBackup() {
     }
   }
   Logger.log('Backup complete: ' + stamp);
+}
+
+function authOk(t) {
+  const want = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
+  return !!want && t === want;
 }
