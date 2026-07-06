@@ -1,4 +1,24 @@
-const API = 'https://script.google.com/macros/s/AKfycbyDArHQIjYhN_Hy_U1CrXbklXLjGabNIuk7u9eisNrQHXG3v_UBGZcXgZm8ipm4bI7c/exec';
+const API = 'https://script.google.com/macros/s/AKfycbx7Q-TWNagpu2ATIkGevBqNf_70wM43oLehcM6uDuMS-Ps8GiWwoQs6whwIxxbwR7bqIg/exec';
+
+let API_TOKEN = localStorage.getItem('vp_token') || '';
+
+async function ensureAuth() {
+  for (;;) {
+    if (API_TOKEN) {
+      try {
+        const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(API_TOKEN)}`);
+        if ((await r.json()).ok) return;
+      } catch (e) { /* fall through to prompt */ }
+    }
+    const input = prompt('Contraseña:');
+    if (input === null) {
+      document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+      throw new Error('unauthenticated');
+    }
+    API_TOKEN = input.trim();
+    localStorage.setItem('vp_token', API_TOKEN);
+  }
+}
 
 // Maps internal field names (used throughout the UI) to the new Orders sheet column names.
 const FIELD_MAP = {
@@ -439,8 +459,7 @@ async function showCustomerHistoryModal(customerId, displayName) {
   document.getElementById('history-close-btn').addEventListener('click', closeModal);
   document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
   try {
-    const res = await fetch(`${API}?action=orders&customer_id=${encodeURIComponent(customerId)}`);
-    const data = await res.json();
+    const data = await apiGet('action=orders&customer_id=' + encodeURIComponent(customerId));
     const records = (data.records || []).map(mapFromApi).sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
     const list = document.getElementById('customer-history-list');
     if (!list) return;
@@ -460,9 +479,15 @@ async function apiPost(data) {
   const res = await fetch(API, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(data)
+    body: JSON.stringify({ ...data, token: API_TOKEN })
   });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
+}
+
+function apiGet(qs) {
+  return fetch(`${API}?${qs}&token=${encodeURIComponent(API_TOKEN)}`)
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
 }
 
 function rebuildAllRecords() {
@@ -471,8 +496,8 @@ function rebuildAllRecords() {
 
 async function fetchActive() {
   const [activeRes, customersRes] = await Promise.all([
-    fetch(API + '?action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
-    fetch(API + '?action=customers')
+    apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+    apiGet('action=customers')
   ]);
   const [activeData, customersData] = await Promise.all([activeRes.json(), customersRes.json()]);
   activeRecords = (activeData.records || []).map(mapFromApi);
@@ -485,16 +510,14 @@ async function fetchActive() {
 }
 
 async function fetchEnviado() {
-  const res = await fetch(API + '?action=orders&status=Enviado');
-  const data = await res.json();
+  const data = await apiGet('action=orders&status=Enviado');
   enviadoRecords = (data.records || []).map(mapFromApi);
   tabDataLoaded.enviado = true;
   rebuildAllRecords();
 }
 
 async function fetchArchivo() {
-  const res = await fetch(API + '?action=orders&status=Archivado');
-  const data = await res.json();
+  const data = await apiGet('action=orders&status=Archivado');
   archivedRecords = (data.records || []).map(mapFromApi);
   tabDataLoaded.archivo = true;
   rebuildAllRecords();
@@ -944,7 +967,10 @@ function switchTab(tab) {
 }
 
 // ── INIT ─────────────────────────────────────────────────────
-renderBulkItems();
-updateUndoRedoButtons();
-loadRecords();
-setInterval(autoRefresh, 30000);
+(async () => {
+  await ensureAuth();
+  renderBulkItems();
+  updateUndoRedoButtons();
+  loadRecords();
+  setInterval(autoRefresh, 30000);
+})();
