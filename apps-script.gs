@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-11.1';
+const SCRIPT_VERSION = '2026-07-11.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -524,7 +524,9 @@ function autoArchiveOldOrders() {
     if (isNaN(shippedTime)) continue;
 
     if (now - shippedTime >= DAYS_MS) {
-      sheet.getRange(i + 1, statusCol + 1).setValue('Archivado');
+      const rowIndex = i + 1;
+      sheet.getRange(rowIndex, statusCol + 1).setValue('Archivado');
+      applyStatusSideEffects(sheet, rowIndex, 'Archivado', headers);
       archived++;
     }
   }
