@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-11.2';
+const SCRIPT_VERSION = '2026-07-11.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -508,7 +508,7 @@ function autoArchiveOldOrders() {
   const statusCol = headers.indexOf('Status');
   const shippedCol = headers.indexOf('Shipped Date');
 
-  const DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  const DAYS_MS = 5 * 24 * 60 * 60 * 1000;
   const now = new Date().getTime();
 
   let archived = 0;
