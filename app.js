@@ -973,7 +973,7 @@ function renderGrouped(records, containerId, showActions) {
       r.Status === 'Pagado'
     );
     const tikTokIndicator = hasPendingTikTok
-    ? `<span style="display:inline-flex;align-items:center;background:#c8e6c0;color:#2e7d32;border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px">✓ Listo para enviar</span>`
+    ? `<span style="display:inline-flex;align-items:center;background:#c8e6c0;color:#2e7d32;border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px">Listo para enviar</span>`
     : '';
     header.setAttribute('data-tiktok-ready', hasPendingTikTok);
     group.setAttribute('data-tiktok-ready', hasPendingTikTok);
