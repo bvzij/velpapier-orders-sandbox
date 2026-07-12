@@ -1,4 +1,4 @@
-const API = 'https://script.google.com/macros/s/AKfycby3Rl8EI8fQcV5PIDlGH1mEGVXfcuar9H7v5hybFLQ6hc-tHG6_4J-Coqvj276AWT7ftA/exec';
+const API = 'https://script.google.com/macros/s/AKfycby9_wvcACIMS-aVcNmJWatiRtbWFH8TvqWJFNnjNcPjZstsqOOc-QmFz4iIWGcu27pHvg/exec';
 
 const HIDE_TIKTOK_FROM_MAIN_TABS = true; // set to true when TikTok tab is fully tested
 
