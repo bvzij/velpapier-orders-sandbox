@@ -189,6 +189,7 @@ function doPost(e) {
     if (action === 'update_order') return updateOrder(body);
     if (action === 'delete_order') return deleteOrder(body);
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
+    if (action === 'create_customers_bulk') return createCustomersBulk(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -732,4 +733,62 @@ function importTikTokOrders(body) {
     unresolved: [...new Set(unresolved)],
     shipments:  results,
   });
+}
+
+function createCustomersBulk(body) {
+  const sheet = getCustomersSheet();
+  const existing = sheetToObjects(sheet);
+  const custLastCol = sheet.getLastColumn();
+
+  // Find current max CUST- number once
+  let maxNum = 0;
+  existing.forEach(c => {
+    const id = c['Customer ID'];
+    if (typeof id === 'string' && id.startsWith('CUST-')) {
+      const n = parseInt(id.replace('CUST-', ''), 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  });
+
+  const rows = [], created = [];
+  (body.customers || []).forEach(cust => {
+    // Skip if username already exists (exact)
+    if (cust.primary_username) {
+      const dup = existing.find(c =>
+        normalizeUsername(c['Primary Username']) === normalizeUsername(cust.primary_username)
+      );
+      if (dup) {
+        created.push({ username: cust.primary_username, customer_id: dup['Customer ID'], existed: true });
+        return;
+      }
+    }
+    maxNum++;
+    const customerID = 'CUST-' + String(maxNum).padStart(3, '0');
+    rows.push([
+      customerID,
+      cust.primary_username || '',
+      cust.aliases || '',
+      cust.first_name || '',
+      cust.surname || '',
+      cust.initials || '',
+      cust.street || '',
+      cust.city || '',
+      cust.state || '',
+      cust.zip || '',
+      cust.phone_partial || '',
+      cust.phone_full || '',
+      cust.email || '',
+      nowISO(),
+      0,
+      cust.notes || '',
+      false
+    ]);
+    created.push({ username: cust.primary_username, customer_id: customerID, existed: false });
+  });
+
+  if (rows.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  return jsonResponse({ result: 'bulk_created', created: created });
 }
