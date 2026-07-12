@@ -1,6 +1,6 @@
 // import.js — Vel Papier TikTok Import Page
 
-const API         = 'https://script.google.com/macros/s/AKfycbygqGJQA_SdAcu3OGKLsJIpzqZ560GS6mHZ-9FXHlGSwBUNQbRSif0Ut1Sj2t10iV1R9g/exec';
+const API         = 'https://script.google.com/macros/s/AKfycbxgYxG8L-QZSAiWFm0z2LmumDtaxzTpUmxDfeGiEQGJXBXE4i43EKQFYBMYV030ytAuUA/exec';
 const N8N_URL     = 'https://n8n.srv1040167.hstgr.cloud/webhook/tiktok-import';
 const VP_TOKEN    = '0924';  // X-VP-Token header for N8N
 
