@@ -41,11 +41,14 @@ async function ensureAuth() {
 // ── File handling ─────────────────────────────────────────────────────────────
 
 function handleZoneClick() {
-  // If neither file selected yet, pick CSV first
-  if (!csvFile) { document.getElementById('csv-input').click(); return; }
-  if (!pdfFile) { document.getElementById('pdf-input').click(); return; }
-  // Both selected — clicking again re-picks CSV
-  document.getElementById('csv-input').click();
+  document.getElementById('file-input').click();
+}
+
+function handleFileInput(files) {
+  Array.from(files).forEach(file => {
+    if (file.name.toLowerCase().endsWith('.csv')) handleFile('csv', file);
+    else if (file.name.toLowerCase().endsWith('.pdf')) handleFile('pdf', file);
+  });
 }
 
 function handleFile(type, file) {

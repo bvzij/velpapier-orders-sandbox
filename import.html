@@ -524,8 +524,7 @@
 
     <!-- Drop zone -->
     <div class="drop-zone" id="drop-zone" onclick="handleZoneClick()">
-      <input type="file" id="csv-input" accept=".csv" style="display:none" onchange="handleFile('csv', this.files[0])">
-      <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handleFile('pdf', this.files[0])">
+      <input type="file" id="file-input" accept=".csv,.pdf" multiple style="display:none" onchange="handleFileInput(this.files)">
       <span class="drop-icon" id="drop-icon">📂</span>
       <div class="drop-label" id="drop-label">Arrastra el CSV y el PDF aquí</div>
       <div class="drop-hint" id="drop-hint">o haz clic para seleccionar — se detectan automáticamente por tipo</div>
