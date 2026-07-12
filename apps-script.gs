@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-12.1';
+const SCRIPT_VERSION = '2026-07-12.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -667,7 +667,16 @@ function importTikTokOrders(body) {
       const customers = sheetToObjects(customersSheet);
       const found = customers.find(c => c['Customer ID'] === customerID);
       if (found) {
-        shipCount = parseInt(found['Shipment Count'], 10) || 0;
+        const allOrders = getOrdersSheet().getDataRange().getValues();
+        const headers = allOrders[0];
+        const iChan = headers.indexOf('Channel');
+        const iStat = headers.indexOf('Status');
+        const iCust = headers.indexOf('Customer ID');
+        shipCount = allOrders.slice(1).filter(r =>
+          r[iCust] === customerID &&
+          ['TikTok', 'Shopify'].includes(r[iChan]) &&
+          ['Enviado', 'Archivado'].includes(r[iStat])
+        ).length;
         enrichAddressTT(customersSheet, found, s.address || {}, cCols);
       }
     } else if (s.username) {
