@@ -1,5 +1,7 @@
 const API = 'https://script.google.com/macros/s/AKfycbxhe5-A1DGPVcDtAs1KU9zlMQvCYTv26w-ZJ0OSpL8PUfGHsfuoMYeroa4b4_Qf8eT7jQ/exec';
 
+const HIDE_TIKTOK_FROM_MAIN_TABS = false; // set to true when TikTok tab is fully tested
+
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 async function ensureAuth() {
@@ -848,6 +850,15 @@ function sortRecords(records) {
   }
   if (currentSort === 'newest') return [...records].sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
   if (currentSort === 'oldest') return [...records].sort((a, b) => new Date(a['Fecha Creación'] || 0) - new Date(b['Fecha Creación'] || 0));
+  if (currentSort === 'tiktok-ready') {
+    const hasTikTok = r => r.CustomerId && allRecords.some(x => x.CustomerId === r.CustomerId && x.Channel === 'TikTok' && x.Status === 'Pagado');
+    return [...records].sort((a, b) => {
+      const ta = hasTikTok(a) ? 0 : 1;
+      const tb = hasTikTok(b) ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      return (a.Cliente || '').localeCompare(b.Cliente || '', 'es');
+    });
+  }
   return records;
 }
 
@@ -955,7 +966,16 @@ function renderGrouped(records, containerId, showActions) {
     const header = document.createElement('div'); header.className = 'customer-header' + (isUnnamedCliente(cliente) ? ' customer-header--unnamed' : '');
     const custData = allCustomers[(cliente || '').toLowerCase()];
     const shipBadge = custData && custData.shipmentCount > 0 ? ` <span class="shipment-count">(${custData.shipmentCount})</span>` : '';
-    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+    const custId = (items[0] && items[0].CustomerId) || '';
+    const hasPendingTikTok = allRecords.some(r =>
+      r.CustomerId && r.CustomerId === custId &&
+      r.Channel === 'TikTok' &&
+      r.Status === 'Pagado'
+    );
+    const tikTokIndicator = hasPendingTikTok
+      ? `<span title="TikTok pendiente — apto para envío" style="display:inline-flex;align-items:center;gap:3px;background:#fff0f0;color:#c0392b;border:0.5px solid #f5b7b1;border-radius:99px;padding:1px 7px;font-size:10px;font-weight:600;margin-left:6px">▶ TikTok</span>`
+      : '';
+    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
 
     const bulk = header.querySelector('.customer-bulk-actions');
     const renameBtn = document.createElement('button');
@@ -1045,9 +1065,9 @@ function renderClientList() {
 }
 
 function renderAll() {
-  const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
-  const cobrar = allRecords.filter(r => r.Status === 'No Pagado');
-  const enviar = allRecords.filter(r => r.Status === 'Pagado');
+  const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const enviado = allRecords.filter(r => r.Status === 'Enviado');
   const archivo = allRecords.filter(r => r.Status === 'Archivado');
 
@@ -1079,13 +1099,68 @@ function renderAll() {
   renderGrouped(archivo, 'archivo-list', false);
   renderAnalytics();
   renderClientList();
+  renderTikTokTab();
+}
+
+function renderTikTokTab() {
+  const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
+
+  // Update badge
+  document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
+
+  const container = document.getElementById('tiktok-list');
+  if (!container) return;
+
+  if (tikTokOrders.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:1rem 0">Sin órdenes TikTok pendientes</div>';
+    return;
+  }
+
+  // Group by import date (Created Date, first 10 chars = YYYY-MM-DD)
+  const groups = {};
+  tikTokOrders.forEach(r => {
+    const day = (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha';
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(r);
+  });
+
+  // Sort groups newest first
+  const sortedDays = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+
+  container.innerHTML = sortedDays.map(day => {
+    const orders = groups[day];
+    const rows = orders.map(r => {
+      const username = escapeHtml(r.Cliente || '—');
+      const products = escapeHtml(r.Producto || '—');
+      const price    = r.Precio ? `$${Number(r.Precio).toFixed(2)}` : '—';
+      const tracking = escapeHtml(r['Tracking ID'] || '');
+      return `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
+          <div style="min-width:0">
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">@${username}</div>
+            <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${products}</div>
+            ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">${tracking}</div>` : ''}
+          </div>
+          <div style="font-size:13px;font-weight:600;white-space:nowrap">${price}</div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div style="background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);margin-bottom:1rem;overflow:hidden">
+        <div style="padding:10px 12px;background:var(--surface2);border-bottom:0.5px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)">Importado ${day}</div>
+          <div style="font-size:11px;color:var(--text-faint)">${orders.length} orden${orders.length !== 1 ? 'es' : ''}</div>
+        </div>
+        ${rows}
+      </div>`;
+  }).join('');
 }
 
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'analytics'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'analytics'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();

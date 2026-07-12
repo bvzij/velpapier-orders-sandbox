@@ -55,6 +55,7 @@
         <option value="least">Menor deuda primero</option>
         <option value="newest" selected>Más reciente primero</option>
         <option value="oldest">Más antiguo primero</option>
+        <option value="tiktok-ready">Aptos para envío primero</option>
       </select>
       <a href="import.html" class="refresh-btn" style="text-decoration:none">↑ Importar TikTok</a>
       <button class="refresh-btn" id="undo-btn" onclick="performUndo()" disabled title="Deshacer último cambio de estado">
@@ -156,6 +157,7 @@
         <button class="tab" data-tab="enviar" onclick="switchTab('enviar')">Por enviar <span class="tab-badge" id="badge-enviar">0</span></button>
         <button class="tab" data-tab="enviado" onclick="switchTab('enviado')">Enviado <span class="tab-badge" id="badge-enviado">0</span></button>
         <button class="tab" data-tab="archivo" onclick="switchTab('archivo')">Archivo <span class="tab-badge" id="badge-archivo">0</span></button>
+        <button class="tab" data-tab="tiktok" onclick="switchTab('tiktok')">TikTok <span class="tab-badge" id="badge-tiktok" style="background:#fff0f0;color:#c0392b">0</span></button>
         <button class="tab" data-tab="analytics" onclick="switchTab('analytics')">Análisis <span class="tab-badge" id="badge-analytics" style="background:var(--purple-bg);color:var(--purple-text)">↗</span></button>
       </div>
 
@@ -164,6 +166,8 @@
       <div id="tab-enviar" style="display:none"><div class="section-label">Pagado · sin enviar · alerta después de 7 días</div><div id="enviar-list"></div></div>
       <div id="tab-enviado" style="display:none"><div class="section-label">Enviados · pendientes de archivar</div><div id="enviado-list"></div></div>
       <div id="tab-archivo" style="display:none"><div class="section-label">Archivados</div><div id="archivo-list"></div></div>
+
+      <div id="tab-tiktok" style="display:none"><div class="section-label">Órdenes TikTok · Pendientes de envío</div><div id="tiktok-list"></div></div>
 
       <div id="tab-analytics" style="display:none">
         <div class="section-label">Resumen general</div>
