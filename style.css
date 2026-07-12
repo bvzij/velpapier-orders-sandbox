@@ -90,26 +90,16 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .btn-xs { padding: 3px 7px; font-size: 11px; }
 .btn-pagado { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
 .btn-pagado:hover { background: var(--green-border); }
-.btn-enviado { background: var(--text); color: var(--surface); border-color: var(--text); }
-.btn-enviado:hover { opacity: 0.8; background: var(--text); }
+.btn-enviado { background: #3a3a3a; color: var(--surface); border-color: #3a3a3a; }
+.btn-enviado:hover { opacity: 0.85; background: #3a3a3a; }
 .btn-undo { background: var(--surface2); color: var(--text-muted); border-color: var(--border); }
 .btn-undo:hover { background: var(--amber-bg); color: var(--amber-text); }
 .btn-danger { background: var(--red-bg); color: var(--red-text); border-color: var(--red-border); }
 .btn-danger:hover { background: var(--red-border); }
 .btn-edit { background: var(--blue-bg); color: var(--blue-text); border-color: #b5d4f4; }
 .btn-edit:hover { background: #b5d4f4; }
-.btn-add-quick {
-  background: #22c55e;
-  color: white;
-  border-radius: var(--radius-sm, 6px);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 3px 8px;
-  border: none;
-  cursor: pointer;
-  line-height: 1.4;
-}
-.btn-add-quick:hover { background: #16a34a; }
+.btn-add-quick { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+.btn-add-quick:hover { background: var(--green-border); }
 
 .main-content { padding: 1.5rem; overflow-y: auto; }
 
