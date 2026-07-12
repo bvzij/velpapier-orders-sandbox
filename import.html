@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Importar TikTok</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* ── Import page layout ─────────────────────────────────────── */
+    .import-layout {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .import-body {
+      padding: 2rem 1.5rem;
+      max-width: 760px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .page-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      letter-spacing: -0.3px;
+    }
+
+    .page-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+    }
+
+    /* ── Drop zones ─────────────────────────────────────────────── */
+    .drop-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .drop-zone {
+      border: 1.5px dashed var(--border-strong);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      padding: 2rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s;
+      position: relative;
+    }
+
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--text-muted);
+      background: var(--surface2);
+    }
+
+    .drop-zone.ready {
+      border-style: solid;
+      border-color: var(--green-border);
+      background: var(--green-bg);
+    }
+
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    .drop-icon {
+      font-size: 28px;
+      margin-bottom: 8px;
+      display: block;
+    }
+
+    .drop-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .drop-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .drop-filename {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--green-text);
+      margin-top: 6px;
+      word-break: break-all;
+    }
+
+    /* ── Run button ─────────────────────────────────────────────── */
+    .run-btn {
+      width: 100%;
+      padding: 13px;
+      font-size: 14px;
+      font-weight: 600;
+      font-family: inherit;
+      background: var(--text);
+      color: var(--surface);
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-bottom: 1.5rem;
+    }
+
+    .run-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .run-btn:not(:disabled):hover { opacity: 0.8; }
+
+    /* ── Progress ───────────────────────────────────────────────── */
+    .progress-bar-wrap {
+      background: var(--surface2);
+      border-radius: 99px;
+      height: 4px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: var(--text);
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+
+    .progress-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-align: center;
+      margin-bottom: 1.5rem;
+      display: none;
+    }
+
+    /* ── Summary card ───────────────────────────────────────────── */
+    .summary-card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+      display: none;
+    }
+
+    .summary-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-faint);
+      margin-bottom: 1rem;
+    }
+
+    .summary-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .summary-stat {
+      background: var(--bg);
+      border-radius: var(--radius-md);
+      padding: 0.75rem;
+      text-align: center;
+    }
+
+    .summary-stat-val {
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+
+    .summary-stat-val.green { color: var(--green-text); }
+    .summary-stat-val.amber { color: var(--amber-text); }
+    .summary-stat-val.red   { color: var(--red-text); }
+
+    .summary-stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .download-btn {
+      width: 100%;
+      padding: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      background: var(--green-bg);
+      color: var(--green-text);
+      border: 0.5px solid var(--green-border);
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: opacity 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .download-btn:hover { opacity: 0.8; }
+
+    /* ── Possible matches section ────────────────────────────────── */
+    .matches-section {
+      display: none;
+      margin-bottom: 1rem;
+    }
+
+    .matches-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--amber-text);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .match-card {
+      background: var(--surface);
+      border: 0.5px solid var(--amber-border);
+      border-radius: var(--radius-md);
+      padding: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .match-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+
+    .match-username {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .match-score {
+      font-size: 11px;
+      background: var(--amber-bg);
+      color: var(--amber-text);
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 600;
+    }
+
+    .match-row {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .match-row strong { color: var(--text); }
+
+    .match-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 0.75rem;
+    }
+
+    .match-btn {
+      flex: 1;
+      padding: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: opacity 0.15s;
+      border: 0.5px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .match-btn.primary {
+      background: var(--text);
+      color: var(--surface);
+      border-color: var(--text);
+    }
+
+    .match-btn:hover { opacity: 0.75; }
+
+    /* Inline dropdown for assigning alias */
+    .match-assign-wrap {
+      margin-top: 0.5rem;
+      display: none;
+    }
+
+    .match-assign-wrap select {
+      width: 100%;
+      padding: 7px 10px;
+      font-size: 13px;
+      border: 0.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      font-family: inherit;
+      margin-bottom: 6px;
+    }
+
+    .match-assign-confirm {
+      width: 100%;
+      padding: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      background: var(--green-bg);
+      color: var(--green-text);
+      border: 0.5px solid var(--green-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+
+    .match-assigned {
+      font-size: 12px;
+      color: var(--green-text);
+      font-weight: 600;
+      margin-top: 6px;
+      display: none;
+    }
+
+    /* ── New customers section ───────────────────────────────────── */
+    .new-customers-section {
+      display: none;
+      margin-bottom: 1rem;
+    }
+
+    .new-customers-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--blue-text);
+      margin-bottom: 0.75rem;
+    }
+
+    .new-customer-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--blue-bg);
+      color: var(--blue-text);
+      border: 0.5px solid #b3d4f5;
+      border-radius: 99px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      margin: 0 4px 4px 0;
+    }
+
+    /* ── Modal ──────────────────────────────────────────────────── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.open { display: flex; }
+
+    .modal-box {
+      background: var(--surface);
+      border-radius: var(--radius-lg);
+      padding: 1.5rem;
+      width: 480px;
+      max-width: 95vw;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.18);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .modal-title { font-size: 15px; font-weight: 600; }
+
+    .modal-close {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-muted);
+      padding: 4px;
+      border-radius: var(--radius-sm);
+      display: flex;
+    }
+
+    .modal-close:hover { background: var(--surface2); }
+
+    .modal-field { margin-bottom: 0.75rem; }
+
+    .modal-field-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 3px;
+    }
+
+    .modal-field-value {
+      font-size: 13px;
+      color: var(--text);
+    }
+
+    .modal-field-value.empty { color: var(--text-faint); font-style: italic; }
+
+    .modal-divider {
+      border: none;
+      border-top: 0.5px solid var(--border);
+      margin: 1rem 0;
+    }
+
+    .modal-select {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13px;
+      border: 0.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      font-family: inherit;
+      margin-bottom: 8px;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 1rem;
+    }
+
+    .modal-btn {
+      flex: 1;
+      padding: 9px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      border: 0.5px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      transition: opacity 0.15s;
+    }
+
+    .modal-btn.confirm {
+      background: var(--text);
+      color: var(--surface);
+      border-color: var(--text);
+    }
+
+    .modal-btn:hover { opacity: 0.75; }
+
+    /* ── Error state ─────────────────────────────────────────────── */
+    .error-box {
+      background: var(--red-bg);
+      border: 0.5px solid var(--red-border);
+      border-radius: var(--radius-md);
+      padding: 1rem;
+      font-size: 13px;
+      color: var(--red-text);
+      margin-bottom: 1rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<script>
+(function() {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const key = 'vp_auth';
+  if (localStorage.getItem(key) === correctHash) return;
+  const input = prompt('Contraseña requerida:');
+  if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; return; }
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash === correctHash) { localStorage.setItem(key, correctHash); location.reload(); }
+    else { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; }
+  });
+})();
+</script>
+
+<div class="import-layout">
+
+  <header class="app-header">
+    <div class="app-logo">
+      Vel Papier <span>· Importar TikTok</span>
+      <span class="app-logo-sandbox">(SANDBOX)</span>
+    </div>
+    <div class="header-right">
+      <a href="index.html" class="refresh-btn" style="text-decoration:none">
+        ← Volver al dashboard
+      </a>
+    </div>
+  </header>
+
+  <div class="import-body">
+
+    <div class="page-title">Importar órdenes de TikTok</div>
+    <div class="page-subtitle">Sube el CSV y el PDF de guías juntos. El sistema importará las órdenes, anotará las guías y resolverá clientes automáticamente.</div>
+
+    <!-- Drop zones -->
+    <div class="drop-grid">
+      <div class="drop-zone" id="csv-zone" onclick="document.getElementById('csv-input').click()">
+        <input type="file" id="csv-input" accept=".csv" style="display:none" onchange="handleFile('csv', this.files[0])">
+        <span class="drop-icon">📋</span>
+        <div class="drop-label">CSV de TikTok</div>
+        <div class="drop-hint">Archivo de exportación de órdenes</div>
+        <div class="drop-filename" id="csv-name"></div>
+      </div>
+      <div class="drop-zone" id="pdf-zone" onclick="document.getElementById('pdf-input').click()">
+        <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handleFile('pdf', this.files[0])">
+        <span class="drop-icon">📦</span>
+        <div class="drop-label">PDF de guías</div>
+        <div class="drop-hint">Etiquetas de envío J&T</div>
+        <div class="drop-filename" id="pdf-name"></div>
+      </div>
+    </div>
+
+    <!-- Error -->
+    <div class="error-box" id="error-box"></div>
+
+    <!-- Run button -->
+    <button class="run-btn" id="run-btn" disabled onclick="runImport()">
+      Importar y anotar guías
+    </button>
+
+    <!-- Progress -->
+    <div class="progress-bar-wrap" id="progress-wrap">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <div class="progress-label" id="progress-label"></div>
+
+    <!-- Summary -->
+    <div class="summary-card" id="summary-card">
+      <div class="summary-title">Resumen de importación</div>
+      <div class="summary-stats">
+        <div class="summary-stat">
+          <div class="summary-stat-val green" id="s-inserted">—</div>
+          <div class="summary-stat-label">Insertadas</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-stat-val" id="s-dupes">—</div>
+          <div class="summary-stat-label">Duplicadas</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-stat-val amber" id="s-matches">—</div>
+          <div class="summary-stat-label">Posibles matches</div>
+        </div>
+      </div>
+      <button class="download-btn" id="download-btn" onclick="downloadPDF()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Descargar guías anotadas
+      </button>
+    </div>
+
+    <!-- Possible matches -->
+    <div class="matches-section" id="matches-section">
+      <div class="matches-title">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+        Posibles clientes duplicados — requieren revisión
+      </div>
+      <div id="matches-list"></div>
+    </div>
+
+    <!-- New customers -->
+    <div class="new-customers-section" id="new-customers-section">
+      <div class="new-customers-title">✓ Clientes nuevos creados automáticamente</div>
+      <div id="new-customers-list"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Modal for possible match detail -->
+<div class="modal-overlay" id="match-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-username"></div>
+      <button class="modal-close" onclick="closeModal()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+
+    <div class="summary-stat" style="margin-bottom:1rem;text-align:center;background:var(--amber-bg)">
+      <div class="summary-stat-val amber" id="modal-score">—</div>
+      <div class="summary-stat-label">Score de similitud</div>
+    </div>
+
+    <div class="modal-field">
+      <div class="modal-field-label">Posible match con</div>
+      <div class="modal-field-value" id="modal-matched-to"></div>
+    </div>
+
+    <hr class="modal-divider">
+    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:0.75rem">DATOS EXTRAÍDOS DEL PDF</div>
+
+    <div class="modal-field">
+      <div class="modal-field-label">Nombre completo</div>
+      <div class="modal-field-value" id="modal-name"></div>
+    </div>
+    <div class="modal-field">
+      <div class="modal-field-label">Dirección</div>
+      <div class="modal-field-value" id="modal-address"></div>
+    </div>
+    <div class="modal-field">
+      <div class="modal-field-label">Ciudad / Estado / CP</div>
+      <div class="modal-field-value" id="modal-location"></div>
+    </div>
+    <div class="modal-field">
+      <div class="modal-field-label">Teléfono parcial</div>
+      <div class="modal-field-value" id="modal-phone"></div>
+    </div>
+
+    <hr class="modal-divider">
+    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:0.5rem">ASIGNAR COMO ALIAS DE:</div>
+
+    <select class="modal-select" id="modal-customer-select">
+      <option value="">— Seleccionar cliente existente —</option>
+    </select>
+
+    <div class="modal-actions">
+      <button class="modal-btn" onclick="closeModal()">Cerrar</button>
+      <button class="modal-btn confirm" onclick="confirmModalAssign()">Asignar alias</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="import.js"></script>
+</body>
+</html>
