@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-12.2';
+const SCRIPT_VERSION = '2026-07-12.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -220,17 +220,15 @@ function createOrder(body) {
   }
 
   const customers = sheetToObjects(customersSheet);
+  const resolution = findCustomerByUsername(customers, body.username);
   let customerID = '';
   let primaryUsername = body.username || '';
   let mergeFlag = false;
 
-  if (body.username) {
-    const resolution = findCustomerByUsername(customers, body.username);
-    if (resolution) {
-      customerID = resolution.customer['Customer ID'];
-      primaryUsername = resolution.customer['Primary Username'];
-      if (resolution.confidence === 'fuzzy') mergeFlag = true;
-    }
+  if (resolution) {
+    customerID = resolution.customer['Customer ID'];
+    primaryUsername = resolution.customer['Primary Username'];
+    if (resolution.confidence === 'fuzzy') mergeFlag = true;
   }
 
   let status = body.status || 'No Pagado';
@@ -290,7 +288,7 @@ function createCustomer(body) {
     body.aliases || '',
     body.first_name || '',
     body.surname || '',
-    body.initials_tt || '',
+    body.initials || '',
     body.street || '',
     body.city || '',
     body.state || '',
@@ -312,7 +310,7 @@ function createCustomer(body) {
   });
 }
 
-// ─── Update order status (rewritten — recalculates true shipment count) ───────
+// ─── Update order status ───────────────────────────────────────────────────────
 
 function updateOrderStatus(body) {
   const sheet = getOrdersSheet();
@@ -328,7 +326,7 @@ function updateOrderStatus(body) {
   return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
 }
 
-// ─── Recalculate shipment count (replaces incrementShipmentCount) ─────────────
+// ─── Recalculate shipment count ────────────────────────────────────────────────
 
 function recalculateShipmentCount(customerID) {
   const ordersSheet = getOrdersSheet();
@@ -343,11 +341,9 @@ function recalculateShipmentCount(customerID) {
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     if (row[customerIdCol] !== customerID) continue;
-    if (row[channelCol] !== 'TikTok') continue;
+    if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
     if (row[statusCol] === 'Enviado' || row[statusCol] === 'Archivado') count++;
   }
-
-  Logger.log('Counted: ' + count + ' for customer: ' + customerID);
 
   const customersSheet = getCustomersSheet();
   const custData = customersSheet.getDataRange().getValues();
@@ -355,11 +351,8 @@ function recalculateShipmentCount(customerID) {
   const custIdCol = custHeaders.indexOf('Customer ID');
   const countCol = custHeaders.indexOf('Shipment Count');
 
-  Logger.log('custIdCol: ' + custIdCol + ' countCol: ' + countCol);
-
   for (let i = 1; i < custData.length; i++) {
     if (custData[i][custIdCol] === customerID) {
-      Logger.log('Writing ' + count + ' to row ' + (i+1));
       customersSheet.getRange(i + 1, countCol + 1).setValue(count);
       break;
     }
@@ -481,7 +474,6 @@ function updateOrder(body) {
     }
   });
 
-  // If status was among the changed fields, fire the same side-effects
   if (body.fields && body.fields['Status']) {
     applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
   }
@@ -551,13 +543,13 @@ function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
 
   const channel = channelCol > 0 ? sheet.getRange(rowIndex, channelCol).getValue() : '';
   const customerID = customerIdCol > 0 ? sheet.getRange(rowIndex, customerIdCol).getValue() : '';
-  if (channel === 'TikTok' && customerID) {
+  if ((channel === 'TikTok' || channel === 'Shopify') && customerID) {
     recalculateShipmentCount(customerID);
   }
 }
 
-// Full recompute of every customer's TikTok shipment count from scratch.
-// Run manually to fix drift, and set on a once-a-day trigger as a safety net.
+// Full recompute of every customer's shipment count from scratch.
+// Counts TikTok + Shopify orders in Enviado/Archivado. Excludes Manual.
 function recalculateAllShipmentCounts() {
   const ordersSheet = getOrdersSheet();
   const data = ordersSheet.getDataRange().getValues();
@@ -569,7 +561,7 @@ function recalculateAllShipmentCounts() {
   const counts = {};
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    if (row[channelCol] !== 'TikTok') continue;
+    if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
     if (row[statusCol] !== 'Enviado' && row[statusCol] !== 'Archivado') continue;
     const cid = row[customerIdCol];
     if (!cid) continue;
@@ -606,7 +598,6 @@ function nightlyBackup() {
         'VP backup FAILED: ' + name, String(err));
     }
   });
-  // Prune copies older than 30 days
   const cutoff = Date.now() - 30 * 86400000;
   const files = folder.getFiles();
   while (files.hasNext()) {
@@ -623,31 +614,53 @@ function authOk(t) {
   return !!want && t === want;
 }
 
+// ─── TikTok bulk import (optimized: reads/writes each sheet once) ──────────────
+
 function importTikTokOrders(body) {
   const orders = getOrdersSheet();
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
 
+  // ─── Read orders sheet ONCE ───────────────────────────────────────
   const iTrk = oh.indexOf('Tracking ID');
-  const trackingSet = {};
+  const iChanO = oh.indexOf('Channel');
+  const iStatO = oh.indexOf('Status');
+  const iCustO = oh.indexOf('Customer ID');
   const lastRow = orders.getLastRow();
-  if (lastRow > 1) {
-    orders.getRange(2, iTrk + 1, lastRow - 1, 1)
-          .getValues()
-          .forEach(r => { if (r[0]) trackingSet[String(r[0])] = true; });
-  }
+  const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
 
-  const ch = customersSheet.getRange(1, 1, 1, customersSheet.getLastColumn()).getValues()[0];
-  const cCols = {
-    street: ch.indexOf('Street + Number') + 1,
-    city:   ch.indexOf('City') + 1,
-    state:  ch.indexOf('State') + 1,
-    zip:    ch.indexOf('ZIP') + 1,
-    phone:  ch.indexOf('Phone Partial') + 1,
-    notes:  ch.indexOf('Notes') + 1,
+  const trackingSet = {};
+  const shipCountMap = {};
+  allOrderData.forEach(r => {
+    if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
+    const cid = String(r[iCustO] || '');
+    if (cid && (r[iChanO] === 'TikTok' || r[iChanO] === 'Shopify') &&
+        (r[iStatO] === 'Enviado' || r[iStatO] === 'Archivado')) {
+      shipCountMap[cid] = (shipCountMap[cid] || 0) + 1;
+    }
+  });
+
+  // ─── Read customers sheet ONCE into a 2D array ───────────────────
+  const custLastRow = customersSheet.getLastRow();
+  const custLastCol = customersSheet.getLastColumn();
+  const ch = customersSheet.getRange(1, 1, 1, custLastCol).getValues()[0];
+  const custData = custLastRow > 1 ? customersSheet.getRange(2, 1, custLastRow - 1, custLastCol).getValues() : [];
+
+  const cCol = {
+    id:     ch.indexOf('Customer ID'),
+    street: ch.indexOf('Street + Number'),
+    city:   ch.indexOf('City'),
+    state:  ch.indexOf('State'),
+    zip:    ch.indexOf('ZIP'),
+    phone:  ch.indexOf('Phone Partial'),
+    notes:  ch.indexOf('Notes'),
   };
 
+  const custRowMap = {};
+  custData.forEach((r, i) => { custRowMap[String(r[cCol.id])] = i; });
+
   const rows = [], results = [], unresolved = [];
+  let customersDirty = false;
 
   (body.shipments || []).forEach(s => {
     const tid = String(s.tracking_id || '');
@@ -664,20 +677,31 @@ function importTikTokOrders(body) {
     let shipCount  = 0;
 
     if (customerID) {
-      const customers = sheetToObjects(customersSheet);
-      const found = customers.find(c => c['Customer ID'] === customerID);
-      if (found) {
-        const allOrders = getOrdersSheet().getDataRange().getValues();
-        const headers = allOrders[0];
-        const iChan = headers.indexOf('Channel');
-        const iStat = headers.indexOf('Status');
-        const iCust = headers.indexOf('Customer ID');
-        shipCount = allOrders.slice(1).filter(r =>
-          r[iCust] === customerID &&
-          ['TikTok', 'Shopify'].includes(r[iChan]) &&
-          ['Enviado', 'Archivado'].includes(r[iStat])
-        ).length;
-        enrichAddressTT(customersSheet, found, s.address || {}, cCols);
+      shipCount = shipCountMap[customerID] || 0;
+      const idx = custRowMap[customerID];
+      if (idx !== undefined) {
+        const addr = s.address || {};
+        const pairs = [
+          ['street', cCol.street], ['city', cCol.city], ['state', cCol.state],
+          ['zip', cCol.zip], ['phone', cCol.phone]
+        ];
+        const noteAdd = [];
+        pairs.forEach(([k, colIdx]) => {
+          const incoming = (addr[k] || '').toString().trim();
+          if (!incoming || colIdx < 0) return;
+          const current = (custData[idx][colIdx] || '').toString().trim();
+          if (!current) {
+            custData[idx][colIdx] = incoming;
+            customersDirty = true;
+          } else if (current.toLowerCase() !== incoming.toLowerCase()) {
+            noteAdd.push(`${k} alt: ${incoming}`);
+          }
+        });
+        if (noteAdd.length && cCol.notes >= 0) {
+          const existing = (custData[idx][cCol.notes] || '').toString();
+          custData[idx][cCol.notes] = (existing ? existing + ' | ' : '') + noteAdd.join('; ');
+          customersDirty = true;
+        }
       }
     } else if (s.username) {
       unresolved.push(s.username);
@@ -685,20 +709,21 @@ function importTikTokOrders(body) {
 
     rows.push([
       (s.order_ids || []).join(' + ') || generateUUID(),
-      tid,
-      customerID,
-      primary,
-      'TikTok',
-      'Pagado',
-      s.products || '',
-      Number(s.price) || 0,
+      tid, customerID, primary, 'TikTok', 'Pagado',
+      s.products || '', Number(s.price) || 0,
       '', '', nowISO(), '', '', '', tid
     ]);
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
   });
 
+  // ─── Write orders in ONE batch ────────────────────────────────────
   if (rows.length)
     orders.getRange(orders.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+
+  // ─── Write modified customers back in ONE batch ───────────────────
+  if (customersDirty && custData.length > 0) {
+    customersSheet.getRange(2, 1, custData.length, custLastCol).setValues(custData);
+  }
 
   return jsonResponse({
     result:     'imported',
@@ -707,31 +732,4 @@ function importTikTokOrders(body) {
     unresolved: [...new Set(unresolved)],
     shipments:  results,
   });
-}
-
-function enrichAddressTT(sheet, customer, addr, cCols) {
-  const pairs = [
-    ['street', 'Street + Number'],
-    ['city',   'City'],
-    ['state',  'State'],
-    ['zip',    'ZIP'],
-    ['phone',  'Phone Partial'],
-  ];
-  const noteAdd = [];
-  pairs.forEach(([k, col]) => {
-    const incoming = (addr[k] || '').toString().trim();
-    if (!incoming) return;
-    const current = (customer[col] || '').toString().trim();
-    const colIdx = { street: cCols.street, city: cCols.city, state: cCols.state, zip: cCols.zip, phone: cCols.phone }[k];
-    if (!current && colIdx) {
-      sheet.getRange(customer._rowIndex, colIdx).setValue(incoming);
-    } else if (current && current.toLowerCase() !== incoming.toLowerCase()) {
-      noteAdd.push(`${col} alt: ${incoming}`);
-    }
-  });
-  if (noteAdd.length && cCols.notes > 0) {
-    const existing = (customer['Notes'] || '').toString();
-    sheet.getRange(customer._rowIndex, cCols.notes)
-         .setValue((existing ? existing + ' | ' : '') + noteAdd.join('; '));
-  }
 }
