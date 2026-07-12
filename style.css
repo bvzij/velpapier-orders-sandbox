@@ -98,6 +98,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .btn-danger:hover { background: var(--red-border); }
 .btn-edit { background: var(--blue-bg); color: var(--blue-text); border-color: #b5d4f4; }
 .btn-edit:hover { background: #b5d4f4; }
+.btn-add-quick { background: #22c55e; color: white; border-radius: 6px; font-size: 16px; line-height: 1; padding: 2px 7px; border: none; }
+.btn-add-quick:hover { background: #16a34a; }
 
 .main-content { padding: 1.5rem; overflow-y: auto; }
 

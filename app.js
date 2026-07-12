@@ -206,13 +206,17 @@ function handleSearchInput() {
   const list = document.getElementById('search-autocomplete-list');
   updateClearBtn();
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().startsWith(val)).slice(0, 8);
+  const clientes = getUniqueClientes().filter(c => {
+    const val_lower = val.toLowerCase();
+    return c.name.toLowerCase().startsWith(val_lower) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
+  }).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
   clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
-    item.innerHTML = `<span>${c.name}</span><span class="autocomplete-freq">${c.count} pedido${c.count !== 1 ? 's' : ''}</span>`;
+    item.innerHTML = `<span>${c.name}</span>`;
     item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name); });
     list.appendChild(item);
   });
@@ -272,13 +276,17 @@ function handleClienteInput() {
   const val = document.getElementById('new-cliente').value.trim().toLowerCase();
   const list = document.getElementById('autocomplete-list');
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => c.name.toLowerCase().startsWith(val)).slice(0, 8);
+  const clientes = getUniqueClientes().filter(c => {
+    const val_lower = val.toLowerCase();
+    return c.name.toLowerCase().startsWith(val_lower) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
+  }).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
   clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
-    item.innerHTML = `<span>${c.name}</span><span class="autocomplete-freq">${c.count} pedido${c.count !== 1 ? 's' : ''}</span>`;
+    item.innerHTML = `<span>${c.name}</span>`;
     item.addEventListener('mousedown', e => { e.preventDefault(); selectCliente(c.name); });
     list.appendChild(item);
   });
@@ -296,14 +304,13 @@ function hideAutocomplete() { setTimeout(() => { const l = document.getElementBy
 
 function getUniqueClientes() {
   const seen = {};
-  allRecords.forEach(r => {
-    const c = r.Cliente;
-    if (!c) return;
-    const k = c.toLowerCase();
-    if (!seen[k]) seen[k] = { name: c, count: 0 };
-    if (r.Channel === 'TikTok' || r.Channel === 'Shopify') seen[k].count++;
+  Object.entries(allCustomers).forEach(([key, c]) => {
+    const primary = (c.name || '').trim();
+    if (!primary) return;
+    const k = primary.toLowerCase();
+    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [] };
   });
-  return Object.values(seen).sort((a, b) => b.count - a.count);
+  return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 }
 
 // ── MODALS ───────────────────────────────────────────────────
@@ -313,7 +320,6 @@ function showConfirmModal(message, onConfirm) {
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Confirmar acción</div><div class="modal-body">${message}</div><div class="modal-actions"><button class="btn" id="modal-cancel-btn">Cancelar</button><button class="btn btn-primary" id="modal-confirm-btn">Confirmar</button></div></div></div>`;
   document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
   document.getElementById('modal-confirm-btn').addEventListener('click', () => { const a = pendingAction; closeModal(); if (a) a(); });
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
 function showEditModal(id) {
@@ -329,15 +335,14 @@ function showEditModal(id) {
   </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
   document.getElementById('edit-cancel-btn').addEventListener('click', closeModal);
   document.getElementById('edit-save-btn').addEventListener('click', () => saveEdit(id));
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
 function closeModal() { document.getElementById('modal-container').innerHTML = ''; pendingAction = null; }
 
-function showNewOrderModal() {
+function showNewOrderModal(prefillUsername) {
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div><div class="edit-form">
-    <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" />
+    <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" value="${escapeHtml(prefillUsername || '')}" />
     <select id="no-channel">
       <option value="Manual" selected>Manual</option>
       <option value="TikTok">TikTok</option>
@@ -350,7 +355,6 @@ function showNewOrderModal() {
   </div><div class="modal-actions"><button class="btn" id="no-cancel-btn">Cancelar</button><button class="btn btn-primary" id="no-save-btn">Guardar</button></div></div></div>`;
   document.getElementById('no-cancel-btn').addEventListener('click', closeModal);
   document.getElementById('no-save-btn').addEventListener('click', submitNewOrder);
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
 async function submitNewOrder() {
@@ -378,7 +382,6 @@ function showStatusModal(id, currentStatus) {
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div><div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
   c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => { updateOrderStatusNew(id, btn.dataset.status); closeModal(); }));
   document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
 async function updateOrderStatusNew(id, status) {
@@ -410,7 +413,6 @@ function showBulkStatusModal(group) {
     <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button><button class="btn btn-primary" id="bulk-status-confirm-btn" disabled>Confirmar</button></div>
   </div></div>`;
   document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
   c.querySelectorAll('.status-pill-toggle').forEach(btn => btn.addEventListener('click', () => {
     bulkModalSelectedStatus = btn.dataset.status;
     c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b === btn));
@@ -457,7 +459,6 @@ async function showCustomerHistoryModal(customerId, displayName) {
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal customer-history-modal"><div class="modal-title">Historial de ${escapeHtml(displayName || customerId)}</div><div id="customer-history-list" class="customer-history-list"><div class="empty-state">Cargando...</div></div><div class="modal-actions"><button class="btn" id="history-close-btn">Cerrar</button></div></div></div>`;
   document.getElementById('history-close-btn').addEventListener('click', closeModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
   try {
     const data = await apiGet('action=orders&customer_id=' + encodeURIComponent(customerId));
     const records = (data.records || []).map(mapFromApi).sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
@@ -495,16 +496,18 @@ function rebuildAllRecords() {
 }
 
 async function fetchActive() {
-  const [activeRes, customersRes] = await Promise.all([
+  const [activeData, customersData] = await Promise.all([
     apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
     apiGet('action=customers')
   ]);
-  const [activeData, customersData] = await Promise.all([activeRes.json(), customersRes.json()]);
   activeRecords = (activeData.records || []).map(mapFromApi);
   allCustomers = {};
   (customersData.records || []).forEach(c => {
-    const aliases = [c['Primary Username'], ...(c['Aliases'] ? String(c['Aliases']).split(',') : [])].map(a => (a || '').trim().toLowerCase()).filter(Boolean);
-    aliases.forEach(a => { allCustomers[a] = { name: c['Primary Username'] || '', shipmentCount: parseInt(c['Shipment Count'], 10) || 0 }; });
+    const primary = (c['Primary Username'] || '').trim();
+    if (!primary) return;
+    const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
+    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+    [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
   rebuildAllRecords();
 }
@@ -627,7 +630,7 @@ function requestRenameCliente(group) {
     clientes.forEach(cl => {
       const item = document.createElement('div');
       item.className = 'autocomplete-item';
-      item.innerHTML = `<span>${cl.name}</span><span class="autocomplete-freq">${cl.count} pedido${cl.count !== 1 ? 's' : ''}</span>`;
+      item.innerHTML = `<span>${cl.name}</span>`;
       item.addEventListener('mousedown', e => { e.preventDefault(); input.value = cl.name; list.style.display = 'none'; });
       list.appendChild(item);
     });
@@ -651,7 +654,6 @@ function requestRenameCliente(group) {
       showToast(`✓ ${targets.length} pedidos actualizados a "${newName}"`);
     } catch (e) { showToast('Error: ' + e.message); }
   });
-  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
 }
 
 function requestDelete(id, producto) {
@@ -841,6 +843,11 @@ function renderGrouped(records, containerId, showActions) {
     renameBtn.className = 'btn btn-xs btn-edit'; renameBtn.textContent = '✎'; renameBtn.title = 'Cambiar nombre';
     renameBtn.addEventListener('click', () => requestRenameCliente(grp));
     bulk.appendChild(renameBtn);
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn btn-xs btn-add-quick';
+    addBtn.textContent = '+'; addBtn.title = 'Agregar pedido';
+    addBtn.addEventListener('click', () => showNewOrderModal(cliente));
+    bulk.appendChild(addBtn);
     if (showActions) {
       const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
       btn.addEventListener('click', () => showBulkStatusModal(grp));
@@ -966,11 +973,26 @@ function switchTab(tab) {
   else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
 }
 
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
 // ── INIT ─────────────────────────────────────────────────────
 (async () => {
   await ensureAuth();
   renderBulkItems();
   updateUndoRedoButtons();
   loadRecords();
-  setInterval(autoRefresh, 30000);
+  setInterval(autoRefresh, 10000);
+  setInterval(async () => {
+    try {
+      const data = await apiGet('action=customers');
+      allCustomers = {};
+      (data.records || []).forEach(c => {
+        const primary = (c['Primary Username'] || '').trim();
+        if (!primary) return;
+        const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
+        const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+        [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
+      });
+    } catch (e) { /* silent */ }
+  }, 60000);
 })();
