@@ -40,40 +40,60 @@ async function ensureAuth() {
 
 // ── File handling ─────────────────────────────────────────────────────────────
 
+function handleZoneClick() {
+  // If neither file selected yet, pick CSV first
+  if (!csvFile) { document.getElementById('csv-input').click(); return; }
+  if (!pdfFile) { document.getElementById('pdf-input').click(); return; }
+  // Both selected — clicking again re-picks CSV
+  document.getElementById('csv-input').click();
+}
+
 function handleFile(type, file) {
   if (!file) return;
   if (type === 'csv') {
     csvFile = file;
-    document.getElementById('csv-name').textContent = file.name;
-    document.getElementById('csv-zone').classList.add('ready');
   } else {
     pdfFile = file;
-    document.getElementById('pdf-name').textContent = file.name;
-    document.getElementById('pdf-zone').classList.add('ready');
   }
-  document.getElementById('run-btn').disabled = !(csvFile && pdfFile);
+  updateDropZone();
   hideError();
+  document.getElementById('run-btn').disabled = !(csvFile && pdfFile);
 }
 
-// Drag-and-drop support
-['csv-zone', 'pdf-zone'].forEach(id => {
-  const zone = document.getElementById(id);
-  const type = id.replace('-zone', '');
+function updateDropZone() {
+  const zone   = document.getElementById('drop-zone');
+  const status = document.getElementById('drop-status');
+  const label  = document.getElementById('drop-label');
+  const hint   = document.getElementById('drop-hint');
+  const icon   = document.getElementById('drop-icon');
 
-  zone.addEventListener('dragover', e => {
-    e.preventDefault();
-    zone.classList.add('drag-over');
-  });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-  zone.addEventListener('drop', e => {
-    e.preventDefault();
-    zone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      if (type === 'csv') document.getElementById('csv-input').files = e.dataTransfer.files;
-      else document.getElementById('pdf-input').files = e.dataTransfer.files;
-      handleFile(type, file);
-    }
+  const chips = [];
+  if (csvFile) chips.push(`<span class="drop-file-chip csv">📋 ${escHtml(csvFile.name)}</span>`);
+  if (pdfFile) chips.push(`<span class="drop-file-chip pdf">📦 ${escHtml(pdfFile.name)}</span>`);
+  status.innerHTML = chips.join('');
+
+  if (csvFile && pdfFile) {
+    zone.classList.add('ready');
+    icon.textContent  = '✓';
+    label.textContent = 'Archivos listos';
+    hint.textContent  = 'Haz clic para cambiar alguno';
+  } else if (csvFile || pdfFile) {
+    icon.textContent  = '📂';
+    label.textContent = csvFile ? 'CSV listo — falta el PDF' : 'PDF listo — falta el CSV';
+    hint.textContent  = 'Haz clic para agregar el archivo que falta';
+  }
+}
+
+// Drag-and-drop on single zone
+const zone = document.getElementById('drop-zone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('drag-over');
+  Array.from(e.dataTransfer.files).forEach(file => {
+    if (file.name.endsWith('.csv')) handleFile('csv', file);
+    if (file.name.endsWith('.pdf')) handleFile('pdf', file);
   });
 });
 

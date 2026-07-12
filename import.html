@@ -39,22 +39,15 @@
     }
 
     /* ── Drop zones ─────────────────────────────────────────────── */
-    .drop-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-      margin-bottom: 1.25rem;
-    }
-
     .drop-zone {
       border: 1.5px dashed var(--border-strong);
       border-radius: var(--radius-lg);
       background: var(--surface);
-      padding: 2rem 1.5rem;
+      padding: 3rem 2rem;
       text-align: center;
       cursor: pointer;
       transition: all 0.15s;
-      position: relative;
+      margin-bottom: 1.25rem;
     }
 
     .drop-zone:hover, .drop-zone.drag-over {
@@ -68,14 +61,21 @@
       background: var(--green-bg);
     }
 
-    .drop-zone input[type="file"] {
-      position: absolute;
-      inset: 0;
-      opacity: 0;
-      cursor: pointer;
-      width: 100%;
-      height: 100%;
+    .drop-file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--surface);
+      border: 0.5px solid var(--border-strong);
+      color: var(--text);
     }
+
+    .drop-file-chip.csv { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+    .drop-file-chip.pdf { background: var(--blue-bg); color: var(--blue-text); border-color: #b3d4f5; }
 
     .drop-icon {
       font-size: 28px;
@@ -93,14 +93,6 @@
     .drop-hint {
       font-size: 12px;
       color: var(--text-muted);
-    }
-
-    .drop-filename {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--green-text);
-      margin-top: 6px;
-      word-break: break-all;
     }
 
     /* ── Run button ─────────────────────────────────────────────── */
@@ -530,22 +522,14 @@
     <div class="page-title">Importar órdenes de TikTok</div>
     <div class="page-subtitle">Sube el CSV y el PDF de guías juntos. El sistema importará las órdenes, anotará las guías y resolverá clientes automáticamente.</div>
 
-    <!-- Drop zones -->
-    <div class="drop-grid">
-      <div class="drop-zone" id="csv-zone" onclick="document.getElementById('csv-input').click()">
-        <input type="file" id="csv-input" accept=".csv" style="display:none" onchange="handleFile('csv', this.files[0])">
-        <span class="drop-icon">📋</span>
-        <div class="drop-label">CSV de TikTok</div>
-        <div class="drop-hint">Archivo de exportación de órdenes</div>
-        <div class="drop-filename" id="csv-name"></div>
-      </div>
-      <div class="drop-zone" id="pdf-zone" onclick="document.getElementById('pdf-input').click()">
-        <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handleFile('pdf', this.files[0])">
-        <span class="drop-icon">📦</span>
-        <div class="drop-label">PDF de guías</div>
-        <div class="drop-hint">Etiquetas de envío J&T</div>
-        <div class="drop-filename" id="pdf-name"></div>
-      </div>
+    <!-- Drop zone -->
+    <div class="drop-zone" id="drop-zone" onclick="handleZoneClick()">
+      <input type="file" id="csv-input" accept=".csv" style="display:none" onchange="handleFile('csv', this.files[0])">
+      <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handleFile('pdf', this.files[0])">
+      <span class="drop-icon" id="drop-icon">📂</span>
+      <div class="drop-label" id="drop-label">Arrastra el CSV y el PDF aquí</div>
+      <div class="drop-hint" id="drop-hint">o haz clic para seleccionar — se detectan automáticamente por tipo</div>
+      <div id="drop-status" style="margin-top:10px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap"></div>
     </div>
 
     <!-- Error -->
