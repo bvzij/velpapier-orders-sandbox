@@ -99,6 +99,19 @@
       </div>
       <div id="bulk-items-container"></div>
       <button class="btn add-bulk-btn" onclick="addBulkItem()">+ Agregar otro producto</button>
+      <div class="form-group" style="margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="gift-checkbox" onchange="renderGiftToggle()" style="width:auto" />
+          <span>Es un regalo</span>
+        </label>
+      </div>
+      <div id="gift-recipient-section" style="display:none;margin-bottom:8px">
+        <div class="form-group" style="position:relative">
+          <label>Destinatario (recipient)</label>
+          <input type="text" id="gift-recipient" placeholder="Usuario del destinatario..." autocomplete="off" oninput="handleGiftRecipientInput()" onblur="setTimeout(()=>{document.getElementById('gift-autocomplete-list').style.display='none'},150)" />
+          <div class="autocomplete-list" id="gift-autocomplete-list" style="display:none"></div>
+        </div>
+      </div>
       <div class="form-actions">
         <button class="btn btn-primary btn-block" onclick="createRecord()">Guardar pedido</button>
       </div>

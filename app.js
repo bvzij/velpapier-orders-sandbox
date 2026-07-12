@@ -198,6 +198,13 @@ function renderBulkItems() {
   });
 }
 
+function renderGiftToggle() {
+  const checkbox = document.getElementById('gift-checkbox');
+  const giftSection = document.getElementById('gift-recipient-section');
+  if (!checkbox || !giftSection) return;
+  giftSection.style.display = checkbox.checked ? 'block' : 'none';
+}
+
 // ── SEARCH ───────────────────────────────────────────────────
 let searchSelectedCliente = null;
 
@@ -301,6 +308,30 @@ function selectCliente(name) {
 }
 
 function hideAutocomplete() { setTimeout(() => { const l = document.getElementById('autocomplete-list'); if (l) l.style.display = 'none'; }, 150); }
+
+function handleGiftRecipientInput() {
+  const val = (document.getElementById('gift-recipient').value || '').trim().toLowerCase();
+  const list = document.getElementById('gift-autocomplete-list');
+  if (!val) { list.style.display = 'none'; return; }
+  const clientes = getUniqueClientes().filter(c => {
+    return c.name.toLowerCase().startsWith(val) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val));
+  }).slice(0, 8);
+  if (!clientes.length) { list.style.display = 'none'; return; }
+  list.innerHTML = '';
+  clientes.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.innerHTML = `<span>${c.name}</span>`;
+    item.addEventListener('mousedown', e => {
+      e.preventDefault();
+      document.getElementById('gift-recipient').value = c.name;
+      list.style.display = 'none';
+    });
+    list.appendChild(item);
+  });
+  list.style.display = 'block';
+}
 
 function getUniqueClientes() {
   const seen = {};
@@ -696,25 +727,113 @@ async function createRecord() {
   const cliente = document.getElementById('new-cliente').value.trim();
   const channel = document.getElementById('new-channel').value;
   const status = document.getElementById('new-status').value;
-  if (!cliente) { showToast('Falta el usuario TikTok'); return; }
+  const isGift = document.getElementById('gift-checkbox').checked;
+  const recipient = isGift ? (document.getElementById('gift-recipient').value || '').trim() : '';
+
+  if (!cliente) { showToast('Falta el usuario'); return; }
+  if (isGift && !recipient) { showToast('Falta el destinatario'); return; }
+
   saveBulkState();
   const items = bulkItems.filter(item => item.producto.trim());
   if (!items.length) { showToast('Falta al menos un producto'); return; }
+
   try {
     for (const item of items) {
-      const result = await apiPost({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '', status });
-      if (result.result === 'created') {
-        activeRecords.push({ ID: result.order_id, Cliente: cliente, Channel: channel, Producto: item.producto, Precio: parseFloat(item.precio) || 0, Notas: item.notas || '', Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', 'Fecha Creación': new Date().toISOString() });
-        rebuildAllRecords();
+      if (isGift) {
+        // Order for the buyer — NO MANDAR prefix, price 0, status Pagado
+        const buyerProduct = 'NO MANDAR - ' + item.producto;
+        const buyerResult = await apiPost({
+          action: 'create_order',
+          username: cliente,
+          channel: 'Manual',
+          products: buyerProduct,
+          price: 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status: 'Pagado'
+        });
+        if (buyerResult.result === 'created') {
+          activeRecords.push({
+            ID: buyerResult.order_id,
+            Cliente: cliente,
+            Channel: 'Manual',
+            Producto: buyerProduct,
+            Precio: 0,
+            Notas: item.notas || '',
+            Status: 'Pagado',
+            CustomerId: buyerResult.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
+        }
+
+        // Order for the recipient — REGALO DE prefix, price 0, status Pagado
+        const recipientProduct = 'REGALO DE ' + cliente + ' - ' + item.producto;
+        const recipientResult = await apiPost({
+          action: 'create_order',
+          username: recipient,
+          channel: 'Manual',
+          products: recipientProduct,
+          price: 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status: 'Pagado'
+        });
+        if (recipientResult.result === 'created') {
+          activeRecords.push({
+            ID: recipientResult.order_id,
+            Cliente: recipient,
+            Channel: 'Manual',
+            Producto: recipientProduct,
+            Precio: 0,
+            Notas: item.notas || '',
+            Status: 'Pagado',
+            CustomerId: recipientResult.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
+        }
+
+      } else {
+        // Normal order
+        const result = await apiPost({
+          action: 'create_order',
+          username: cliente,
+          channel,
+          products: item.producto,
+          price: parseFloat(item.precio) || 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status
+        });
+        if (result.result === 'created') {
+          activeRecords.push({
+            ID: result.order_id,
+            Cliente: cliente,
+            Channel: channel,
+            Producto: item.producto,
+            Precio: parseFloat(item.precio) || 0,
+            Notas: item.notas || '',
+            Status: result.status || 'No Pagado',
+            CustomerId: result.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
+        }
       }
     }
+
+    // Reset form
     document.getElementById('new-cliente').value = '';
     document.getElementById('new-channel').value = 'Manual';
     document.getElementById('new-status').value = 'No Pagado';
+    document.getElementById('gift-checkbox').checked = false;
+    document.getElementById('gift-recipient').value = '';
+    document.getElementById('gift-recipient-section').style.display = 'none';
     bulkItems = [{ producto: '', precio: '', notas: '' }];
     renderBulkItems();
     renderAll();
-    showToast(`✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
+    showToast(isGift ? '✓ Regalo registrado (2 entradas)' : `✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
