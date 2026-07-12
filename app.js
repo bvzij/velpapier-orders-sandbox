@@ -972,9 +972,9 @@ function renderGrouped(records, containerId, showActions) {
       r.Channel === 'TikTok' &&
       r.Status === 'Pagado'
     );
-    const tikTokIndicator = hasPendingTikTok
-      ? `<span title="TikTok pendiente — apto para envío" style="display:inline-flex;align-items:center;gap:3px;background:#fff0f0;color:#c0392b;border:0.5px solid #f5b7b1;border-radius:99px;padding:1px 7px;font-size:10px;font-weight:600;margin-left:6px">▶ TikTok</span>`
-      : '';
+    const tikTokIndicator = '';
+    header.setAttribute('data-tiktok-ready', hasPendingTikTok);
+    group.setAttribute('data-tiktok-ready', hasPendingTikTok);
     header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
 
     const bulk = header.querySelector('.customer-bulk-actions');

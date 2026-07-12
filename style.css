@@ -123,6 +123,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .customer-header { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm); margin-bottom: 5px; background: var(--surface2); }
 .customer-header--unnamed { background: var(--red-bg); border: 1px solid var(--red-border); }
 .customer-header--unnamed .customer-name { color: var(--red-text); }
+.customer-header[data-tiktok-ready="true"] { background: #e8f5e2; }
+.customer-group[data-tiktok-ready="true"] { background: #f4faf1; }
 .customer-avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--blue-bg); color: var(--blue-text); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .customer-name { font-size: 13px; font-weight: 600; }
 .shipment-count { font-size: 11px; font-weight: 500; color: var(--text-muted); }
