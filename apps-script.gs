@@ -1,7 +1,7 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 
-const SCRIPT_VERSION = '2026-07-11.3';
+const SCRIPT_VERSION = '2026-07-12.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -188,6 +188,7 @@ function doPost(e) {
     if (action === 'stamp_customer_ids') { stampCustomerIDs(); return jsonResponse({ result: 'done' }); }
     if (action === 'update_order') return updateOrder(body);
     if (action === 'delete_order') return deleteOrder(body);
+    if (action === 'import_tiktok_orders') return importTikTokOrders(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -620,4 +621,108 @@ function nightlyBackup() {
 function authOk(t) {
   const want = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
   return !!want && t === want;
+}
+
+function importTikTokOrders(body) {
+  const orders = getOrdersSheet();
+  const customersSheet = getCustomersSheet();
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+
+  const iTrk = oh.indexOf('Tracking ID');
+  const trackingSet = {};
+  const lastRow = orders.getLastRow();
+  if (lastRow > 1) {
+    orders.getRange(2, iTrk + 1, lastRow - 1, 1)
+          .getValues()
+          .forEach(r => { if (r[0]) trackingSet[String(r[0])] = true; });
+  }
+
+  const ch = customersSheet.getRange(1, 1, 1, customersSheet.getLastColumn()).getValues()[0];
+  const cCols = {
+    street: ch.indexOf('Street + Number') + 1,
+    city:   ch.indexOf('City') + 1,
+    state:  ch.indexOf('State') + 1,
+    zip:    ch.indexOf('ZIP') + 1,
+    phone:  ch.indexOf('Phone Partial') + 1,
+    notes:  ch.indexOf('Notes') + 1,
+  };
+
+  const rows = [], results = [], unresolved = [];
+
+  (body.shipments || []).forEach(s => {
+    const tid = String(s.tracking_id || '');
+    if (!tid) return;
+
+    if (trackingSet[tid]) {
+      results.push({ tracking_id: tid, inserted: false, reason: 'duplicate' });
+      return;
+    }
+    trackingSet[tid] = true;
+
+    let customerID = s.customer_id || '';
+    let primary    = s.username || '';
+    let shipCount  = 0;
+
+    if (customerID) {
+      const customers = sheetToObjects(customersSheet);
+      const found = customers.find(c => c['Customer ID'] === customerID);
+      if (found) {
+        shipCount = parseInt(found['Shipment Count'], 10) || 0;
+        enrichAddressTT(customersSheet, found, s.address || {}, cCols);
+      }
+    } else if (s.username) {
+      unresolved.push(s.username);
+    }
+
+    rows.push([
+      (s.order_ids || []).join(' + ') || generateUUID(),
+      tid,
+      customerID,
+      primary,
+      'TikTok',
+      'Pagado',
+      s.products || '',
+      Number(s.price) || 0,
+      '', '', nowISO(), '', '', '', tid
+    ]);
+    results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
+  });
+
+  if (rows.length)
+    orders.getRange(orders.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+
+  return jsonResponse({
+    result:     'imported',
+    inserted:   rows.length,
+    duplicates: results.filter(r => !r.inserted).length,
+    unresolved: [...new Set(unresolved)],
+    shipments:  results,
+  });
+}
+
+function enrichAddressTT(sheet, customer, addr, cCols) {
+  const pairs = [
+    ['street', 'Street + Number'],
+    ['city',   'City'],
+    ['state',  'State'],
+    ['zip',    'ZIP'],
+    ['phone',  'Phone Partial'],
+  ];
+  const noteAdd = [];
+  pairs.forEach(([k, col]) => {
+    const incoming = (addr[k] || '').toString().trim();
+    if (!incoming) return;
+    const current = (customer[col] || '').toString().trim();
+    const colIdx = { street: cCols.street, city: cCols.city, state: cCols.state, zip: cCols.zip, phone: cCols.phone }[k];
+    if (!current && colIdx) {
+      sheet.getRange(customer._rowIndex, colIdx).setValue(incoming);
+    } else if (current && current.toLowerCase() !== incoming.toLowerCase()) {
+      noteAdd.push(`${col} alt: ${incoming}`);
+    }
+  });
+  if (noteAdd.length && cCols.notes > 0) {
+    const existing = (customer['Notes'] || '').toString();
+    sheet.getRange(customer._rowIndex, cCols.notes)
+         .setValue((existing ? existing + ' | ' : '') + noteAdd.join('; '));
+  }
 }
