@@ -169,9 +169,8 @@ function handleResult(data) {
 
   // Possible matches
   if (lastMatches.length > 0) {
-    renderMatches(lastMatches);
     document.getElementById('matches-section').style.display = 'block';
-    fetchCustomersForModal();
+    fetchCustomersForModal().then(() => renderMatches(lastMatches));
   }
 
   // New customers created
@@ -229,9 +228,10 @@ function renderMatches(matches) {
       </div>
       <div class="match-row">Posible match: <strong>${escHtml(m.matched_to)}</strong></div>
       <div class="match-row">Tracking: <strong>${escHtml(m.tracking_id)}</strong></div>
-      <div class="match-actions">
-        <button class="match-btn primary" onclick="openMatchModal(${i})">Ver detalle</button>
-        <button class="match-btn" onclick="toggleAssignDropdown(${i})">Asignar alias ▾</button>
+     <div class="match-actions">
+        <button class="match-btn primary" onclick="quickConfirm(${i})" style="flex:1.4">✓ Confirmar: ${escHtml(m.matched_to)}</button>
+        <button class="match-btn" onclick="openMatchModal(${i})">Ver detalle</button>
+        <button class="match-btn" onclick="toggleAssignDropdown(${i})">Otro ▾</button>
       </div>
       <div class="match-assign-wrap" id="match-assign-${i}">
         <select id="match-select-${i}">
@@ -271,16 +271,40 @@ function populateSelectDropdown(selectId) {
 }
 
 async function confirmAssign(i) {
+  const btn = document.querySelector(`#match-assign-${i} .match-assign-confirm`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
   const sel   = document.getElementById(`match-select-${i}`);
   const custId = sel ? sel.value : '';
-  if (!custId) { showToast('Selecciona un cliente primero', true); return; }
+  if (!custId) {
+    showToast('Selecciona un cliente primero', true);
+    if (btn) { btn.disabled = false; btn.textContent = 'Confirmar asignación'; }
+    return;
+  }
   const match = lastMatches[i];
   await doAddAlias(match.username, custId, i);
 }
 
+async function quickConfirm(i) {
+  const match = lastMatches[i];
+  const found = allCustomers.find(c => c['Primary Username'] === match.matched_to);
+  if (!found) {
+    showToast('No se encontró el cliente sugerido, usa "Otro" para buscar manualmente', true);
+    return;
+  }
+  const btn = document.querySelector(`#match-card-${i} .match-btn.primary`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
+  await doAddAlias(match.username, found['Customer ID'], i);
+}
+
 async function confirmModalAssign() {
+  const btn = document.querySelector('.modal-actions .confirm');
+  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
   const custId = document.getElementById('modal-customer-select').value;
-  if (!custId) { showToast('Selecciona un cliente primero', true); return; }
+  if (!custId) {
+    showToast('Selecciona un cliente primero', true);
+    if (btn) { btn.disabled = false; btn.textContent = 'Asignar alias'; }
+    return;
+  }
   const match = lastMatches[activeMatchIdx];
   await doAddAlias(match.username, custId, activeMatchIdx);
   closeModal();
