@@ -290,7 +290,7 @@ async function doAddAlias(username, customerId, cardIdx) {
   try {
     const r = await fetch(API, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body:    JSON.stringify({
         action:      'add_alias',
         token:       API_TOKEN,
@@ -304,7 +304,7 @@ async function doAddAlias(username, customerId, cardIdx) {
     // Stamp the customer ID on the unresolved orders
     await fetch(API, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body:    JSON.stringify({
         action: 'stamp_customer_ids',
         token:  API_TOKEN,
