@@ -7,36 +7,67 @@ let API_TOKEN = localStorage.getItem('vp_token') || '';
 let allActiveOrders = [];   // all Pagado/No Pagado orders, fetched once per session
 let selected = null;        // { tracking_id, order_ids:[], customer_id, username, products, label }
 let selectedAddonIds = new Set();  // order_ids of add-on orders the user checked
+let currentQcId = null;     // QC row id once a draft exists on the server
+let uploadsInFlight = 0;
 const photos = { content: null, gift: null, box: null };
 
-// ── Draft persistence (survives phone reloads / accidental navigation) ─────
-// Key: 'vp_qc_draft_<tracking_id>'  Value: { addonIds:[], photos:{}, notes:'' }
+// ── Draft persistence ───────────────────────────────────────────────────────
+// Source of truth is the QC sheet itself (Status='Borrador').
+// localStorage is only a fast local cache, used to avoid an extra round trip
+// and as a fallback if the network is briefly unavailable.
 
 function draftKey(trackingId) {
   return 'vp_qc_draft_' + (trackingId || 'no_tracking');
 }
 
-function saveDraft() {
+function saveDraftLocal() {
   if (!selected) return;
   const draft = {
+    qc_id:    currentQcId,
     addonIds: Array.from(selectedAddonIds),
     photos:   photos,
     notes:    document.getElementById('qc-notes').value,
   };
   try {
     localStorage.setItem(draftKey(selected.tracking_id), JSON.stringify(draft));
-  } catch (e) { /* storage full or unavailable — non-fatal, just no recovery */ }
+  } catch (e) { /* storage full or unavailable — non-fatal */ }
 }
 
-function loadDraft(trackingId) {
+function loadDraftLocal(trackingId) {
   try {
     const raw = localStorage.getItem(draftKey(trackingId));
     return raw ? JSON.parse(raw) : null;
   } catch (e) { return null; }
 }
 
-function clearDraft(trackingId) {
+function clearDraftLocal(trackingId) {
   try { localStorage.removeItem(draftKey(trackingId)); } catch (e) { /* ignore */ }
+}
+
+// Push current photos/notes/addons to the server draft row.
+// Creates the row on first call (sets currentQcId), updates it after.
+async function syncDraftToServer() {
+  if (!selected || !photos.content) return;  // nothing worth saving yet
+  try {
+    const res = await apiPost({
+      action:        'save_qc_draft',
+      qc_id:         currentQcId || undefined,
+      tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
+      order_ids:     [...selected.order_ids, ...Array.from(selectedAddonIds)],
+      customer_id:   selected.customer_id,
+      username:      selected.username,
+      packer:        document.getElementById('packer-select').value,
+      photo_content: photos.content ? photos.content.url : '',
+      photo_gift:    (photos.gift || {}).url || '',
+      photo_box:     (photos.box || {}).url || '',
+      notes:         document.getElementById('qc-notes').value.trim(),
+    });
+    if (res.qc_id) currentQcId = res.qc_id;
+    saveDraftLocal();
+  } catch (e) {
+    console.error('[syncDraftToServer] failed, keeping local draft only:', e);
+    saveDraftLocal();
+  }
 }
 
 
@@ -131,7 +162,7 @@ async function loadPending() {
         customer_id: first['Customer ID'] || '',
         username: username,
         products: productsList,
-      }).replace(/'/g, "&apos;")})'>
+      }).replace(/'/g, "&apos;")}).catch(e => console.error(e))'>
         <div class="pending-card-top">
           <span class="pending-username">@${escapeHtml(username)}</span>
           <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}</span>
@@ -145,8 +176,9 @@ async function loadPending() {
 
 // ── Capture view ─────────────────────────────────────────────────────────
 
-function openCapture(shipment) {
+async function openCapture(shipment) {
   selected = shipment;
+  currentQcId = null;
 
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">@${escapeHtml(shipment.username)}</div>
@@ -156,22 +188,49 @@ function openCapture(shipment) {
 
   renderAddonOrders(shipment.customer_id);
 
-  // Restore any in-progress draft for this shipment (survives reloads/navigation)
-  const draft = loadDraft(shipment.tracking_id);
-  if (draft) {
-    selectedAddonIds = new Set(draft.addonIds || []);
-    photos.content = draft.photos?.content || null;
-    photos.gift    = draft.photos?.gift    || null;
-    photos.box     = draft.photos?.box     || null;
-    document.getElementById('qc-notes').value = draft.notes || '';
-    showToast('Progreso anterior restaurado');
-  } else {
-    selectedAddonIds = new Set();
-    photos.content = null;
-    photos.gift = null;
-    photos.box = null;
-    document.getElementById('qc-notes').value = '';
+  // Reset to blank first
+  selectedAddonIds = new Set();
+  photos.content = null;
+  photos.gift = null;
+  photos.box = null;
+  document.getElementById('qc-notes').value = '';
+
+  // 1) Try the server first — the real source of truth (survives any device/browser change)
+  let restored = false;
+  if (shipment.tracking_id) {
+    try {
+      const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(shipment.tracking_id)}`);
+      const draftRow = (data.records || []).find(r => r['Status'] === 'Borrador');
+      if (draftRow) {
+        currentQcId = draftRow['QC ID'];
+        photos.content = draftRow['Photo1 Content'] ? { url: draftRow['Photo1 Content'] } : null;
+        photos.gift    = draftRow['Photo2 Gift']    ? { url: draftRow['Photo2 Gift'] }    : null;
+        photos.box     = draftRow['Photo3 Box']     ? { url: draftRow['Photo3 Box'] }     : null;
+        document.getElementById('qc-notes').value = draftRow['Notes'] || '';
+        const savedOrderIds = String(draftRow['Order IDs'] || '').split(' + ').filter(Boolean);
+        savedOrderIds.forEach(id => { if (!shipment.order_ids.includes(id)) selectedAddonIds.add(id); });
+        restored = true;
+      }
+    } catch (e) {
+      console.warn('[openCapture] could not reach server for draft, trying local cache:', e);
+    }
   }
+
+  // 2) Fall back to local cache if server had nothing (e.g. offline moment)
+  if (!restored) {
+    const local = loadDraftLocal(shipment.tracking_id);
+    if (local) {
+      currentQcId = local.qc_id || null;
+      selectedAddonIds = new Set(local.addonIds || []);
+      photos.content = local.photos?.content || null;
+      photos.gift    = local.photos?.gift    || null;
+      photos.box     = local.photos?.box     || null;
+      document.getElementById('qc-notes').value = local.notes || '';
+      restored = true;
+    }
+  }
+
+  if (restored) showToast('Progreso anterior restaurado');
 
   // Reflect restored/reset state in the UI
   resetSlotVisual('content');
@@ -234,7 +293,7 @@ function toggleAddon(orderId) {
     selectedAddonIds.add(orderId);
     el.classList.add('selected');
   }
-  saveDraft();
+  syncDraftToServer();
 }
 
 
@@ -285,8 +344,6 @@ function setSlotState(name, state, previewUrl) {
   }
 }
 
-let uploadsInFlight = 0;
-
 function bindSlot(name) {
   const input = document.querySelector(`#slot-${name} input`);
   input.onchange = async () => {
@@ -299,7 +356,7 @@ function bindSlot(name) {
     try {
       photos[name] = await uploadPhoto(f, 'velpapier/qc');
       setSlotState(name, 'done', previewUrl);
-      saveDraft();  // photo URL is tiny — safe to persist immediately after upload succeeds
+      await syncDraftToServer();  // persist to the Sheet right away — this is the real safety net
     } catch (e) {
       console.error('[bindSlot] upload failed:', e);
       photos[name] = null;
@@ -313,7 +370,8 @@ function bindSlot(name) {
 }
 ['content', 'gift', 'box'].forEach(bindSlot);
 
-document.getElementById('qc-notes').addEventListener('input', saveDraft);
+document.getElementById('qc-notes').addEventListener('input', saveDraftLocal);
+document.getElementById('qc-notes').addEventListener('change', syncDraftToServer);
 
 
 // ── Submit ───────────────────────────────────────────────────────────────
@@ -328,8 +386,13 @@ async function submitQC() {
   const allOrderIds = [...selected.order_ids, ...Array.from(selectedAddonIds)];
 
   try {
+    // Ensure the draft exists on the server before finalizing (covers the
+    // rare case where the very first sync attempt failed silently).
+    if (!currentQcId) await syncDraftToServer();
+
     const res = await apiPost({
-      action:        'create_qc',
+      action:        'finalize_qc',
+      qc_id:         currentQcId,
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     allOrderIds,
       customer_id:   selected.customer_id,
@@ -338,21 +401,14 @@ async function submitQC() {
       photo_content: photos.content.url,
       photo_gift:    (photos.gift || {}).url || '',
       photo_box:     (photos.box || {}).url || '',
-      skus:          '',
       notes:         document.getElementById('qc-notes').value.trim(),
     });
 
-    if (res.result === 'duplicate') {
-      showToast('⚠ Esta guía ya tiene QC registrado');
-      clearDraft(selected.tracking_id);
-      backToPending();
-      loadPending();
-      return;
-    }
-    if (res.result !== 'created') throw new Error(res.error || 'Error desconocido');
+    if (res.error) throw new Error(res.error);
+    if (res.result !== 'created') throw new Error('Error desconocido');
 
     showToast('✓ Empacado y enviado');
-    clearDraft(selected.tracking_id);
+    clearDraftLocal(selected.tracking_id);
     backToPending();
     loadPending();
 
