@@ -1,942 +1,1194 @@
-const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
-const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
-const QC_SHEET_ID = 'PASTE_YOUR_NEW_QC_SHEET_ID_HERE';
+const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
 
-const SCRIPT_VERSION = '2026-08-15.3';
+const HIDE_TIKTOK_FROM_MAIN_TABS = true; // set to true when TikTok tab is fully tested
 
-const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
+let API_TOKEN = localStorage.getItem('vp_token') || '';
 
-// ─── Sheet accessors ───────────────────────────────────────────────────────────
-
-function getOrdersSheet() {
-  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheets()[0];
+async function ensureAuth() {
+  for (;;) {
+    if (API_TOKEN) {
+      try {
+        const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(API_TOKEN)}`);
+        if ((await r.json()).ok) return;
+      } catch (e) { /* fall through to prompt */ }
+    }
+    const input = prompt('Contraseña:');
+    if (input === null) {
+      document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+      throw new Error('unauthenticated');
+    }
+    API_TOKEN = input.trim();
+    localStorage.setItem('vp_token', API_TOKEN);
+  }
 }
 
-function getCustomersSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheets()[0];
+// Maps internal field names (used throughout the UI) to the new Orders sheet column names.
+const FIELD_MAP = {
+  ID: 'Order ID',
+  Cliente: 'Primary Username',
+  Producto: 'Products',
+  Precio: 'Price',
+  Notas: 'Notes',
+  Status: 'Status',
+  Channel: 'Channel',
+  CustomerId: 'Customer ID',
+  ShopifyOrderId: 'Shopify Order ID',
+  'Fecha Creación': 'Created Date',
+  ArchiveDate: 'Archive Date'
+};
+
+const STATUS_FLOW = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
+function nextStatuses(current) {
+  const idx = STATUS_FLOW.indexOf(current);
+  if (idx === -1 || idx === STATUS_FLOW.length - 1) return [];
+  return STATUS_FLOW.slice(idx + 1);
 }
 
-function getQCSheet() {
-  return SpreadsheetApp.openById(QC_SHEET_ID).getSheets()[0];
+// ── UNDO / REDO (status changes only) ───────────────────────
+let undoStack = [];
+let redoStack = [];
+const MAX_UNDO_DEPTH = 20;
+
+function pushUndoEntry(entry) {
+  undoStack.push(entry);
+  if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoButtons();
 }
 
-// ─── Utilities ─────────────────────────────────────────────────────────────────
-
-function generateUUID() {
-  return Utilities.getUuid();
+function updateUndoRedoButtons() {
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
 }
 
-function nowISO() {
-  return new Date().toISOString();
+async function performStatusUpdate(orderId, status) {
+  const payload = { action: 'update_order_status', order_id: orderId, status: status };
+  return apiPost(payload);
 }
 
-function sheetToObjects(sheet) {
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return [];
-  const headers = data[0];
-  return data.slice(1).map((row, i) => {
-    const obj = { _rowIndex: i + 2 };
-    headers.forEach((h, j) => { obj[h] = row[j]; });
-    return obj;
-  });
-}
-
-function findOrderRow(sheet, orderID) {
-  const idColumn = sheet.getRange('A:A');
-  const finder = idColumn.createTextFinder(orderID).matchEntireCell(true);
-  const found = finder.findNext();
-  if (!found) return null;
-  return found.getRow();
-}
-
-function jsonResponse(data, status) {
-  const output = ContentService.createTextOutput(JSON.stringify(data));
-  output.setMimeType(ContentService.MimeType.JSON);
-  return output;
-}
-
-// ─── Customer ID generator ─────────────────────────────────────────────────────
-
-function generateCustomerID(sheet) {
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return 'CUST-001';
-  const ids = data.slice(1)
-    .map(r => r[0])
-    .filter(id => typeof id === 'string' && id.startsWith('CUST-'))
-    .map(id => parseInt(id.replace('CUST-', ''), 10))
-    .filter(n => !isNaN(n));
-  const max = ids.length > 0 ? Math.max(...ids) : 0;
-  return 'CUST-' + String(max + 1).padStart(3, '0');
-}
-
-// ─── Identity resolution ───────────────────────────────────────────────────────
-
-function normalizeUsername(username) {
-  if (!username) return '';
-  return username
-    .toLowerCase()
-    .replace(/^@/, '')
-    .replace(/^tiktok\.com\/@?/, '')
-    .replace(/\s*\(.*?\)\s*/g, '')
-    .trim();
-}
-
-function findCustomerByUsername(customers, rawUsername) {
-  const normalized = normalizeUsername(rawUsername);
-  if (!normalized) return null;
-
-  let match = customers.find(c =>
-    normalizeUsername(c['Primary Username']) === normalized
-  );
-  if (match) return { customer: match, confidence: 'exact' };
-
-  match = customers.find(c => {
-    const aliases = (c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim()));
-    return aliases.includes(normalized);
-  });
-  if (match) return { customer: match, confidence: 'alias' };
-
-  match = customers.find(c => {
-    const primary = normalizeUsername(c['Primary Username']);
-    const aliases = (c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim()));
-    const all = [primary, ...aliases].filter(Boolean);
-    return all.some(name =>
-      (name.length > 4 && normalized.startsWith(name.substring(0, name.length - 1))) ||
-      (normalized.length > 4 && name.startsWith(normalized.substring(0, normalized.length - 1)))
-    );
-  });
-  if (match) return { customer: match, confidence: 'fuzzy' };
-
-  return null;
-}
-
-// ─── GET handler ───────────────────────────────────────────────────────────────
-
-function doGet(e) {
+async function performUndo() {
+  if (!undoStack.length) return;
+  const entry = undoStack.pop();
   try {
-    const action = e.parameter.action || 'orders';
-
-    if (action === 'ping') return jsonResponse({ ok: true });
-    if (action !== 'version' && !authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
-
-    if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
-
-    if (action === 'get_upload_signature') return getUploadSignature(e);
-    if (action === 'qc') return getQC(e);
-
-    if (action === 'orders') {
-      const sheet = getOrdersSheet();
-      const data = sheet.getDataRange().getValues();
-      if (data.length < 2) return jsonResponse({ records: [] });
-
-      const headers = data[0];
-      const statusCol = headers.indexOf('Status');
-      const channelCol = headers.indexOf('Channel');
-      const customerIdCol = headers.indexOf('Customer ID');
-
-      const statusFilter = e.parameter.status
-        ? e.parameter.status.split(',').map(s => s.trim()).filter(Boolean)
-        : null;
-      const channelFilter = e.parameter.channel || null;
-      const customerIdFilter = e.parameter.customer_id || null;
-
-      const records = [];
-      for (let i = 1; i < data.length; i++) {
-        const row = data[i];
-        if (statusFilter && !statusFilter.includes(row[statusCol])) continue;
-        if (channelFilter && row[channelCol] !== channelFilter) continue;
-        if (customerIdFilter && row[customerIdCol] !== customerIdFilter) continue;
-
-        const obj = { _rowIndex: i + 1 };
-        headers.forEach((h, j) => { obj[h] = row[j]; });
-        records.push(obj);
-      }
-
-      return jsonResponse({ records: records });
-    }
-
-    if (action === 'customers') {
-      const sheet = getCustomersSheet();
-      const customers = sheetToObjects(sheet);
-
-      if (e.parameter.customer_id) {
-        const found = customers.find(c => c['Customer ID'] === e.parameter.customer_id);
-        return jsonResponse(found || null);
-      }
-
-      if (e.parameter.username) {
-        const result = findCustomerByUsername(customers, e.parameter.username);
-        return jsonResponse(result || null);
-      }
-
-      return jsonResponse({ records: customers });
-    }
-
-    return jsonResponse({ error: 'Unknown action' });
-
-  } catch (err) {
-    return jsonResponse({ error: err.message });
-  }
+    const result = await performStatusUpdate(entry.order_id, entry.from_status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
+    if (rec) rec.Status = entry.from_status;
+    redoStack.push(entry);
+    if (redoStack.length > MAX_UNDO_DEPTH) redoStack.shift();
+    updateUndoRedoButtons();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`↩ Deshecho: ${entry.to_status} → ${entry.from_status}`);
+  } catch (e) { undoStack.push(entry); showToast('Error: ' + e.message); }
 }
 
-// ─── POST handler ──────────────────────────────────────────────────────────────
-
-function doPost(e) {
+async function performRedo() {
+  if (!redoStack.length) return;
+  const entry = redoStack.pop();
   try {
-    const body = JSON.parse(e.postData.contents);
-    const action = body.action;
-    if (!authOk(body.token)) return jsonResponse({ error: 'unauthorized' });
-
-    if (action === 'create_order') return createOrder(body);
-    if (action === 'create_customer') return createCustomer(body);
-    if (action === 'update_order_status') return updateOrderStatus(body);
-    if (action === 'add_alias') return addAlias(body);
-    if (action === 'update_packed_date') return updatePackedDate(body);
-    if (action === 'migrate_order') return migrateOrder(body);
-    if (action === 'stamp_customer_ids') { stampCustomerIDs(); return jsonResponse({ result: 'done' }); }
-    if (action === 'update_order') return updateOrder(body);
-    if (action === 'delete_order') return deleteOrder(body);
-    if (action === 'import_tiktok_orders') return importTikTokOrders(body);
-    if (action === 'create_customers_bulk') return createCustomersBulk(body);
-    if (action === 'save_qc') return saveQC(body);
-
-    return jsonResponse({ error: 'Unknown action' });
-
-  } catch (err) {
-    return jsonResponse({ error: err.message });
-  }
+    const result = await performStatusUpdate(entry.order_id, entry.to_status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
+    if (rec) rec.Status = entry.to_status;
+    undoStack.push(entry);
+    if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
+    updateUndoRedoButtons();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`↪ Rehecho: ${entry.from_status} → ${entry.to_status}`);
+  } catch (e) { redoStack.push(entry); showToast('Error: ' + e.message); }
 }
 
-// ─── Create order ──────────────────────────────────────────────────────────────
-
-function createOrder(body) {
-  const ordersSheet = getOrdersSheet();
-  const customersSheet = getCustomersSheet();
-
-  if (body.channel === 'TikTok' && body.tracking_id) {
-    const existing = sheetToObjects(ordersSheet);
-    const dup = existing.find(o => o['Tracking ID'] === body.tracking_id);
-    if (dup) {
-      const sameOrderID = dup['Order ID'] === body.order_id;
-      return jsonResponse({
-        result: 'duplicate',
-        certain: sameOrderID,
-        message: sameOrderID
-          ? 'Exact duplicate — same Tracking ID and Order ID already in sheet.'
-          : 'Tracking ID exists but Order ID differs — possible system error. Not imported.',
-        existing_row: dup
-      });
-    }
-  }
-
-  const customers = sheetToObjects(customersSheet);
-  const resolution = findCustomerByUsername(customers, body.username);
-  let customerID = '';
-  let primaryUsername = body.username || '';
-  let mergeFlag = false;
-
-  if (resolution) {
-    customerID = resolution.customer['Customer ID'];
-    primaryUsername = resolution.customer['Primary Username'];
-    if (resolution.confidence === 'fuzzy') mergeFlag = true;
-  }
-
-  let status = body.status || 'No Pagado';
-  if (body.channel === 'TikTok') status = 'Pagado';
-
-  const row = [
-    body.order_id || generateUUID(),
-    body.tracking_id || '',
-    customerID,
-    primaryUsername,
-    body.channel || 'Manual',
-    status,
-    body.products || '',
-    body.price || 0,
-    body.shopify_order_id || '',
-    body.notes || '',
-    nowISO(),
-    '',   // Packed Date
-    '',   // Shipped Date
-    '',   // Archive Date
-    body.linked_shipment || ''
-  ];
-
-  ordersSheet.appendRow(row);
-
-  return jsonResponse({
-    result: 'created',
-    order_id: row[0],
-    customer_id: customerID,
-    merge_flag: mergeFlag,
-    status: status
-  });
+function statusPillClass(status) {
+  if (status === 'No Pagado') return 'pill-nopagado';
+  if (status === 'Pagado') return 'pill-pagado';
+  return 'pill-enviado';
 }
 
-// ─── Create customer ───────────────────────────────────────────────────────────
-
-function createCustomer(body) {
-  const sheet = getCustomersSheet();
-  const customers = sheetToObjects(sheet);
-
-  if (body.primary_username) {
-    const existing = findCustomerByUsername(customers, body.primary_username);
-    if (existing && existing.confidence === 'exact') {
-      return jsonResponse({
-        result: 'exists',
-        customer_id: existing.customer['Customer ID'],
-        message: 'Customer already exists with this username.'
-      });
-    }
-  }
-
-  const customerID = generateCustomerID(sheet);
-
-  const row = [
-    customerID,
-    body.primary_username || '',
-    body.aliases || '',
-    body.first_name || '',
-    body.surname || '',
-    body.initials || '',
-    body.street || '',
-    body.city || '',
-    body.state || '',
-    body.zip || '',
-    body.phone_partial || '',
-    body.phone_full || '',
-    body.email || '',
-    nowISO(),
-    0,
-    body.notes || '',
-    false
-  ];
-
-  sheet.appendRow(row);
-
-  return jsonResponse({
-    result: 'created',
-    customer_id: customerID
-  });
+function channelTag(channel) {
+  const cls = channel === 'TikTok' ? 'channel-tiktok' : channel === 'Shopify' ? 'channel-shopify' : 'channel-manual';
+  return `<span class="channel-tag ${cls}">${escapeHtml(channel || 'Manual')}</span>`;
 }
 
-// ─── Update order status ───────────────────────────────────────────────────────
-
-function updateOrderStatus(body) {
-  const sheet = getOrdersSheet();
-  const rowIndex = findOrderRow(sheet, body.order_id);
-  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
-
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const statusCol = headers.indexOf('Status') + 1;
-
-  sheet.getRange(rowIndex, statusCol).setValue(body.status);
-  applyStatusSideEffects(sheet, rowIndex, body.status, headers);
-
-  return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
-}
-
-// ─── Recalculate shipment count ────────────────────────────────────────────────
-
-function recalculateShipmentCount(customerID) {
-  const ordersSheet = getOrdersSheet();
-  const data = ordersSheet.getDataRange().getValues();
-  const headers = data[0];
-
-  const channelCol = headers.indexOf('Channel');
-  const statusCol = headers.indexOf('Status');
-  const customerIdCol = headers.indexOf('Customer ID');
-
-  let count = 0;
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    if (row[customerIdCol] !== customerID) continue;
-    if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
-    if (row[statusCol] === 'Enviado' || row[statusCol] === 'Archivado') count++;
-  }
-
-  const customersSheet = getCustomersSheet();
-  const custData = customersSheet.getDataRange().getValues();
-  const custHeaders = custData[0];
-  const custIdCol = custHeaders.indexOf('Customer ID');
-  const countCol = custHeaders.indexOf('Shipment Count');
-
-  for (let i = 1; i < custData.length; i++) {
-    if (custData[i][custIdCol] === customerID) {
-      customersSheet.getRange(i + 1, countCol + 1).setValue(count);
-      break;
-    }
-  }
-}
-
-// ─── Add alias ─────────────────────────────────────────────────────────────────
-
-function addAlias(body) {
-  const sheet = getCustomersSheet();
-  const customers = sheetToObjects(sheet);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const aliasCol = headers.indexOf('Aliases') + 1;
-
-  const customer = customers.find(c => c['Customer ID'] === body.customer_id);
-  if (!customer) return jsonResponse({ error: 'Customer not found' });
-
-  const existing = customer['Aliases'] || '';
-  const newAlias = body.alias.trim();
-  const updated = existing ? existing + ', ' + newAlias : newAlias;
-
-  sheet.getRange(customer._rowIndex, aliasCol).setValue(updated);
-
-  return jsonResponse({ result: 'alias_added', customer_id: body.customer_id, aliases: updated });
-}
-
-// ─── Update packed date ────────────────────────────────────────────────────────
-
-function updatePackedDate(body) {
-  const sheet = getOrdersSheet();
-  const rowIndex = findOrderRow(sheet, body.order_id);
-  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
-
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const packedCol = headers.indexOf('Packed Date') + 1;
-
-  sheet.getRange(rowIndex, packedCol).setValue(body.packed_date || nowISO());
-
-  return jsonResponse({ result: 'packed_date_updated', order_id: body.order_id });
-}
-
-// ─── Migrate order ──────────────────────────────────────────────────────────────
-
-function migrateOrder(body) {
-  const ordersSheet = getOrdersSheet();
-
-  const row = [
-    body.order_id || generateUUID(),
-    body.tracking_id || '',
-    '',
-    body.username || '',
-    body.channel || 'Manual',
-    body.status || 'No Pagado',
-    body.products || '',
-    body.price || 0,
-    body.shopify_order_id || '',
-    body.notes || '',
-    body.created_date || nowISO(),
-    body.packed_date || '',
-    body.shipped_date || '',
-    body.archive_date || '',
-    ''
-  ];
-
-  ordersSheet.appendRow(row);
-  return jsonResponse({ result: 'migrated', order_id: row[0] });
-}
-
-// ─── Stamp customer IDs ──────────────────────────────────────────────────────
-
-function stampCustomerIDs() {
-  const ordersSheet = getOrdersSheet();
-  const customersSheet = getCustomersSheet();
-
-  const customers = sheetToObjects(customersSheet);
-  const orders = sheetToObjects(ordersSheet);
-  const headers = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
-
-  const customerIDCol = headers.indexOf('Customer ID') + 1;
-
-  let stamped = 0;
-  let notFound = 0;
-  let notFoundList = [];
-
-  orders.forEach(order => {
-    if (order['Customer ID']) return;
-
-    const username = order['Primary Username'];
-    if (!username) return;
-
-    const resolution = findCustomerByUsername(customers, username);
-
-    if (resolution) {
-      ordersSheet.getRange(order._rowIndex, customerIDCol).setValue(resolution.customer['Customer ID']);
-      stamped++;
-    } else {
-      notFound++;
-      notFoundList.push(username);
-    }
-  });
-
-  Logger.log(`Stamped: ${stamped} | Not found: ${notFound}`);
-  Logger.log(`Not found list: ${[...new Set(notFoundList)].join(', ')}`);
-}
-
-// ─── Update / delete order ──────────────────────────────────────────────────────
-
-function updateOrder(body) {
-  const sheet = getOrdersSheet();
-  const rowIndex = findOrderRow(sheet, body.order_id);
-  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
-
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-
-  Object.entries(body.fields || {}).forEach(([key, value]) => {
-    const col = headers.indexOf(key) + 1;
-    if (col > 0) {
-      sheet.getRange(rowIndex, col).setValue(value);
-    }
-  });
-
-  if (body.fields && body.fields['Status']) {
-    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
-  }
-
-  return jsonResponse({ result: 'updated', order_id: body.order_id });
-}
-
-function deleteOrder(body) {
-  const sheet = getOrdersSheet();
-  const rowIndex = findOrderRow(sheet, body.order_id);
-  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
-
-  sheet.deleteRow(rowIndex);
-  return jsonResponse({ result: 'deleted', order_id: body.order_id });
-}
-
-// ─── Auto-archive ───────────────────────────────────────────────────────────────
-
-function autoArchiveOldOrders() {
-  const sheet = getOrdersSheet();
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return;
-
-  const headers = data[0];
-  const statusCol = headers.indexOf('Status');
-  const shippedCol = headers.indexOf('Shipped Date');
-
-  const DAYS_MS = 5 * 24 * 60 * 60 * 1000;
-  const now = new Date().getTime();
-
-  let archived = 0;
-
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    if (row[statusCol] !== 'Enviado') continue;
-
-    const shippedDate = row[shippedCol];
-    if (!shippedDate) continue;
-
-    const shippedTime = new Date(shippedDate).getTime();
-    if (isNaN(shippedTime)) continue;
-
-    if (now - shippedTime >= DAYS_MS) {
-      const rowIndex = i + 1;
-      sheet.getRange(rowIndex, statusCol + 1).setValue('Archivado');
-      applyStatusSideEffects(sheet, rowIndex, 'Archivado', headers);
-      archived++;
-    }
-  }
-
-  Logger.log(`Auto-archived ${archived} orders.`);
-}
-
-// Shared side-effects for ANY status change, regardless of which endpoint caused it.
-function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
-  const shippedCol = headers.indexOf('Shipped Date') + 1;
-  const archiveCol = headers.indexOf('Archive Date') + 1;
-  const channelCol = headers.indexOf('Channel') + 1;
-  const customerIdCol = headers.indexOf('Customer ID') + 1;
-
-  if (newStatus === 'Enviado' && shippedCol > 0) {
-    sheet.getRange(rowIndex, shippedCol).setValue(nowISO());
-  }
-  if (newStatus === 'Archivado' && archiveCol > 0) {
-    sheet.getRange(rowIndex, archiveCol).setValue(nowISO());
-  }
-
-  const channel = channelCol > 0 ? sheet.getRange(rowIndex, channelCol).getValue() : '';
-  const customerID = customerIdCol > 0 ? sheet.getRange(rowIndex, customerIdCol).getValue() : '';
-  if ((channel === 'TikTok' || channel === 'Shopify') && customerID) {
-    recalculateShipmentCount(customerID);
-  }
-}
-
-// Full recompute of every customer's shipment count from scratch.
-// Counts TikTok + Shopify orders in Enviado/Archivado. Excludes Manual.
-function recalculateAllShipmentCounts() {
-  const ordersSheet = getOrdersSheet();
-  const data = ordersSheet.getDataRange().getValues();
-  const headers = data[0];
-  const channelCol = headers.indexOf('Channel');
-  const statusCol = headers.indexOf('Status');
-  const customerIdCol = headers.indexOf('Customer ID');
-
-  const counts = {};
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
-    if (row[statusCol] !== 'Enviado' && row[statusCol] !== 'Archivado') continue;
-    const cid = row[customerIdCol];
-    if (!cid) continue;
-    counts[cid] = (counts[cid] || 0) + 1;
-  }
-
-  const customersSheet = getCustomersSheet();
-  const custData = customersSheet.getDataRange().getValues();
-  const custHeaders = custData[0];
-  const custIdCol = custHeaders.indexOf('Customer ID');
-  const countCol = custHeaders.indexOf('Shipment Count');
-
-  const out = [];
-  for (let i = 1; i < custData.length; i++) {
-    out.push([counts[custData[i][custIdCol]] || 0]);
-  }
-  if (out.length > 0) {
-    customersSheet.getRange(2, countCol + 1, out.length, 1).setValues(out);
-  }
-
-  Logger.log('Recalculated counts for ' + out.length + ' customers.');
-}
-
-// ─── Nightly Backups ───────────────────────────────────────────────────────────
-
-function nightlyBackup() {
-  const folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);
-  const stamp = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy-MM-dd');
-  [['Orders', ORDERS_SHEET_ID], ['Customers', CUSTOMERS_SHEET_ID]].forEach(([name, id]) => {
-    try {
-      DriveApp.getFileById(id).makeCopy('bk_' + stamp + '_' + name, folder);
-    } catch (err) {
-      MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
-        'VP backup FAILED: ' + name, String(err));
-    }
-  });
-  const cutoff = Date.now() - 30 * 86400000;
-  const files = folder.getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    if (f.getName().startsWith('bk_') && f.getDateCreated().getTime() < cutoff) {
-      f.setTrashed(true);
-    }
-  }
-  Logger.log('Backup complete: ' + stamp);
-}
-
-function authOk(t) {
-  const want = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
-  return !!want && t === want;
-}
-
-// ─── TikTok bulk import (optimized: reads/writes each sheet once) ──────────────
-
-function importTikTokOrders(body) {
-  const orders = getOrdersSheet();
-  const customersSheet = getCustomersSheet();
-  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
-
-  // ─── Read orders sheet ONCE ───────────────────────────────────────
-  const iTrk = oh.indexOf('Tracking ID');
-  const iChanO = oh.indexOf('Channel');
-  const iStatO = oh.indexOf('Status');
-  const iCustO = oh.indexOf('Customer ID');
-  const lastRow = orders.getLastRow();
-  const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
-
-  const trackingSet = {};
-  const shipCountMap = {};
-  allOrderData.forEach(r => {
-    if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
-    const cid = String(r[iCustO] || '');
-    if (cid && (r[iChanO] === 'TikTok' || r[iChanO] === 'Shopify') &&
-        (r[iStatO] === 'Enviado' || r[iStatO] === 'Archivado')) {
-      shipCountMap[cid] = (shipCountMap[cid] || 0) + 1;
-    }
-  });
-
-  // ─── Read customers sheet ONCE into a 2D array ───────────────────
-  const custLastRow = customersSheet.getLastRow();
-  const custLastCol = customersSheet.getLastColumn();
-  const ch = customersSheet.getRange(1, 1, 1, custLastCol).getValues()[0];
-  const custData = custLastRow > 1 ? customersSheet.getRange(2, 1, custLastRow - 1, custLastCol).getValues() : [];
-
-  const cCol = {
-    id:     ch.indexOf('Customer ID'),
-    street: ch.indexOf('Street + Number'),
-    city:   ch.indexOf('City'),
-    state:  ch.indexOf('State'),
-    zip:    ch.indexOf('ZIP'),
-    phone:  ch.indexOf('Phone Partial'),
-    notes:  ch.indexOf('Notes'),
+function mapFromApi(r) {
+  return {
+    ID: r['Order ID'],
+    Cliente: r['Primary Username'] || '',
+    Producto: r['Products'] || '',
+    Precio: Number(r['Price']) || 0,
+    Notas: r['Notes'] || '',
+    Status: r['Status'] || 'No Pagado',
+    Channel: r['Channel'] || 'Manual',
+    CustomerId: r['Customer ID'] || '',
+    ShopifyOrderId: r['Shopify Order ID'] || '',
+    ArchiveDate: r['Archive Date'] || '',
+    'Fecha Creación': r['Created Date']
   };
+}
 
-  const custRowMap = {};
-  custData.forEach((r, i) => { custRowMap[String(r[cCol.id])] = i; });
+function mapToApiFields(fields) {
+  const out = {};
+  Object.entries(fields).forEach(([k, v]) => { out[FIELD_MAP[k] || k] = v; });
+  return out;
+}
 
-  const rows = [], results = [], unresolved = [];
-  let customersDirty = false;
+function isShipped(status) { return status === 'Enviado' || status === 'Archivado'; }
 
-  (body.shipments || []).forEach(s => {
-    const tid = String(s.tracking_id || '');
-    if (!tid) return;
+let allRecords = [];
+let activeRecords = [];
+let enviadoRecords = [];
+let archivedRecords = [];
+let tabDataLoaded = { enviado: false, archivo: false };
+let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
+let currentTab = 'activos';
+let currentSort = 'newest';
+let pendingAction = null;
+let bulkItems = [{ producto: '', precio: '', notas: '' }];
 
-    if (trackingSet[tid]) {
-      results.push({ tracking_id: tid, inserted: false, reason: 'duplicate' });
-      return;
+// ── HELPERS ──────────────────────────────────────────────────
+function daysSince(dateStr) { if (!dateStr) return 0; return Math.floor((new Date() - new Date(dateStr)) / 86400000); }
+function formatMXN(n) { if (n === undefined || n === null || n === '') return '—'; return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 }); }
+function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'America/Mexico_City' }); }
+function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
+function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
+function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
+function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
+function escapeHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function renderNotas(notas) {
+  if (!notas) return '';
+  if (/^https?:\/\//.test(notas.trim())) {
+    const match = notas.match(/orders\/(\d+)/);
+    const orderId = match ? match[1] : '';
+    return `<a href="${escapeHtml(notas.trim())}" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en Shopify" onclick="event.stopPropagation()">Ver en Shopify ${orderId ? ` <span class="order-id-faint">#${orderId}</span>` : ''}</a>`;
+  }
+  return escapeHtml(notas);
+}
+
+// ── BULK ITEMS ───────────────────────────────────────────────
+function saveBulkState() {
+  bulkItems = bulkItems.map((_, i) => ({
+    producto: (document.querySelector(`.bulk-producto[data-idx="${i}"]`) || {}).value || '',
+    precio:   (document.querySelector(`.bulk-precio[data-idx="${i}"]`)   || {}).value || '',
+    notas:    (document.querySelector(`.bulk-notas[data-idx="${i}"]`)    || {}).value || '',
+  }));
+}
+
+function addBulkItem() { saveBulkState(); bulkItems.push({ producto: '', precio: '', notas: '' }); renderBulkItems(); }
+
+function removeBulkItem(idx) { saveBulkState(); bulkItems.splice(idx, 1); if (!bulkItems.length) bulkItems = [{ producto: '', precio: '', notas: '' }]; renderBulkItems(); }
+
+function renderBulkItems() {
+  const container = document.getElementById('bulk-items-container');
+  container.innerHTML = '';
+  bulkItems.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'bulk-item-row';
+    row.innerHTML = `
+      <div class="bulk-item-header">
+        <span class="bulk-item-label">${bulkItems.length > 1 ? 'Producto ' + (i + 1) : 'Producto'}</span>
+        ${bulkItems.length > 1 ? '<button class="btn btn-xs btn-danger remove-bulk-btn">✕</button>' : ''}
+      </div>
+      <div class="form-group" style="margin-bottom:6px"><input type="text" class="bulk-producto" data-idx="${i}" placeholder="Nombre del producto..." value="${item.producto}" /></div>
+      <div class="form-group" style="margin-bottom:6px"><input type="number" class="bulk-precio" data-idx="${i}" placeholder="Precio (MXN)" min="0" step="1" value="${item.precio}" /></div>
+      <div class="form-group" style="margin-bottom:0"><input type="text" class="bulk-notas" data-idx="${i}" placeholder="Nota opcional..." value="${item.notas}" /></div>`;
+    const removeBtn = row.querySelector('.remove-bulk-btn');
+    if (removeBtn) removeBtn.addEventListener('click', () => removeBulkItem(i));
+    container.appendChild(row);
+  });
+}
+
+function renderGiftToggle() {
+  const checkbox = document.getElementById('gift-checkbox');
+  const giftSection = document.getElementById('gift-recipient-section');
+  if (!checkbox || !giftSection) return;
+  giftSection.style.display = checkbox.checked ? 'block' : 'none';
+}
+
+// ── SEARCH ───────────────────────────────────────────────────
+let searchSelectedCliente = null;
+
+function handleSearchInput() {
+  const val = document.getElementById('global-search').value.trim().toLowerCase();
+  const list = document.getElementById('search-autocomplete-list');
+  updateClearBtn();
+  if (!val) { list.style.display = 'none'; return; }
+  const clientes = getUniqueClientes().filter(c => {
+    const val_lower = val.toLowerCase();
+    return c.name.toLowerCase().startsWith(val_lower) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
+  }).slice(0, 8);
+  if (!clientes.length) { list.style.display = 'none'; return; }
+  list.innerHTML = '';
+  clientes.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.innerHTML = `<span>${c.name}</span>`;
+    item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name); });
+    list.appendChild(item);
+  });
+  list.style.display = 'block';
+}
+
+function selectSearchCliente(name) {
+  searchSelectedCliente = name;
+  document.getElementById('global-search').value = name;
+  document.getElementById('search-autocomplete-list').style.display = 'none';
+  updateClearBtn();
+  runSearch(name);
+}
+
+function hideSearchAutocomplete() { setTimeout(() => { const l = document.getElementById('search-autocomplete-list'); if (l) l.style.display = 'none'; }, 150); }
+
+function clearSearch() {
+  searchSelectedCliente = null;
+  document.getElementById('global-search').value = '';
+  document.getElementById('search-autocomplete-list').style.display = 'none';
+  updateClearBtn();
+  document.getElementById('search-panel').style.display = 'none';
+  document.getElementById('main-panel').style.display = 'block';
+}
+
+function updateClearBtn() { document.getElementById('search-clear-btn').style.display = document.getElementById('global-search').value ? 'flex' : 'none'; }
+
+function runSearch(name) {
+  const val = name.toLowerCase();
+  document.getElementById('search-panel').style.display = 'block';
+  document.getElementById('main-panel').style.display = 'none';
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
+  const archived = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
+  const results = document.getElementById('search-results');
+  results.innerHTML = '';
+  if (!active.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
+  function appendGroup(records, labelText, showActs) {
+    if (!records.length) return;
+    if (labelText) { const l = document.createElement('div'); l.className = 'section-label'; l.textContent = labelText; results.appendChild(l); }
+    groupByCliente(records).forEach(grp => {
+      const cliente = grp.name;
+      const group = document.createElement('div'); group.className = 'customer-group';
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div></div>`;
+      grp.items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
+      results.appendChild(group);
+    });
+  }
+  if (active.length) appendGroup(active, 'Activos', true);
+  if (archived.length) {
+    if (active.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivo'; results.appendChild(d); }
+    appendGroup(archived, active.length ? '' : 'Archivo', false);
+  }
+}
+
+// ── CLIENT AUTOCOMPLETE ──────────────────────────────────────
+function handleClienteInput() {
+  const val = document.getElementById('new-cliente').value.trim().toLowerCase();
+  const list = document.getElementById('autocomplete-list');
+  if (!val) { list.style.display = 'none'; return; }
+  const clientes = getUniqueClientes().filter(c => {
+    const val_lower = val.toLowerCase();
+    return c.name.toLowerCase().startsWith(val_lower) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
+  }).slice(0, 8);
+  if (!clientes.length) { list.style.display = 'none'; return; }
+  list.innerHTML = '';
+  clientes.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.innerHTML = `<span>${c.name}</span>`;
+    item.addEventListener('mousedown', e => { e.preventDefault(); selectCliente(c.name); });
+    list.appendChild(item);
+  });
+  list.style.display = 'block';
+}
+
+function selectCliente(name) {
+  document.getElementById('new-cliente').value = name;
+  document.getElementById('autocomplete-list').style.display = 'none';
+  const first = document.querySelector('.bulk-producto');
+  if (first) first.focus();
+}
+
+function hideAutocomplete() { setTimeout(() => { const l = document.getElementById('autocomplete-list'); if (l) l.style.display = 'none'; }, 150); }
+
+function handleGiftRecipientInput() {
+  const val = (document.getElementById('gift-recipient').value || '').trim().toLowerCase();
+  const list = document.getElementById('gift-autocomplete-list');
+  if (!val) { list.style.display = 'none'; return; }
+  const clientes = getUniqueClientes().filter(c => {
+    return c.name.toLowerCase().startsWith(val) ||
+      (c.aliases || []).some(a => a.toLowerCase().startsWith(val));
+  }).slice(0, 8);
+  if (!clientes.length) { list.style.display = 'none'; return; }
+  list.innerHTML = '';
+  clientes.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'autocomplete-item';
+    item.innerHTML = `<span>${c.name}</span>`;
+    item.addEventListener('mousedown', e => {
+      e.preventDefault();
+      document.getElementById('gift-recipient').value = c.name;
+      list.style.display = 'none';
+    });
+    list.appendChild(item);
+  });
+  list.style.display = 'block';
+}
+
+function getUniqueClientes() {
+  const seen = {};
+  Object.entries(allCustomers).forEach(([key, c]) => {
+    const primary = (c.name || '').trim();
+    if (!primary) return;
+    const k = primary.toLowerCase();
+    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [] };
+  });
+  return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+}
+
+// ── MODALS ───────────────────────────────────────────────────
+function showConfirmModal(message, onConfirm) {
+  pendingAction = onConfirm;
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Confirmar acción</div><div class="modal-body">${message}</div><div class="modal-actions"><button class="btn" id="modal-cancel-btn">Cancelar</button><button class="btn btn-primary" id="modal-confirm-btn">Confirmar</button></div></div></div>`;
+  document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('modal-confirm-btn').addEventListener('click', () => { const a = pendingAction; closeModal(); if (a) a(); });
+}
+
+function showEditModal(id) {
+  const r = allRecords.find(r => r.ID === id);
+  if (!r) return;
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Editar pedido</div><div class="edit-form">
+    <input type="text" id="edit-cliente" value="${(r.Cliente || '').replace(/"/g, '&quot;')}" placeholder="Usuario TikTok" />
+    <input type="text" id="edit-producto" value="${(r.Producto || '').replace(/"/g, '&quot;')}" placeholder="Producto" />
+    <input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />
+    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
+    <input type="text" id="edit-notas" value="${(r.Notas || '').replace(/"/g, '&quot;')}" placeholder="Notas (opcional)" />
+  </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
+  document.getElementById('edit-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('edit-save-btn').addEventListener('click', () => saveEdit(id));
+}
+
+function closeModal() { document.getElementById('modal-container').innerHTML = ''; pendingAction = null; }
+
+function showNewOrderModal(prefillUsername) {
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div><div class="edit-form">
+    <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" value="${escapeHtml(prefillUsername || '')}" />
+    <select id="no-channel">
+      <option value="Manual" selected>Manual</option>
+      <option value="TikTok">TikTok</option>
+      <option value="Shopify">Shopify</option>
+    </select>
+    <textarea id="no-products" rows="3" placeholder="2x Libreta A5 - Cobre&#10;1x Libreta A5 - Cafe"></textarea>
+    <input type="number" id="no-price" placeholder="Precio" min="0" step="1" />
+    <input type="text" id="no-notes" placeholder="Notas (opcional)" />
+    <input type="text" id="no-shopify-id" placeholder="Shopify Order ID (opcional)" />
+  </div><div class="modal-actions"><button class="btn" id="no-cancel-btn">Cancelar</button><button class="btn btn-primary" id="no-save-btn">Guardar</button></div></div></div>`;
+  document.getElementById('no-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('no-save-btn').addEventListener('click', submitNewOrder);
+}
+
+async function submitNewOrder() {
+  const username = document.getElementById('no-username').value.trim();
+  const channel = document.getElementById('no-channel').value;
+  const products = document.getElementById('no-products').value.trim();
+  const price = parseFloat(document.getElementById('no-price').value) || 0;
+  const notes = document.getElementById('no-notes').value.trim();
+  const shopifyId = document.getElementById('no-shopify-id').value.trim();
+  if (!username || !products) { showToast('Faltan datos'); return; }
+  try {
+    const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
+    if (result.result !== 'created') throw new Error(result.error || 'Error');
+    allRecords.push({ ID: result.order_id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
+    closeModal();
+    renderAll();
+    showToast('✓ Orden agregada');
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+function showStatusModal(id, currentStatus) {
+  const next = nextStatuses(currentStatus);
+  if (!next.length) { showToast('Sin siguiente estado'); return; }
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div><div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
+  c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => { updateOrderStatusNew(id, btn.dataset.status); closeModal(); }));
+  document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
+}
+
+async function updateOrderStatusNew(id, status) {
+  try {
+    const rec = allRecords.find(r => r.ID === id);
+    const fromStatus = rec ? rec.Status : null;
+    const result = await performStatusUpdate(id, status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    if (rec) rec.Status = status;
+    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`✓ Estado actualizado a ${status}`);
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+let bulkModalSelectedStatus = null;
+
+function showBulkStatusModal(group) {
+  bulkModalSelectedStatus = null;
+  const cliente = group.name;
+  const orders = group.items.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
+  if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
+    <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
+    <div class="status-pills">${['No Pagado', 'Pagado', 'Enviado'].map(s => `<button class="status-pill-toggle" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
+    <div class="bulk-order-list">${orders.map(r => `<label class="bulk-order-item"><input type="checkbox" class="bulk-order-check" data-id="${escapeHtml(String(r.ID))}" checked /><span class="bulk-order-product">${escapeHtml(r.Producto) || '—'}</span><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span></label>`).join('')}</div>
+    <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button><button class="btn btn-primary" id="bulk-status-confirm-btn" disabled>Confirmar</button></div>
+  </div></div>`;
+  document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
+  c.querySelectorAll('.status-pill-toggle').forEach(btn => btn.addEventListener('click', () => {
+    bulkModalSelectedStatus = btn.dataset.status;
+    c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b === btn));
+    updateBulkConfirmState();
+  }));
+  c.querySelectorAll('.bulk-order-check').forEach(chk => chk.addEventListener('change', updateBulkConfirmState));
+  document.getElementById('bulk-status-confirm-btn').addEventListener('click', () => { if (bulkModalSelectedStatus) applyBulkStatus(bulkModalSelectedStatus); });
+}
+
+function updateBulkConfirmState() {
+  const anyChecked = document.querySelectorAll('.bulk-order-check:checked').length > 0;
+  const btn = document.getElementById('bulk-status-confirm-btn');
+  if (btn) btn.disabled = !(anyChecked && bulkModalSelectedStatus);
+}
+
+async function applyBulkStatus(status) {
+  const ids = Array.from(document.querySelectorAll('.bulk-order-check:checked')).map(ch => ch.dataset.id);
+  if (!ids.length) { showToast('Selecciona al menos un pedido'); return; }
+  try {
+    const entries = [];
+    for (const id of ids) {
+      const rec = allRecords.find(r => String(r.ID) === id);
+      const fromStatus = rec ? rec.Status : null;
+      const result = await performStatusUpdate(id, status);
+      if (result.result === 'updated') {
+        if (rec) rec.Status = status;
+        entries.push({ order_id: id, from_status: fromStatus, to_status: status });
+      }
     }
-    trackingSet[tid] = true;
+    entries.forEach(pushUndoEntry);
+    closeModal();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast(`✓ ${entries.length} pedidos actualizados a ${status}`);
+  } catch (e) { showToast('Error: ' + e.message); }
+}
 
-    let customerID = s.customer_id || '';
-    let primary    = s.username || '';
-    let shipCount  = 0;
+function openCustomerHistory(customerId, displayName) {
+  if (!customerId) { showToast('Cliente sin ID asociado'); return; }
+  showCustomerHistoryModal(customerId, displayName);
+}
 
-    if (customerID) {
-      shipCount = shipCountMap[customerID] || 0;
-      const idx = custRowMap[customerID];
-      if (idx !== undefined) {
-        const addr = s.address || {};
-        const pairs = [
-          ['street', cCol.street], ['city', cCol.city], ['state', cCol.state],
-          ['zip', cCol.zip], ['phone', cCol.phone]
-        ];
-        const noteAdd = [];
-        pairs.forEach(([k, colIdx]) => {
-          const incoming = (addr[k] || '').toString().trim();
-          if (!incoming || colIdx < 0) return;
-          const current = (custData[idx][colIdx] || '').toString().trim();
-          if (!current) {
-            custData[idx][colIdx] = incoming;
-            customersDirty = true;
-          } else if (current.toLowerCase() !== incoming.toLowerCase()) {
-            noteAdd.push(`${k} alt: ${incoming}`);
-          }
+async function showCustomerHistoryModal(customerId, displayName) {
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal customer-history-modal"><div class="modal-title">Historial de ${escapeHtml(displayName || customerId)}</div><div id="customer-history-list" class="customer-history-list"><div class="empty-state">Cargando...</div></div><div class="modal-actions"><button class="btn" id="history-close-btn">Cerrar</button></div></div></div>`;
+  document.getElementById('history-close-btn').addEventListener('click', closeModal);
+  try {
+    const data = await apiGet('action=orders&customer_id=' + encodeURIComponent(customerId));
+    const records = (data.records || []).map(mapFromApi).sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
+    const list = document.getElementById('customer-history-list');
+    if (!list) return;
+    if (!records.length) { list.innerHTML = '<div class="empty-state">Sin pedidos</div>'; return; }
+    list.innerHTML = records.map(r => {
+      const archiveInfo = r.ArchiveDate ? ` · Archivado: ${formatDate(r.ArchiveDate)}` : '';
+      return `<div class="history-row"><div class="history-row-top"><span class="order-producto">${escapeHtml(r.Producto) || '—'}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}${archiveInfo}</span></div></div>`;
+    }).join('');
+  } catch (e) {
+    const list = document.getElementById('customer-history-list');
+    if (list) list.innerHTML = '<div class="empty-state">Error al cargar historial</div>';
+  }
+}
+
+// ── API CALLS ────────────────────────────────────────────────
+async function apiPost(data) {
+  const res = await fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ ...data, token: API_TOKEN })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+function apiGet(qs) {
+  return fetch(`${API}?${qs}&token=${encodeURIComponent(API_TOKEN)}`)
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+}
+
+function rebuildAllRecords() {
+  allRecords = [...activeRecords, ...enviadoRecords, ...archivedRecords];
+}
+
+async function fetchActive() {
+  const [activeData, customersData] = await Promise.all([
+    apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+    apiGet('action=customers')
+  ]);
+  activeRecords = (activeData.records || []).map(mapFromApi);
+  allCustomers = {};
+  (customersData.records || []).forEach(c => {
+    const primary = (c['Primary Username'] || '').trim();
+    if (!primary) return;
+    const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
+    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+    [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
+  });
+  rebuildAllRecords();
+}
+
+async function fetchEnviado() {
+  const data = await apiGet('action=orders&status=Enviado');
+  enviadoRecords = (data.records || []).map(mapFromApi);
+  tabDataLoaded.enviado = true;
+  rebuildAllRecords();
+}
+
+async function fetchArchivo() {
+  const data = await apiGet('action=orders&status=Archivado');
+  archivedRecords = (data.records || []).map(mapFromApi);
+  tabDataLoaded.archivo = true;
+  rebuildAllRecords();
+}
+
+async function loadRecords() {
+  const icon = document.getElementById('refresh-icon');
+  icon.classList.add('spinning');
+  try {
+    await fetchActive();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    showToast('Error al cargar datos');
+  } finally {
+    icon.classList.remove('spinning');
+  }
+}
+
+async function manualRefresh() {
+  const icon = document.getElementById('refresh-icon');
+  icon.classList.add('spinning');
+  try {
+    tabDataLoaded.enviado = false;
+    tabDataLoaded.archivo = false;
+    enviadoRecords = [];
+    archivedRecords = [];
+    const fetches = [fetchActive()];
+    if (currentTab === 'enviado') fetches.push(fetchEnviado());
+    else if (currentTab === 'archivo') fetches.push(fetchArchivo());
+    await Promise.all(fetches);
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    showToast('Error al cargar datos');
+  } finally {
+    icon.classList.remove('spinning');
+  }
+}
+
+async function autoRefresh() {
+  try {
+    if (currentTab === 'enviado' && tabDataLoaded.enviado) await fetchEnviado();
+    else if (currentTab === 'archivo' && tabDataLoaded.archivo) await fetchArchivo();
+    else if (currentTab !== 'enviado' && currentTab !== 'archivo') await fetchActive();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) { /* silent */ }
+}
+
+async function loadEnviadoTab() {
+  const el = document.getElementById('enviado-list');
+  if (el) el.innerHTML = '<div class="empty-state">Cargando enviados...</div>';
+  try {
+    await fetchEnviado();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadEnviadoTab();return false">Reintentar</a></div>';
+    showToast('Error al cargar pedidos enviados');
+  }
+}
+
+async function loadArchivoTab() {
+  const el = document.getElementById('archivo-list');
+  if (el) el.innerHTML = '<div class="empty-state">Cargando archivo...</div>';
+  try {
+    await fetchArchivo();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  } catch (e) {
+    if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadArchivoTab();return false">Reintentar</a></div>';
+    showToast('Error al cargar archivo');
+  }
+}
+
+async function updateStatus(id, status) {
+  try {
+    const rec = allRecords.find(r => r.ID === id);
+    const fromStatus = rec ? rec.Status : null;
+    const result = await performStatusUpdate(id, status);
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    if (rec) rec.Status = status;
+    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    const msgs = { 'Pagado': '✓ Marcado como pagado', 'Enviado': '✓ Marcado como enviado', 'No Pagado': '↩ Revertido a No Pagado' };
+    showToast(msgs[status] || '✓ Actualizado');
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+function requestUndo(id, currentStatus) { const p = previousStatus(currentStatus); if (!p) return; showConfirmModal(`¿Revertir a <strong>${p}</strong>?`, () => updateStatus(id, p)); }
+
+function requestRenameCliente(group) {
+  const oldName = group.name;
+  const targets = group.items;
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Cambiar nombre de cliente</div><div class="edit-form" style="position:relative"><input type="text" id="rename-cliente" value="${oldName.replace(/"/g, '&quot;')}" placeholder="Nuevo nombre" autocomplete="off" /><div class="autocomplete-list" id="rename-autocomplete-list" style="display:none"></div></div><div class="modal-actions"><button class="btn" id="rename-cancel-btn">Cancelar</button><button class="btn btn-primary" id="rename-save-btn">Guardar</button></div></div></div>`;
+  const input = document.getElementById('rename-cliente');
+  const list = document.getElementById('rename-autocomplete-list');
+  input.addEventListener('input', () => {
+    const val = input.value.trim().toLowerCase();
+    if (!val) { list.style.display = 'none'; return; }
+    const clientes = getUniqueClientes().filter(cl => cl.name.toLowerCase().startsWith(val) && cl.name !== oldName).slice(0, 8);
+    if (!clientes.length) { list.style.display = 'none'; return; }
+    list.innerHTML = '';
+    clientes.forEach(cl => {
+      const item = document.createElement('div');
+      item.className = 'autocomplete-item';
+      item.innerHTML = `<span>${cl.name}</span>`;
+      item.addEventListener('mousedown', e => { e.preventDefault(); input.value = cl.name; list.style.display = 'none'; });
+      list.appendChild(item);
+    });
+    list.style.display = 'block';
+  });
+  input.addEventListener('blur', () => { setTimeout(() => { list.style.display = 'none'; }, 150); });
+  document.getElementById('rename-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('rename-save-btn').addEventListener('click', async () => {
+    const newName = input.value.trim();
+    if (!newName) { showToast('Falta el nombre'); return; }
+    if (newName === oldName) { closeModal(); return; }
+    closeModal();
+    try {
+      for (const r of targets) {
+        const result = await apiPost({ action: 'update_order', order_id: r.ID, fields: mapToApiFields({ Cliente: newName }) });
+        if (result.result !== 'updated') throw new Error(result.error || 'Error');
+        r.Cliente = newName;
+      }
+      renderAll();
+      if (searchSelectedCliente) runSearch(searchSelectedCliente);
+      showToast(`✓ ${targets.length} pedidos actualizados a "${newName}"`);
+    } catch (e) { showToast('Error: ' + e.message); }
+  });
+}
+
+function requestDelete(id, producto) {
+  const label = /^https?:\/\/admin\.shopify\.com\//.test(producto || '') ? 'este pedido de Shopify' : producto;
+  showConfirmModal(`¿Eliminar <strong>${label}</strong>? Esta acción no se puede deshacer.`, async () => {
+    try {
+      const result = await apiPost({ action: 'delete_order', order_id: id });
+      if (result.result !== 'deleted') throw new Error(result.error || 'Error');
+      activeRecords = activeRecords.filter(r => r.ID !== id);
+      enviadoRecords = enviadoRecords.filter(r => r.ID !== id);
+      archivedRecords = archivedRecords.filter(r => r.ID !== id);
+      rebuildAllRecords();
+      renderAll();
+      if (searchSelectedCliente) runSearch(searchSelectedCliente);
+      showToast('✓ Pedido eliminado');
+    } catch (e) { showToast('Error: ' + e.message); }
+  });
+}
+
+async function saveEdit(id) {
+  const cliente = document.getElementById('edit-cliente').value.trim();
+  const producto = document.getElementById('edit-producto').value.trim();
+  const precio = parseFloat(document.getElementById('edit-precio').value) || 0;
+  const status = document.getElementById('edit-status').value;
+  const notas = document.getElementById('edit-notas').value.trim();
+  if (!cliente || !producto) { showToast('Faltan datos'); return; }
+  try {
+    const result = await apiPost({ action: 'update_order', order_id: id, fields: mapToApiFields({ Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas }) });
+    if (result.result !== 'updated') throw new Error(result.error || 'Error');
+    const rec = allRecords.find(r => r.ID === id);
+    if (rec) { rec.Cliente = cliente; rec.Producto = producto; rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
+    closeModal();
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast('✓ Pedido actualizado');
+  } catch (e) { showToast('Error: ' + e.message); }
+}
+
+async function createRecord() {
+  const cliente = document.getElementById('new-cliente').value.trim();
+  const channel = document.getElementById('new-channel').value;
+  const status = document.getElementById('new-status').value;
+  const isGift = document.getElementById('gift-checkbox').checked;
+  const recipient = isGift ? (document.getElementById('gift-recipient').value || '').trim() : '';
+
+  if (!cliente) { showToast('Falta el usuario'); return; }
+  if (isGift && !recipient) { showToast('Falta el destinatario'); return; }
+
+  saveBulkState();
+  const items = bulkItems.filter(item => item.producto.trim());
+  if (!items.length) { showToast('Falta al menos un producto'); return; }
+
+  try {
+    for (const item of items) {
+      if (isGift) {
+        // Order for the buyer — NO MANDAR prefix, price 0, status Pagado
+        const buyerProduct = 'NO MANDAR - ' + item.producto;
+        const buyerResult = await apiPost({
+          action: 'create_order',
+          username: cliente,
+          channel: 'Manual',
+          products: buyerProduct,
+          price: 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status: 'Pagado'
         });
-        if (noteAdd.length && cCol.notes >= 0) {
-          const existing = (custData[idx][cCol.notes] || '').toString();
-          custData[idx][cCol.notes] = (existing ? existing + ' | ' : '') + noteAdd.join('; ');
-          customersDirty = true;
+        if (buyerResult.result === 'created') {
+          activeRecords.push({
+            ID: buyerResult.order_id,
+            Cliente: cliente,
+            Channel: 'Manual',
+            Producto: buyerProduct,
+            Precio: 0,
+            Notas: item.notas || '',
+            Status: 'Pagado',
+            CustomerId: buyerResult.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
+        }
+
+        // Order for the recipient — REGALO DE prefix, price 0, status Pagado
+        const recipientProduct = 'REGALO DE ' + cliente + ' - ' + item.producto;
+        const recipientResult = await apiPost({
+          action: 'create_order',
+          username: recipient,
+          channel: 'Manual',
+          products: recipientProduct,
+          price: 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status: 'Pagado'
+        });
+        if (recipientResult.result === 'created') {
+          activeRecords.push({
+            ID: recipientResult.order_id,
+            Cliente: recipient,
+            Channel: 'Manual',
+            Producto: recipientProduct,
+            Precio: 0,
+            Notas: item.notas || '',
+            Status: 'Pagado',
+            CustomerId: recipientResult.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
+        }
+
+      } else {
+        // Normal order
+        const result = await apiPost({
+          action: 'create_order',
+          username: cliente,
+          channel,
+          products: item.producto,
+          price: parseFloat(item.precio) || 0,
+          notes: item.notas || '',
+          shopify_order_id: '',
+          status
+        });
+        if (result.result === 'created') {
+          activeRecords.push({
+            ID: result.order_id,
+            Cliente: cliente,
+            Channel: channel,
+            Producto: item.producto,
+            Precio: parseFloat(item.precio) || 0,
+            Notas: item.notas || '',
+            Status: result.status || 'No Pagado',
+            CustomerId: result.customer_id || '',
+            'Fecha Creación': new Date().toISOString()
+          });
+          rebuildAllRecords();
         }
       }
-    } else if (s.username) {
-      unresolved.push(s.username);
     }
 
-    rows.push([
-      (s.order_ids || []).join(' + ') || generateUUID(),
-      tid, customerID, primary, 'TikTok', 'Pagado',
-      s.products || '', Number(s.price) || 0,
-      '', '', nowISO(), '', '', '', tid
-    ]);
-    results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
-  });
-
-  // ─── Write orders in ONE batch ────────────────────────────────────
-  if (rows.length)
-    orders.getRange(orders.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-
-  // ─── Write modified customers back in ONE batch ───────────────────
-  if (customersDirty && custData.length > 0) {
-    customersSheet.getRange(2, 1, custData.length, custLastCol).setValues(custData);
-  }
-
-  return jsonResponse({
-    result:     'imported',
-    inserted:   rows.length,
-    duplicates: results.filter(r => !r.inserted).length,
-    unresolved: [...new Set(unresolved)],
-    shipments:  results,
-  });
+    // Reset form
+    document.getElementById('new-cliente').value = '';
+    document.getElementById('new-channel').value = 'Manual';
+    document.getElementById('new-status').value = 'No Pagado';
+    document.getElementById('gift-checkbox').checked = false;
+    document.getElementById('gift-recipient').value = '';
+    document.getElementById('gift-recipient-section').style.display = 'none';
+    bulkItems = [{ producto: '', precio: '', notas: '' }];
+    renderBulkItems();
+    renderAll();
+    showToast(isGift ? '✓ Regalo registrado (2 entradas)' : `✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
+  } catch (e) { showToast('Error: ' + e.message); }
 }
 
-// ─── Bulk customer creation (fast path for TikTok import) ──────────────────────
-
-function createCustomersBulk(body) {
-  const sheet = getCustomersSheet();
-  const existing = sheetToObjects(sheet);
-  const custLastCol = sheet.getLastColumn();
-
-  let maxNum = 0;
-  existing.forEach(c => {
-    const id = c['Customer ID'];
-    if (typeof id === 'string' && id.startsWith('CUST-')) {
-      const n = parseInt(id.replace('CUST-', ''), 10);
-      if (!isNaN(n) && n > maxNum) maxNum = n;
-    }
-  });
-
-  const rows = [], created = [];
-  (body.customers || []).forEach(cust => {
-    if (cust.primary_username) {
-      const dup = existing.find(c =>
-        normalizeUsername(c['Primary Username']) === normalizeUsername(cust.primary_username)
-      );
-      if (dup) {
-        created.push({ username: cust.primary_username, customer_id: dup['Customer ID'], existed: true });
-        return;
-      }
-    }
-    maxNum++;
-    const customerID = 'CUST-' + String(maxNum).padStart(3, '0');
-    rows.push([
-      customerID,
-      cust.primary_username || '',
-      cust.aliases || '',
-      cust.first_name || '',
-      cust.surname || '',
-      cust.initials || '',
-      cust.street || '',
-      cust.city || '',
-      cust.state || '',
-      cust.zip || '',
-      cust.phone_partial || '',
-      cust.phone_full || '',
-      cust.email || '',
-      nowISO(),
-      0,
-      cust.notes || '',
-      false
-    ]);
-    created.push({ username: cust.primary_username, customer_id: customerID, existed: false });
-  });
-
-  if (rows.length) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+// ── SORTING ──────────────────────────────────────────────────
+function sortRecords(records) {
+  if (currentSort === 'az') return [...records].sort((a, b) => (a.Cliente || '').localeCompare(b.Cliente || ''));
+  if (currentSort === 'za') return [...records].sort((a, b) => (b.Cliente || '').localeCompare(a.Cliente || ''));
+  if (currentSort === 'most' || currentSort === 'least') {
+    const totals = {};
+    allRecords.forEach(r => { const c = r.Cliente || ''; totals[c] = (totals[c] || 0) + (r.Precio || 0); });
+    return [...records].sort((a, b) => currentSort === 'most' ? (totals[b.Cliente] || 0) - (totals[a.Cliente] || 0) : (totals[a.Cliente] || 0) - (totals[b.Cliente] || 0));
   }
-
-  return jsonResponse({ result: 'bulk_created', created: created });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// QC SYSTEM
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Signed upload ticket for direct browser->Cloudinary uploads.
-// Secrets read from Script Properties: CLOUDINARY_CLOUD, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
-function getUploadSignature(e) {
-  const p = PropertiesService.getScriptProperties();
-  const timestamp = Math.floor(Date.now() / 1000);
-  const folder = (e.parameter.folder || 'velpapier/qc').replace(/[^a-z0-9/_-]/gi, '');
-  const secret = p.getProperty('CLOUDINARY_API_SECRET');
-  const toSign = 'folder=' + folder + '&timestamp=' + timestamp + secret;
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_1, toSign);
-  const sig = digest.map(b => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
-  return jsonResponse({
-    cloud:     p.getProperty('CLOUDINARY_CLOUD'),
-    api_key:   p.getProperty('CLOUDINARY_API_KEY'),
-    timestamp: timestamp,
-    folder:    folder,
-    signature: sig
-  });
-}
-
-// Create or update a QC row. First call (no qc_id) creates the row and
-// returns qc_id; subsequent calls update photos/notes in place.
-// Order-side shipping effects (Packed Date, Linked Shipment, Enviado) only
-// fire when finalize=true — that's what the "Enviar" button sends.
-function saveQC(body) {
-  if (!body.tracking_id) {
-    return jsonResponse({ error: 'tracking_id es obligatorio' });
-  }
-
-  const qcSheet = getQCSheet();
-  const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
-  let qcId = body.qc_id;
-  let row;
-
-  if (qcId) {
-    row = findRowByColumn(qcSheet, 'A', qcId);
-    if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
-  } else {
-    // Look for an existing row for this tracking ID before creating a new one
-    const existing = sheetToObjects(qcSheet).find(r => r['Tracking ID'] === body.tracking_id);
-    if (existing) {
-      qcId = existing['QC ID'];
-      row = existing._rowIndex;
-    } else {
-      qcId = generateQCID(qcSheet);
-      qcSheet.appendRow([
-        qcId, body.tracking_id, '', body.customer_id || '', body.username || '',
-        body.packer || '', nowISO(), '', '', '', '', 'Activo', ''
-      ]);
-      row = qcSheet.getLastRow();
-    }
-  }
-
-  const set = (col, val) => {
-    const idx = h.indexOf(col) + 1;
-    if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
-  };
-  if (body.order_ids)     set('Order IDs', body.order_ids.join(' + '));
-  if (body.photo_content !== undefined) set('Photo1 Content', body.photo_content);
-  if (body.photo_gift !== undefined)    set('Photo2 Gift', body.photo_gift);
-  if (body.photo_box !== undefined)     set('Photo3 Box', body.photo_box);
-  if (body.notes !== undefined)         set('Notes', body.notes);
-
-  const result = { result: 'saved', qc_id: qcId };
-
-  // Finalize: trigger the real shipping side-effects
-  if (body.finalize) {
-    if (!(body.order_ids || []).length || !body.photo_content) {
-      return jsonResponse({ error: 'order_ids y foto de contenido son obligatorios para finalizar' });
-    }
-    const orders = getOrdersSheet();
-    const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
-    const iPacked = oh.indexOf('Packed Date') + 1;
-    const iLink   = oh.indexOf('Linked Shipment') + 1;
-    const iChan   = oh.indexOf('Channel') + 1;
-    const iStat   = oh.indexOf('Status') + 1;
-
-    const shipResults = [];
-    body.order_ids.forEach(id => {
-      const orow = findOrderRow(orders, String(id));
-      if (!orow) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
-      if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
-      if (iChan > 0 && iLink > 0 && orders.getRange(orow, iChan).getValue() !== 'TikTok') {
-        orders.getRange(orow, iLink).setValue(body.tracking_id);
-      }
-      if (iStat > 0) {
-        orders.getRange(orow, iStat).setValue('Enviado');
-        applyStatusSideEffects(orders, orow, 'Enviado', oh);
-      }
-      shipResults.push({ order_id: id, result: 'shipped' });
+  if (currentSort === 'newest') return [...records].sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
+  if (currentSort === 'oldest') return [...records].sort((a, b) => new Date(a['Fecha Creación'] || 0) - new Date(b['Fecha Creación'] || 0));
+  if (currentSort === 'tiktok-ready') {
+    const hasTikTok = r => r.CustomerId && allRecords.some(x => x.CustomerId === r.CustomerId && x.Channel === 'TikTok' && x.Status === 'Pagado');
+    return [...records].sort((a, b) => {
+      const ta = hasTikTok(a) ? 0 : 1;
+      const tb = hasTikTok(b) ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      return (a.Cliente || '').localeCompare(b.Cliente || '', 'es');
     });
-    result.result = 'created';
-    result.orders = shipResults;
+  }
+  return records;
+}
+
+function setSort(val) { currentSort = val; renderAll(); if (searchSelectedCliente) runSearch(searchSelectedCliente); }
+
+// ── RENDERING ────────────────────────────────────────────────
+function renderOrderRow(r, showActions) {
+  const status = r.Status || 'No Pagado';
+  const created = r['Fecha Creación'];
+  const days = daysSince(created);
+  const isOverdueUnpaid = status === 'No Pagado' && days >= 3;
+  const isOverduePaid = status === 'Pagado' && days >= 7;
+
+  let rowClass = 'order-row';
+  if (isOverdueUnpaid) rowClass += ' overdue-unpaid';
+  else if (isOverduePaid) rowClass += ' overdue-paid';
+  if (isShipped(status)) rowClass += ' shipped-row';
+
+  let pillClass = statusPillClass(status), pillText = status === 'No Pagado' ? `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}` : status === 'Pagado' ? `Pagado${isOverduePaid ? ' ⚠' : ''}` : status;
+
+  const metaParts = [formatDate(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
+  const notasHtml = renderNotas(r.Notas);
+  const id = r.ID;
+
+  const row = document.createElement('div');
+  row.className = rowClass;
+
+  const info = document.createElement('div');
+  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${escapeHtml(r.Producto) || '—'}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  const usernameEl = info.querySelector('.order-username');
+  if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
+
+  const hoverZone = document.createElement('div');
+  hoverZone.className = 'row-hover-zone';
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'btn btn-xs btn-edit'; editBtn.textContent = 'Editar';
+  editBtn.addEventListener('click', () => showEditModal(id));
+  hoverZone.appendChild(editBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-xs btn-danger'; delBtn.textContent = 'Eliminar';
+  delBtn.addEventListener('click', () => requestDelete(id, r.Producto || 'este pedido'));
+  hoverZone.appendChild(delBtn);
+
+  const prev = previousStatus(status);
+  if (prev && showActions) {
+    const undoBtn = document.createElement('button');
+    undoBtn.className = 'btn btn-xs btn-undo'; undoBtn.textContent = '↩'; undoBtn.title = `Revertir a ${prev}`;
+    undoBtn.addEventListener('click', () => requestUndo(id, status));
+    hoverZone.appendChild(undoBtn);
   }
 
-  return jsonResponse(result);
-}
+  const precio = document.createElement('div');
+  precio.className = 'order-precio'; precio.textContent = formatMXN(r.Precio);
 
-// Batch read for thumbnails / order-history views.
-// ?tracking_ids=A,B,C  or  ?order_id=X
-function getQC(e) {
-  const data = getQCSheet().getDataRange().getValues();
-  if (data.length < 2) return jsonResponse({ records: [] });
+  const pill = document.createElement('span');
+  pill.className = `status-pill ${pillClass}`; pill.textContent = pillText;
 
-  const h = data[0];
-  const wantTracking = e.parameter.tracking_ids
-    ? e.parameter.tracking_ids.split(',').map(s => s.trim())
-    : null;
-  const wantOrder = e.parameter.order_id || null;
-
-  const records = [];
-  for (let r = 1; r < data.length; r++) {
-    if (wantTracking && !wantTracking.includes(String(data[r][1]))) continue;
-    if (wantOrder && String(data[r][2]).split(' + ').indexOf(String(wantOrder)) === -1) continue;
-    const obj = {};
-    h.forEach((k, j) => { obj[k] = data[r][j]; });
-    records.push(obj);
+  const actionCell = document.createElement('div');
+  actionCell.className = 'order-actions';
+  if (showActions && nextStatuses(status).length) {
+    const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Estado ▾';
+    btn.addEventListener('click', () => showStatusModal(id, status));
+    actionCell.appendChild(btn);
   }
-  return jsonResponse({ records: records });
+
+  row.appendChild(info); row.appendChild(hoverZone); row.appendChild(precio); row.appendChild(pill); row.appendChild(actionCell);
+  row.addEventListener('mouseenter', () => hoverZone.classList.add('visible'));
+  row.addEventListener('mouseleave', () => hoverZone.classList.remove('visible'));
+  return row;
 }
 
-// QC-ID generator: QC-0001-a1b2 (row-based + short random suffix)
-function generateQCID(sheet) {
-  const last = sheet.getLastRow();
-  return 'QC-' + String(last).padStart(4, '0') + '-' + Utilities.getUuid().slice(0, 4);
+// Grouping key: Customer ID when present, otherwise fall back to the
+// username (for orders whose customer hasn't been resolved yet).
+function customerGroupKey(r) {
+  const cid = (r.CustomerId || '').trim();
+  if (cid) return 'cid:' + cid.toLowerCase();
+  return 'user:' + (r.Cliente || 'Sin nombre').trim().toLowerCase();
 }
 
-// Generic single-column exact-match finder, reused for QC dedup.
-function findRowByColumn(sheet, colLetter, value) {
-  const f = sheet.getRange(colLetter + ':' + colLetter)
-                 .createTextFinder(String(value))
-                 .matchEntireCell(true)
-                 .findNext();
-  return f ? f.getRow() : null;
+// Returns an ordered array of { key, name, items }. Orders are grouped by
+// Customer ID so aliases of the same customer collapse into one group; the
+// representative Primary Username is kept as the display label.
+function groupByCliente(records) {
+  const groups = {}, order = [];
+  sortRecords(records).forEach(r => {
+    const key = customerGroupKey(r);
+    if (!groups[key]) { groups[key] = { key, name: r.Cliente || 'Sin nombre', items: [] }; order.push(key); }
+    groups[key].items.push(r);
+  });
+  return order.map(k => groups[k]);
 }
+
+function renderGrouped(records, containerId, showActions) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '';
+  if (!records.length) { el.innerHTML = '<div class="empty-state">Sin pedidos aquí</div>'; return; }
+  groupByCliente(records).forEach(grp => {
+    const cliente = grp.name;
+    const items = grp.items;
+    const unpaid = items.filter(r => r.Status === 'No Pagado').reduce((s, r) => s + (r.Precio || 0), 0);
+
+    const group = document.createElement('div'); group.className = 'customer-group';
+    const header = document.createElement('div'); header.className = 'customer-header' + (isUnnamedCliente(cliente) ? ' customer-header--unnamed' : '');
+    const custData = allCustomers[(cliente || '').toLowerCase()];
+    const shipBadge = custData && custData.shipmentCount > 0 ? ` <span class="shipment-count">(${custData.shipmentCount})</span>` : '';
+    const custId = (items[0] && items[0].CustomerId) || '';
+    const hasPendingTikTok = allRecords.some(r =>
+      r.CustomerId && r.CustomerId === custId &&
+      r.Channel === 'TikTok' &&
+      r.Status === 'Pagado'
+    );
+    const tikTokIndicator = hasPendingTikTok
+    ? `<span style="display:inline-flex;align-items:center;background:#c8e6c0;color:#2e7d32;border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px">Tiene Pedido de TikTok</span>`
+    : '';
+    header.setAttribute('data-tiktok-ready', hasPendingTikTok);
+    group.setAttribute('data-tiktok-ready', hasPendingTikTok);
+    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+
+    const bulk = header.querySelector('.customer-bulk-actions');
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'btn btn-xs btn-edit'; renameBtn.textContent = '✎'; renameBtn.title = 'Cambiar nombre';
+    renameBtn.addEventListener('click', () => requestRenameCliente(grp));
+    bulk.appendChild(renameBtn);
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn btn-xs btn-add-quick';
+    addBtn.textContent = '+'; addBtn.title = 'Agregar pedido';
+    addBtn.addEventListener('click', () => showNewOrderModal(cliente));
+    bulk.appendChild(addBtn);
+    if (showActions) {
+      const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
+      btn.addEventListener('click', () => showBulkStatusModal(grp));
+      bulk.appendChild(btn);
+    }
+    group.appendChild(header);
+    items.forEach(r => group.appendChild(renderOrderRow(r, showActions)));
+    el.appendChild(group);
+  });
+}
+
+function renderAnalytics() {
+  const shipped = allRecords.filter(r => isShipped(r.Status));
+  const paid = allRecords.filter(r => r.Status === 'Pagado');
+  const unpaid = allRecords.filter(r => r.Status === 'No Pagado');
+  const shippedRev = shipped.reduce((s, r) => s + (r.Precio || 0), 0);
+  const paidRev = paid.reduce((s, r) => s + (r.Precio || 0), 0);
+  const unpaidRev = unpaid.reduce((s, r) => s + (r.Precio || 0), 0);
+  const now = new Date();
+  const startWeek = new Date(now); startWeek.setDate(now.getDate() - now.getDay());
+  const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const thisWeek = allRecords.filter(r => new Date(r['Fecha Creación']) >= startWeek);
+  const thisMonth = allRecords.filter(r => new Date(r['Fecha Creación']) >= startMonth);
+
+  document.getElementById('an-shipped-revenue').textContent = formatMXN(shippedRev);
+  document.getElementById('an-shipped-count').textContent = `${shipped.length} pedidos enviados`;
+  document.getElementById('an-received-revenue').textContent = formatMXN(shippedRev + paidRev);
+  document.getElementById('an-pending-ship').textContent = `De los cuales ${formatMXN(paidRev)} aún sin enviar`;
+  document.getElementById('an-month-revenue').textContent = formatMXN(thisMonth.reduce((s, r) => s + (r.Precio || 0), 0));
+  document.getElementById('an-month-count').textContent = `${thisMonth.length} pedidos creados`;
+  document.getElementById('an-week-revenue').textContent = formatMXN(thisWeek.reduce((s, r) => s + (r.Precio || 0), 0));
+  document.getElementById('an-week-count').textContent = `${thisWeek.length} pedidos creados`;
+  document.getElementById('an-breakdown-unpaid').textContent = formatMXN(unpaidRev);
+  document.getElementById('an-breakdown-paid').textContent = formatMXN(paidRev);
+  document.getElementById('an-breakdown-total').textContent = formatMXN(unpaidRev + paidRev);
+
+  const totals = {};
+  allRecords.forEach(r => {
+    const c = r.Cliente || 'Sin nombre';
+    if (!totals[c]) totals[c] = { total: 0, count: 0 };
+    totals[c].total += r.Precio || 0;
+    totals[c].count++;
+  });
+  document.getElementById('an-top-clients').innerHTML = Object.entries(totals)
+    .sort((a, b) => b[1].total - a[1].total).slice(0, 8)
+    .map(([name, d]) => `<div class="top-client-row"><span class="top-client-name">${name}</span><span class="top-client-val">${d.count} pedido${d.count !== 1 ? 's' : ''}</span><span class="top-client-amount">${formatMXN(d.total)}</span></div>`).join('');
+}
+
+function renderClientList() {
+  const el = document.getElementById('client-list-scroll');
+  if (!el) return;
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
+  const seen = {};
+  active.forEach(r => {
+    const c = r.Cliente || 'Sin nombre';
+    const k = c.toLowerCase();
+    if (!seen[k]) seen[k] = { name: c, count: 0 };
+    seen[k].count++;
+  });
+  const sorted = Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  el.innerHTML = '';
+  if (!sorted.length) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-faint);padding:4px">Sin clientes activos</div>';
+    return;
+  }
+  sorted.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'client-list-item';
+    item.innerHTML = `
+      <div class="client-list-avatar">${getInitials(c.name)}</div>
+      <span class="client-list-name">${escapeHtml(c.name)}</span>
+      <span class="client-list-count">${c.count}</span>`;
+    item.addEventListener('click', () => selectSearchCliente(c.name));
+    el.appendChild(item);
+  });
+}
+
+function renderAll() {
+  const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const enviado = allRecords.filter(r => r.Status === 'Enviado');
+  const archivo = allRecords.filter(r => r.Status === 'Archivado');
+
+  document.getElementById('badge-activos').textContent = activos.length;
+  document.getElementById('badge-cobrar').textContent = cobrar.length;
+  document.getElementById('badge-enviar').textContent = enviar.length;
+  document.getElementById('badge-enviado').textContent = tabDataLoaded.enviado ? enviado.length : '';
+  document.getElementById('badge-archivo').textContent = tabDataLoaded.archivo ? archivo.length : '';
+
+  const unpaidTotal = cobrar.reduce((s, r) => s + (r.Precio || 0), 0);
+  const paidTotal = enviar.reduce((s, r) => s + (r.Precio || 0), 0);
+  const alerts = cobrar.filter(r => daysSince(r['Fecha Creación']) >= 3).length + enviar.filter(r => daysSince(r['Fecha Creación']) >= 7).length;
+
+  document.getElementById('stat-unpaid-amount').textContent = formatMXN(unpaidTotal);
+  document.getElementById('stat-unpaid-count').textContent = `${cobrar.length} item${cobrar.length !== 1 ? 's' : ''}`;
+  document.getElementById('stat-paid-pending').textContent = formatMXN(paidTotal);
+  document.getElementById('stat-paid-count').textContent = `${enviar.length} item${enviar.length !== 1 ? 's' : ''}`;
+  document.getElementById('stat-alerts').textContent = alerts;
+  document.getElementById('stat-total').textContent = formatMXN(unpaidTotal + paidTotal);
+
+  ['cobrar', 'enviar'].forEach(tab => {
+    document.getElementById(`badge-${tab}`).classList.toggle('has-items', parseInt(document.getElementById(`badge-${tab}`).textContent) > 0);
+  });
+
+  renderGrouped(activos, 'activos-list', true);
+  renderGrouped(cobrar, 'cobrar-list', true);
+  renderGrouped(enviar, 'enviar-list', true);
+  renderGrouped(enviado, 'enviado-list', true);
+  renderGrouped(archivo, 'archivo-list', false);
+  renderAnalytics();
+  renderClientList();
+  renderTikTokTab();
+}
+
+function renderTikTokTab() {
+  const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
+
+  // Update badge
+  document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
+
+  const container = document.getElementById('tiktok-list');
+  if (!container) return;
+
+  if (tikTokOrders.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:1rem 0">Sin órdenes TikTok pendientes</div>';
+    return;
+  }
+
+  // Group by import date (Created Date, first 10 chars = YYYY-MM-DD)
+  const groups = {};
+  tikTokOrders.forEach(r => {
+    const day = (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha';
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(r);
+  });
+
+  // Sort groups newest first
+  const sortedDays = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+
+  container.innerHTML = sortedDays.map(day => {
+    const orders = groups[day];
+    const rows = orders.map(r => {
+      const username = escapeHtml(r.Cliente || '—');
+      const products = escapeHtml(r.Producto || '—');
+      const price    = r.Precio ? `$${Number(r.Precio).toFixed(2)}` : '—';
+      const tracking = escapeHtml(r['Tracking ID'] || '');
+      return `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
+          <div style="min-width:0">
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">@${username}</div>
+            <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${products}</div>
+            ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">${tracking}</div>` : ''}
+          </div>
+          <div style="font-size:13px;font-weight:600;white-space:nowrap">${price}</div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div style="background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);margin-bottom:1rem;overflow:hidden">
+        <div style="padding:10px 12px;background:var(--surface2);border-bottom:0.5px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)">Importado ${day}</div>
+          <div style="font-size:11px;color:var(--text-faint)">${orders.length} orden${orders.length !== 1 ? 'es' : ''}</div>
+        </div>
+        ${rows}
+      </div>`;
+  }).join('');
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'analytics'].forEach(t => {
+    document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
+  });
+  if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
+  else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ── INIT ─────────────────────────────────────────────────────
+(async () => {
+  await ensureAuth();
+  renderBulkItems();
+  updateUndoRedoButtons();
+  loadRecords();
+  setInterval(autoRefresh, 10000);
+  setInterval(async () => {
+    try {
+      const data = await apiGet('action=customers');
+      allCustomers = {};
+      (data.records || []).forEach(c => {
+        const primary = (c['Primary Username'] || '').trim();
+        if (!primary) return;
+        const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
+        const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+        [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
+      });
+    } catch (e) { /* silent */ }
+  }, 60000);
+})();
