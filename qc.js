@@ -382,6 +382,8 @@ document.getElementById('qc-notes').addEventListener('change', syncDraftToServer
 
 async function submitQC() {
   const btn = document.getElementById('qc-submit');
+  console.log('[submitQC] called. selected=', selected, 'currentQcId=', currentQcId);
+  if (!selected) { showToast('Error: no hay orden seleccionada, vuelve a intentarlo', true); return; }
   if (!photos.content) { showToast('Falta la foto de contenido', true); return; }
 
   btn.disabled = true;
