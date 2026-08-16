@@ -1,6 +1,6 @@
 // qc.js — Vel Papier QC capture page logic
 
-const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
+const API = 'https://script.google.com/macros/s/AKfycby9_wvcACIMS-aVcNmJWatiRtbWFH8TvqWJFNnjNcPjZstsqOOc-QmFz4iIWGcu27pHvg/exec';
 
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
@@ -8,6 +8,36 @@ let allActiveOrders = [];   // all Pagado/No Pagado orders, fetched once per ses
 let selected = null;        // { tracking_id, order_ids:[], customer_id, username, products, label }
 let selectedAddonIds = new Set();  // order_ids of add-on orders the user checked
 const photos = { content: null, gift: null, box: null };
+
+// ── Draft persistence (survives phone reloads / accidental navigation) ─────
+// Key: 'vp_qc_draft_<tracking_id>'  Value: { addonIds:[], photos:{}, notes:'' }
+
+function draftKey(trackingId) {
+  return 'vp_qc_draft_' + (trackingId || 'no_tracking');
+}
+
+function saveDraft() {
+  if (!selected) return;
+  const draft = {
+    addonIds: Array.from(selectedAddonIds),
+    photos:   photos,
+    notes:    document.getElementById('qc-notes').value,
+  };
+  try {
+    localStorage.setItem(draftKey(selected.tracking_id), JSON.stringify(draft));
+  } catch (e) { /* storage full or unavailable — non-fatal, just no recovery */ }
+}
+
+function loadDraft(trackingId) {
+  try {
+    const raw = localStorage.getItem(draftKey(trackingId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function clearDraft(trackingId) {
+  try { localStorage.removeItem(draftKey(trackingId)); } catch (e) { /* ignore */ }
+}
 
 
 // ── Auth (reuses the shared password/token pattern) ────────────────────────
@@ -117,14 +147,6 @@ async function loadPending() {
 
 function openCapture(shipment) {
   selected = shipment;
-  selectedAddonIds = new Set();
-  photos.content = null;
-  photos.gift = null;
-  photos.box = null;
-  document.getElementById('qc-notes').value = '';
-  resetSlotVisual('content');
-  resetSlotVisual('gift');
-  resetSlotVisual('box');
 
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">@${escapeHtml(shipment.username)}</div>
@@ -134,9 +156,38 @@ function openCapture(shipment) {
 
   renderAddonOrders(shipment.customer_id);
 
+  // Restore any in-progress draft for this shipment (survives reloads/navigation)
+  const draft = loadDraft(shipment.tracking_id);
+  if (draft) {
+    selectedAddonIds = new Set(draft.addonIds || []);
+    photos.content = draft.photos?.content || null;
+    photos.gift    = draft.photos?.gift    || null;
+    photos.box     = draft.photos?.box     || null;
+    document.getElementById('qc-notes').value = draft.notes || '';
+    showToast('Progreso anterior restaurado');
+  } else {
+    selectedAddonIds = new Set();
+    photos.content = null;
+    photos.gift = null;
+    photos.box = null;
+    document.getElementById('qc-notes').value = '';
+  }
+
+  // Reflect restored/reset state in the UI
+  resetSlotVisual('content');
+  resetSlotVisual('gift');
+  resetSlotVisual('box');
+  ['content', 'gift', 'box'].forEach(name => {
+    if (photos[name]) setSlotState(name, 'done', photos[name].url);
+  });
+  selectedAddonIds.forEach(orderId => {
+    const el = document.getElementById(`addon-${cssEscape(orderId)}`);
+    if (el) el.classList.add('selected');
+  });
+
   document.getElementById('view-pending').style.display = 'none';
   document.getElementById('view-capture').style.display = 'block';
-  document.getElementById('qc-submit').disabled = true;
+  document.getElementById('qc-submit').disabled = !photos.content;
   window.scrollTo(0, 0);
 }
 
@@ -183,6 +234,7 @@ function toggleAddon(orderId) {
     selectedAddonIds.add(orderId);
     el.classList.add('selected');
   }
+  saveDraft();
 }
 
 
@@ -243,6 +295,7 @@ function bindSlot(name) {
     try {
       photos[name] = await uploadPhoto(f, 'velpapier/qc');
       setSlotState(name, 'done', previewUrl);
+      saveDraft();  // photo URL is tiny — safe to persist immediately after upload succeeds
     } catch (e) {
       photos[name] = null;
       setSlotState(name, 'retry');
@@ -253,6 +306,8 @@ function bindSlot(name) {
   };
 }
 ['content', 'gift', 'box'].forEach(bindSlot);
+
+document.getElementById('qc-notes').addEventListener('input', saveDraft);
 
 
 // ── Submit ───────────────────────────────────────────────────────────────
@@ -283,6 +338,7 @@ async function submitQC() {
 
     if (res.result === 'duplicate') {
       showToast('⚠ Esta guía ya tiene QC registrado');
+      clearDraft(selected.tracking_id);
       backToPending();
       loadPending();
       return;
@@ -290,6 +346,7 @@ async function submitQC() {
     if (res.result !== 'created') throw new Error(res.error || 'Error desconocido');
 
     showToast('✓ Empacado y enviado');
+    clearDraft(selected.tracking_id);
     backToPending();
     loadPending();
 
