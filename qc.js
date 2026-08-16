@@ -410,6 +410,7 @@ async function submitQC() {
       notes:         document.getElementById('qc-notes').value.trim(),
     });
 
+    console.log('[submitQC] finalize_qc response:', res);
     if (res.error) throw new Error(res.error);
     if (res.result !== 'created') throw new Error('Error desconocido');
 
