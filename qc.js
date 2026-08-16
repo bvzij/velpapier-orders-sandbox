@@ -47,7 +47,8 @@ function clearDraftLocal(trackingId) {
 // Push current photos/notes/addons to the server draft row.
 // Creates the row on first call (sets currentQcId), updates it after.
 async function syncDraftToServer() {
-  if (!selected || !photos.content) return;  // nothing worth saving yet
+  if (!selected) return;
+  if (!photos.content && !photos.gift && !photos.box) return;  // nothing worth saving yet
   try {
     const res = await apiPost({
       action:        'save_qc_draft',
