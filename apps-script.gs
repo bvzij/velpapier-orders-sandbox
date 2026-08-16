@@ -1,7 +1,8 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
+const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-07-12.5';
+const SCRIPT_VERSION = '2026-08-15.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -13,6 +14,10 @@ function getOrdersSheet() {
 
 function getCustomersSheet() {
   return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheets()[0];
+}
+
+function getQCSheet() {
+  return SpreadsheetApp.openById(QC_SHEET_ID).getSheets()[0];
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
@@ -116,6 +121,9 @@ function doGet(e) {
 
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
 
+    if (action === 'get_upload_signature') return getUploadSignature(e);
+    if (action === 'qc') return getQC(e);
+
     if (action === 'orders') {
       const sheet = getOrdersSheet();
       const data = sheet.getDataRange().getValues();
@@ -190,6 +198,7 @@ function doPost(e) {
     if (action === 'delete_order') return deleteOrder(body);
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
+    if (action === 'create_qc') return createQC(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -735,12 +744,13 @@ function importTikTokOrders(body) {
   });
 }
 
+// ─── Bulk customer creation (fast path for TikTok import) ──────────────────────
+
 function createCustomersBulk(body) {
   const sheet = getCustomersSheet();
   const existing = sheetToObjects(sheet);
   const custLastCol = sheet.getLastColumn();
 
-  // Find current max CUST- number once
   let maxNum = 0;
   existing.forEach(c => {
     const id = c['Customer ID'];
@@ -752,7 +762,6 @@ function createCustomersBulk(body) {
 
   const rows = [], created = [];
   (body.customers || []).forEach(cust => {
-    // Skip if username already exists (exact)
     if (cust.primary_username) {
       const dup = existing.find(c =>
         normalizeUsername(c['Primary Username']) === normalizeUsername(cust.primary_username)
@@ -791,4 +800,123 @@ function createCustomersBulk(body) {
   }
 
   return jsonResponse({ result: 'bulk_created', created: created });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QC SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Signed upload ticket for direct browser->Cloudinary uploads.
+// Secrets read from Script Properties: CLOUDINARY_CLOUD, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
+function getUploadSignature(e) {
+  const p = PropertiesService.getScriptProperties();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const folder = (e.parameter.folder || 'velpapier/qc').replace(/[^a-z0-9/_-]/gi, '');
+  const secret = p.getProperty('CLOUDINARY_API_SECRET');
+  const toSign = 'folder=' + folder + '&timestamp=' + timestamp + secret;
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_1, toSign);
+  const sig = digest.map(b => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+  return jsonResponse({
+    cloud:     p.getProperty('CLOUDINARY_CLOUD'),
+    api_key:   p.getProperty('CLOUDINARY_API_KEY'),
+    timestamp: timestamp,
+    folder:    folder,
+    signature: sig
+  });
+}
+
+// Create a QC record: appends the row, stamps Packed Date on each linked
+// order, wires Linked Shipment for non-TikTok orders, and marks every
+// order in the batch as Enviado (the QC submit IS the ship trigger).
+function createQC(body) {
+  if (!body.tracking_id || !(body.order_ids || []).length || !body.photo_content) {
+    return jsonResponse({ error: 'tracking_id, order_ids y foto de contenido son obligatorios' });
+  }
+
+  const qcSheet = getQCSheet();
+
+  const dupRow = findRowByColumn(qcSheet, 'B', body.tracking_id);
+  if (dupRow) {
+    return jsonResponse({ result: 'duplicate', message: 'Tracking ID ya tiene QC', row: dupRow });
+  }
+
+  const qcId = generateQCID(qcSheet);
+  qcSheet.appendRow([
+    qcId,
+    body.tracking_id,
+    (body.order_ids || []).join(' + '),
+    body.customer_id || '',
+    body.username || '',
+    body.packer || '',
+    nowISO(),
+    body.photo_content || '',
+    body.photo_gift || '',
+    body.photo_box || '',
+    body.skus || '',
+    'Activo',
+    body.notes || ''
+  ]);
+
+  const orders = getOrdersSheet();
+  const h = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const iPacked = h.indexOf('Packed Date') + 1;
+  const iLink   = h.indexOf('Linked Shipment') + 1;
+  const iChan   = h.indexOf('Channel') + 1;
+  const iStat   = h.indexOf('Status') + 1;
+
+  const results = [];
+  (body.order_ids || []).forEach(id => {
+    const row = findOrderRow(orders, String(id));
+    if (!row) { results.push({ order_id: id, result: 'not_found' }); return; }
+
+    if (iPacked > 0) orders.getRange(row, iPacked).setValue(nowISO());
+    if (iChan > 0 && iLink > 0 && orders.getRange(row, iChan).getValue() !== 'TikTok') {
+      orders.getRange(row, iLink).setValue(body.tracking_id);
+    }
+    if (iStat > 0) {
+      orders.getRange(row, iStat).setValue('Enviado');
+      applyStatusSideEffects(orders, row, 'Enviado', h);
+    }
+    results.push({ order_id: id, result: 'shipped' });
+  });
+
+  return jsonResponse({ result: 'created', qc_id: qcId, orders: results });
+}
+
+// Batch read for thumbnails / order-history views.
+// ?tracking_ids=A,B,C  or  ?order_id=X
+function getQC(e) {
+  const data = getQCSheet().getDataRange().getValues();
+  if (data.length < 2) return jsonResponse({ records: [] });
+
+  const h = data[0];
+  const wantTracking = e.parameter.tracking_ids
+    ? e.parameter.tracking_ids.split(',').map(s => s.trim())
+    : null;
+  const wantOrder = e.parameter.order_id || null;
+
+  const records = [];
+  for (let r = 1; r < data.length; r++) {
+    if (wantTracking && !wantTracking.includes(String(data[r][1]))) continue;
+    if (wantOrder && String(data[r][2]).split(' + ').indexOf(String(wantOrder)) === -1) continue;
+    const obj = {};
+    h.forEach((k, j) => { obj[k] = data[r][j]; });
+    records.push(obj);
+  }
+  return jsonResponse({ records: records });
+}
+
+// QC-ID generator: QC-0001-a1b2 (row-based + short random suffix)
+function generateQCID(sheet) {
+  const last = sheet.getLastRow();
+  return 'QC-' + String(last).padStart(4, '0') + '-' + Utilities.getUuid().slice(0, 4);
+}
+
+// Generic single-column exact-match finder, reused for QC dedup.
+function findRowByColumn(sheet, colLetter, value) {
+  const f = sheet.getRange(colLetter + ':' + colLetter)
+                 .createTextFinder(String(value))
+                 .matchEntireCell(true)
+                 .findNext();
+  return f ? f.getRow() : null;
 }
