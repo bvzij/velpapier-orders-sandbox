@@ -1,6 +1,6 @@
 // qc.js — Vel Papier QC capture page logic
 
-const API = 'https://script.google.com/macros/s/AKfycby9_wvcACIMS-aVcNmJWatiRtbWFH8TvqWJFNnjNcPjZstsqOOc-QmFz4iIWGcu27pHvg/exec';
+const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
 
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
