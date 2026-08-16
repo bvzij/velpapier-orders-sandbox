@@ -18,10 +18,13 @@ async function compressImage(file, maxDim = 1600, quality = 0.8) {
 // Upload a photo file. Returns { url, bytes }.
 // folder: Cloudinary folder path, e.g. 'velpapier/qc'
 async function uploadPhoto(file, folder) {
+  console.log('[uploadPhoto] start', file.name, file.size);
   const blob = await compressImage(file);
+  console.log('[uploadPhoto] compressed', blob ? blob.size : 'NULL BLOB');
 
   if (PHOTO_PROVIDER === 'cloudinary') {
     const sig = await apiGet(`action=get_upload_signature&folder=${encodeURIComponent(folder)}`);
+    console.log('[uploadPhoto] signature response', sig);
     if (sig.error) throw new Error(sig.error);
 
     const fd = new FormData();
