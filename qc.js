@@ -53,7 +53,6 @@ async function syncDraftToServer() {
   try {
     console.log('[syncDraftToServer] about to POST save_qc_draft');
     const res = await apiPost({
-    const res = await apiPost({
       action:        'save_qc_draft',
       qc_id:         currentQcId || undefined,
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
