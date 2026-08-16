@@ -47,9 +47,12 @@ function clearDraftLocal(trackingId) {
 // Push current photos/notes/addons to the server draft row.
 // Creates the row on first call (sets currentQcId), updates it after.
 async function syncDraftToServer() {
-  if (!selected) return;
-  if (!photos.content && !photos.gift && !photos.box) return;  // nothing worth saving yet
+  console.log('[syncDraftToServer] CALLED. selected=', selected, 'photos=', JSON.stringify(photos));
+  if (!selected) { console.log('[syncDraftToServer] bail: no selected'); return; }
+  if (!photos.content && !photos.gift && !photos.box) { console.log('[syncDraftToServer] bail: no photos'); return; }
   try {
+    console.log('[syncDraftToServer] about to POST save_qc_draft');
+    const res = await apiPost({
     const res = await apiPost({
       action:        'save_qc_draft',
       qc_id:         currentQcId || undefined,
@@ -63,6 +66,7 @@ async function syncDraftToServer() {
       photo_box:     (photos.box || {}).url || '',
       notes:         document.getElementById('qc-notes').value.trim(),
     });
+    console.log('[syncDraftToServer] response:', res);
     if (res.qc_id) currentQcId = res.qc_id;
     saveDraftLocal();
   } catch (e) {
