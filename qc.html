@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Vel Papier · QC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { padding-bottom: env(safe-area-inset-bottom); }
+
+    .qc-layout {
+      max-width: 480px;
+      margin: 0 auto;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .qc-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 0.5px solid var(--border);
+      background: var(--surface);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+
+    .qc-title { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+    .qc-title span { font-weight: 400; color: var(--text-muted); font-size: 14px; }
+
+    .packer-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .packer-label { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+
+    .packer-select {
+      flex: 1;
+      padding: 8px 10px;
+      font-size: 14px;
+      font-weight: 600;
+      border: 0.5px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      background: var(--bg);
+      color: var(--text);
+      font-family: inherit;
+    }
+
+    .qc-body { flex: 1; padding: 1rem 1.25rem; }
+
+    /* Pending list */
+    .pending-card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: all 0.12s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .pending-card:active { transform: scale(0.98); background: var(--surface2); }
+
+    .pending-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+
+    .pending-username { font-weight: 700; font-size: 15px; }
+
+    .pending-count {
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--surface2);
+      color: var(--text-muted);
+      padding: 2px 8px;
+      border-radius: 99px;
+    }
+
+    .pending-products {
+      font-size: 13px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pending-tracking {
+      font-size: 11px;
+      color: var(--text-faint);
+      margin-top: 4px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-faint);
+      font-size: 14px;
+    }
+
+    /* Capture screen */
+    .back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      padding: 4px 0;
+      margin-bottom: 12px;
+    }
+
+    .ship-summary {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      margin-bottom: 1rem;
+    }
+
+    .ship-summary-username { font-weight: 700; font-size: 16px; margin-bottom: 2px; }
+    .ship-summary-products { font-size: 13px; color: var(--text-muted); }
+    .ship-summary-tracking { font-size: 11px; color: var(--text-faint); margin-top: 6px; }
+
+    .addon-section { margin-bottom: 1rem; }
+
+    .addon-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .addon-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      transition: all 0.12s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .addon-item.selected { border-color: var(--green-border); background: var(--green-bg); }
+
+    .addon-checkbox {
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
+      border: 2px solid var(--border-strong);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.12s;
+    }
+
+    .addon-item.selected .addon-checkbox { background: #3b6d11; border-color: #3b6d11; }
+    .addon-item.selected .addon-checkbox svg { display: block; }
+    .addon-checkbox svg { display: none; color: white; }
+
+    .addon-text { flex: 1; min-width: 0; }
+    .addon-channel { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-faint); }
+    .addon-item.selected .addon-channel { color: #3b6d11; }
+    .addon-products { font-size: 13px; font-weight: 600; }
+    .addon-item.selected .addon-products { color: #2a5009; }
+
+    /* Photo slots */
+    .photo-slots {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 1rem;
+    }
+
+    .slot {
+      position: relative;
+      aspect-ratio: 1;
+      border: 1.5px dashed var(--border-strong);
+      border-radius: var(--radius-md);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      background: var(--surface);
+      overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .slot.required { border-color: var(--amber-border); }
+    .slot.done { border-style: solid; border-color: var(--green-border); background: var(--green-bg); }
+    .slot.retry { border-style: solid; border-color: var(--red-border); background: var(--red-bg); }
+    .slot.uploading { border-color: var(--text-muted); }
+
+    .slot input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+    .slot-icon { font-size: 22px; margin-bottom: 4px; }
+    .slot-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-align: center; padding: 0 4px; }
+    .slot.required .slot-label::after { content: ' *'; color: var(--amber-text); }
+    .slot.done .slot-label { color: var(--green-text); }
+    .slot.retry .slot-label { color: var(--red-text); }
+
+    .slot-thumb { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+    .slot-spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--text);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .qc-notes {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+      border: 0.5px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+      color: var(--text);
+      font-family: inherit;
+      resize: vertical;
+      min-height: 60px;
+      margin-bottom: 1rem;
+    }
+
+    .qc-submit {
+      width: 100%;
+      padding: 15px;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: inherit;
+      background: var(--text);
+      color: var(--surface);
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .qc-submit:disabled { opacity: 0.3; cursor: not-allowed; }
+    .qc-submit:not(:disabled):active { opacity: 0.7; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--text);
+      color: var(--surface);
+      padding: 10px 18px;
+      border-radius: 99px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transition: all 0.25s;
+      pointer-events: none;
+      z-index: 200;
+      white-space: nowrap;
+    }
+
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    .refresh-fab {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--text);
+      color: var(--surface);
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      cursor: pointer;
+      z-index: 60;
+    }
+  </style>
+</head>
+<body>
+
+<script>
+(function() {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const input = prompt('Contraseña:');
+  if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; throw new Error('no auth'); }
+  window.__qcAuthPromise = crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash !== correctHash) {
+      document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+      throw new Error('bad password');
+    }
+  });
+})();
+</script>
+
+<div class="qc-layout">
+
+  <header class="qc-header">
+    <div class="qc-title">Vel Papier <span>· Control de calidad</span></div>
+    <div class="packer-row">
+      <span class="packer-label">Empacador:</span>
+      <select class="packer-select" id="packer-select">
+        <option value="Mariana">Mariana</option>
+        <option value="Bob">Bob</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="qc-body">
+
+    <div id="view-pending">
+      <div id="pending-list"></div>
+    </div>
+
+    <div id="view-capture" style="display:none">
+      <button class="back-btn" onclick="backToPending()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        Volver
+      </button>
+
+      <div class="ship-summary" id="ship-summary"></div>
+
+      <div class="addon-section" id="addon-section" style="display:none">
+        <div class="addon-title">¿Incluir también?</div>
+        <div id="addon-list"></div>
+      </div>
+
+      <div class="photo-slots">
+        <label class="slot required" id="slot-content">
+          <input type="file" accept="image/*" capture="environment">
+          <span class="slot-icon">📦</span>
+          <span class="slot-label">Contenido</span>
+        </label>
+        <label class="slot" id="slot-gift">
+          <input type="file" accept="image/*" capture="environment">
+          <span class="slot-icon">🎁</span>
+          <span class="slot-label">Regalo</span>
+        </label>
+        <label class="slot" id="slot-box">
+          <input type="file" accept="image/*" capture="environment">
+          <span class="slot-icon">📮</span>
+          <span class="slot-label">Caja cerrada</span>
+        </label>
+      </div>
+
+      <textarea class="qc-notes" id="qc-notes" placeholder="Notas (opcional)"></textarea>
+
+      <button class="qc-submit" id="qc-submit" disabled onclick="submitQC()">Enviar</button>
+    </div>
+
+  </div>
+
+  <button class="refresh-fab" id="refresh-fab" onclick="loadPending()" title="Actualizar">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+  </button>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="uploader.js"></script>
+<script src="qc.js"></script>
+</body>
+</html>
