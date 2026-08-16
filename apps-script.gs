@@ -1,8 +1,8 @@
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
-const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
+const QC_SHEET_ID = 'PASTE_YOUR_NEW_QC_SHEET_ID_HERE';
 
-const SCRIPT_VERSION = '2026-08-15.1';
+const SCRIPT_VERSION = '2026-08-15.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -198,7 +198,8 @@ function doPost(e) {
     if (action === 'delete_order') return deleteOrder(body);
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
-    if (action === 'create_qc') return createQC(body);
+    if (action === 'save_qc_draft') return saveQCDraft(body);
+    if (action === 'finalize_qc') return finalizeQC(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -825,19 +826,46 @@ function getUploadSignature(e) {
   });
 }
 
-// Create a QC record: appends the row, stamps Packed Date on each linked
-// order, wires Linked Shipment for non-TikTok orders, and marks every
-// order in the batch as Enviado (the QC submit IS the ship trigger).
-function createQC(body) {
-  if (!body.tracking_id || !(body.order_ids || []).length || !body.photo_content) {
-    return jsonResponse({ error: 'tracking_id, order_ids y foto de contenido son obligatorios' });
+// Create or update a QC draft row (Status = 'Borrador').
+// Called on every photo capture — first call creates the row and returns qc_id,
+// subsequent calls (with qc_id in body) update photo/notes/addon columns in place.
+// Never touches order status — that only happens in finalizeQC.
+function saveQCDraft(body) {
+  if (!body.tracking_id) {
+    return jsonResponse({ error: 'tracking_id es obligatorio' });
   }
 
   const qcSheet = getQCSheet();
 
-  const dupRow = findRowByColumn(qcSheet, 'B', body.tracking_id);
-  if (dupRow) {
-    return jsonResponse({ result: 'duplicate', message: 'Tracking ID ya tiene QC', row: dupRow });
+  // Updating an existing draft
+  if (body.qc_id) {
+    const row = findRowByColumn(qcSheet, 'A', body.qc_id);
+    if (!row) return jsonResponse({ error: 'Borrador no encontrado' });
+
+    const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
+    const set = (col, val) => {
+      const idx = h.indexOf(col) + 1;
+      if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
+    };
+    set('Order IDs', (body.order_ids || []).join(' + '));
+    set('Photo1 Content', body.photo_content || '');
+    set('Photo2 Gift', body.photo_gift || '');
+    set('Photo3 Box', body.photo_box || '');
+    set('Notes', body.notes || '');
+
+    return jsonResponse({ result: 'draft_updated', qc_id: body.qc_id });
+  }
+
+  // Creating a new draft — but first check no ACTIVE (finalized) QC already
+  // exists for this tracking ID, and no existing draft either.
+  const existingRows = sheetToObjects(qcSheet);
+  const existingActive = existingRows.find(r => r['Tracking ID'] === body.tracking_id && r['Status'] === 'Activo');
+  if (existingActive) {
+    return jsonResponse({ result: 'duplicate', message: 'Tracking ID ya tiene QC completado', qc_id: existingActive['QC ID'] });
+  }
+  const existingDraft = existingRows.find(r => r['Tracking ID'] === body.tracking_id && r['Status'] === 'Borrador');
+  if (existingDraft) {
+    return jsonResponse({ result: 'draft_exists', qc_id: existingDraft['QC ID'] });
   }
 
   const qcId = generateQCID(qcSheet);
@@ -853,34 +881,63 @@ function createQC(body) {
     body.photo_gift || '',
     body.photo_box || '',
     body.skus || '',
-    'Activo',
+    'Borrador',
     body.notes || ''
   ]);
 
+  return jsonResponse({ result: 'draft_created', qc_id: qcId });
+}
+
+// Finalize a QC draft: flips Status to Activo and triggers the real ship
+// side-effects (Packed Date, Linked Shipment, order Status -> Enviado).
+// This is the action the "Enviar" button calls.
+function finalizeQC(body) {
+  if (!body.qc_id || !(body.order_ids || []).length || !body.photo_content) {
+    return jsonResponse({ error: 'qc_id, order_ids y foto de contenido son obligatorios' });
+  }
+
+  const qcSheet = getQCSheet();
+  const row = findRowByColumn(qcSheet, 'A', body.qc_id);
+  if (!row) return jsonResponse({ error: 'Borrador no encontrado' });
+
+  const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
+  const set = (col, val) => {
+    const idx = h.indexOf(col) + 1;
+    if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
+  };
+  set('Order IDs', (body.order_ids || []).join(' + '));
+  set('Photo1 Content', body.photo_content || '');
+  set('Photo2 Gift', body.photo_gift || '');
+  set('Photo3 Box', body.photo_box || '');
+  set('Notes', body.notes || '');
+  set('Status', 'Activo');
+
   const orders = getOrdersSheet();
-  const h = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
-  const iPacked = h.indexOf('Packed Date') + 1;
-  const iLink   = h.indexOf('Linked Shipment') + 1;
-  const iChan   = h.indexOf('Channel') + 1;
-  const iStat   = h.indexOf('Status') + 1;
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const iPacked = oh.indexOf('Packed Date') + 1;
+  const iLink   = oh.indexOf('Linked Shipment') + 1;
+  const iChan   = oh.indexOf('Channel') + 1;
+  const iStat   = oh.indexOf('Status') + 1;
+
+  const tracking = qcSheet.getRange(row, h.indexOf('Tracking ID') + 1).getValue();
 
   const results = [];
   (body.order_ids || []).forEach(id => {
-    const row = findOrderRow(orders, String(id));
-    if (!row) { results.push({ order_id: id, result: 'not_found' }); return; }
+    const orow = findOrderRow(orders, String(id));
+    if (!orow) { results.push({ order_id: id, result: 'not_found' }); return; }
 
-    if (iPacked > 0) orders.getRange(row, iPacked).setValue(nowISO());
-    if (iChan > 0 && iLink > 0 && orders.getRange(row, iChan).getValue() !== 'TikTok') {
-      orders.getRange(row, iLink).setValue(body.tracking_id);
+    if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
+    if (iChan > 0 && iLink > 0 && orders.getRange(orow, iChan).getValue() !== 'TikTok') {
+      orders.getRange(orow, iLink).setValue(tracking);
     }
     if (iStat > 0) {
-      orders.getRange(row, iStat).setValue('Enviado');
-      applyStatusSideEffects(orders, row, 'Enviado', h);
+      orders.getRange(orow, iStat).setValue('Enviado');
+      applyStatusSideEffects(orders, orow, 'Enviado', oh);
     }
     results.push({ order_id: id, result: 'shipped' });
   });
 
-  return jsonResponse({ result: 'created', qc_id: qcId, orders: results });
+  return jsonResponse({ result: 'created', qc_id: body.qc_id, orders: results });
 }
 
 // Batch read for thumbnails / order-history views.
