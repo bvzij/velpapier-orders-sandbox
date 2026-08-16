@@ -285,6 +285,8 @@ function setSlotState(name, state, previewUrl) {
   }
 }
 
+let uploadsInFlight = 0;
+
 function bindSlot(name) {
   const input = document.querySelector(`#slot-${name} input`);
   input.onchange = async () => {
@@ -292,6 +294,8 @@ function bindSlot(name) {
     if (!f) return;
     const previewUrl = URL.createObjectURL(f);
     setSlotState(name, 'uploading');
+    uploadsInFlight++;
+    document.getElementById('qc-submit').disabled = true;
     try {
       photos[name] = await uploadPhoto(f, 'velpapier/qc');
       setSlotState(name, 'done', previewUrl);
@@ -302,7 +306,8 @@ function bindSlot(name) {
       setSlotState(name, 'retry');
       showToast('Error al subir foto, intenta de nuevo', true);
     }
-    document.getElementById('qc-submit').disabled = !photos.content;
+    uploadsInFlight--;
+    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || !photos.content;
     input.value = '';  // allow re-selecting the same file
   };
 }
