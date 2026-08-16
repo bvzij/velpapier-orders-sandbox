@@ -297,6 +297,7 @@ function bindSlot(name) {
       setSlotState(name, 'done', previewUrl);
       saveDraft();  // photo URL is tiny — safe to persist immediately after upload succeeds
     } catch (e) {
+      console.error('[bindSlot] upload failed:', e);
       photos[name] = null;
       setSlotState(name, 'retry');
       showToast('Error al subir foto, intenta de nuevo', true);
