@@ -34,12 +34,15 @@ async function uploadPhoto(file, folder) {
     fd.append('folder', sig.folder);
     fd.append('signature', sig.signature);
 
+    console.log('[uploadPhoto] sending to cloudinary...');
     const r = await fetch(`https://api.cloudinary.com/v1_1/${sig.cloud}/image/upload`, {
       method: 'POST',
       body: fd,
     });
+    console.log('[uploadPhoto] cloudinary response status', r.status);
     if (!r.ok) throw new Error('upload HTTP ' + r.status);
     const j = await r.json();
+    console.log('[uploadPhoto] cloudinary response body', j);
     return { url: j.secure_url, bytes: j.bytes };
   }
 
