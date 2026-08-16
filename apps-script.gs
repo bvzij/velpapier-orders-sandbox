@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = 'PASTE_YOUR_NEW_QC_SHEET_ID_HERE';
 
-const SCRIPT_VERSION = '2026-08-15.2';
+const SCRIPT_VERSION = '2026-08-15.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -198,8 +198,7 @@ function doPost(e) {
     if (action === 'delete_order') return deleteOrder(body);
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
-    if (action === 'save_qc_draft') return saveQCDraft(body);
-    if (action === 'finalize_qc') return finalizeQC(body);
+    if (action === 'save_qc') return saveQC(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -826,118 +825,82 @@ function getUploadSignature(e) {
   });
 }
 
-// Create or update a QC draft row (Status = 'Borrador').
-// Called on every photo capture — first call creates the row and returns qc_id,
-// subsequent calls (with qc_id in body) update photo/notes/addon columns in place.
-// Never touches order status — that only happens in finalizeQC.
-function saveQCDraft(body) {
+// Create or update a QC row. First call (no qc_id) creates the row and
+// returns qc_id; subsequent calls update photos/notes in place.
+// Order-side shipping effects (Packed Date, Linked Shipment, Enviado) only
+// fire when finalize=true — that's what the "Enviar" button sends.
+function saveQC(body) {
   if (!body.tracking_id) {
     return jsonResponse({ error: 'tracking_id es obligatorio' });
   }
 
   const qcSheet = getQCSheet();
-
-  // Updating an existing draft
-  if (body.qc_id) {
-    const row = findRowByColumn(qcSheet, 'A', body.qc_id);
-    if (!row) return jsonResponse({ error: 'Borrador no encontrado' });
-
-    const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
-    const set = (col, val) => {
-      const idx = h.indexOf(col) + 1;
-      if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
-    };
-    set('Order IDs', (body.order_ids || []).join(' + '));
-    set('Photo1 Content', body.photo_content || '');
-    set('Photo2 Gift', body.photo_gift || '');
-    set('Photo3 Box', body.photo_box || '');
-    set('Notes', body.notes || '');
-
-    return jsonResponse({ result: 'draft_updated', qc_id: body.qc_id });
-  }
-
-  // Creating a new draft — but first check no ACTIVE (finalized) QC already
-  // exists for this tracking ID, and no existing draft either.
-  const existingRows = sheetToObjects(qcSheet);
-  const existingActive = existingRows.find(r => r['Tracking ID'] === body.tracking_id && r['Status'] === 'Activo');
-  if (existingActive) {
-    return jsonResponse({ result: 'duplicate', message: 'Tracking ID ya tiene QC completado', qc_id: existingActive['QC ID'] });
-  }
-  const existingDraft = existingRows.find(r => r['Tracking ID'] === body.tracking_id && r['Status'] === 'Borrador');
-  if (existingDraft) {
-    return jsonResponse({ result: 'draft_exists', qc_id: existingDraft['QC ID'] });
-  }
-
-  const qcId = generateQCID(qcSheet);
-  qcSheet.appendRow([
-    qcId,
-    body.tracking_id,
-    (body.order_ids || []).join(' + '),
-    body.customer_id || '',
-    body.username || '',
-    body.packer || '',
-    nowISO(),
-    body.photo_content || '',
-    body.photo_gift || '',
-    body.photo_box || '',
-    body.skus || '',
-    'Borrador',
-    body.notes || ''
-  ]);
-
-  return jsonResponse({ result: 'draft_created', qc_id: qcId });
-}
-
-// Finalize a QC draft: flips Status to Activo and triggers the real ship
-// side-effects (Packed Date, Linked Shipment, order Status -> Enviado).
-// This is the action the "Enviar" button calls.
-function finalizeQC(body) {
-  if (!body.qc_id || !(body.order_ids || []).length || !body.photo_content) {
-    return jsonResponse({ error: 'qc_id, order_ids y foto de contenido son obligatorios' });
-  }
-
-  const qcSheet = getQCSheet();
-  const row = findRowByColumn(qcSheet, 'A', body.qc_id);
-  if (!row) return jsonResponse({ error: 'Borrador no encontrado' });
-
   const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
+  let qcId = body.qc_id;
+  let row;
+
+  if (qcId) {
+    row = findRowByColumn(qcSheet, 'A', qcId);
+    if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
+  } else {
+    // Look for an existing row for this tracking ID before creating a new one
+    const existing = sheetToObjects(qcSheet).find(r => r['Tracking ID'] === body.tracking_id);
+    if (existing) {
+      qcId = existing['QC ID'];
+      row = existing._rowIndex;
+    } else {
+      qcId = generateQCID(qcSheet);
+      qcSheet.appendRow([
+        qcId, body.tracking_id, '', body.customer_id || '', body.username || '',
+        body.packer || '', nowISO(), '', '', '', '', 'Activo', ''
+      ]);
+      row = qcSheet.getLastRow();
+    }
+  }
+
   const set = (col, val) => {
     const idx = h.indexOf(col) + 1;
     if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
   };
-  set('Order IDs', (body.order_ids || []).join(' + '));
-  set('Photo1 Content', body.photo_content || '');
-  set('Photo2 Gift', body.photo_gift || '');
-  set('Photo3 Box', body.photo_box || '');
-  set('Notes', body.notes || '');
-  set('Status', 'Activo');
+  if (body.order_ids)     set('Order IDs', body.order_ids.join(' + '));
+  if (body.photo_content !== undefined) set('Photo1 Content', body.photo_content);
+  if (body.photo_gift !== undefined)    set('Photo2 Gift', body.photo_gift);
+  if (body.photo_box !== undefined)     set('Photo3 Box', body.photo_box);
+  if (body.notes !== undefined)         set('Notes', body.notes);
 
-  const orders = getOrdersSheet();
-  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
-  const iPacked = oh.indexOf('Packed Date') + 1;
-  const iLink   = oh.indexOf('Linked Shipment') + 1;
-  const iChan   = oh.indexOf('Channel') + 1;
-  const iStat   = oh.indexOf('Status') + 1;
+  const result = { result: 'saved', qc_id: qcId };
 
-  const tracking = qcSheet.getRange(row, h.indexOf('Tracking ID') + 1).getValue();
-
-  const results = [];
-  (body.order_ids || []).forEach(id => {
-    const orow = findOrderRow(orders, String(id));
-    if (!orow) { results.push({ order_id: id, result: 'not_found' }); return; }
-
-    if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
-    if (iChan > 0 && iLink > 0 && orders.getRange(orow, iChan).getValue() !== 'TikTok') {
-      orders.getRange(orow, iLink).setValue(tracking);
+  // Finalize: trigger the real shipping side-effects
+  if (body.finalize) {
+    if (!(body.order_ids || []).length || !body.photo_content) {
+      return jsonResponse({ error: 'order_ids y foto de contenido son obligatorios para finalizar' });
     }
-    if (iStat > 0) {
-      orders.getRange(orow, iStat).setValue('Enviado');
-      applyStatusSideEffects(orders, orow, 'Enviado', oh);
-    }
-    results.push({ order_id: id, result: 'shipped' });
-  });
+    const orders = getOrdersSheet();
+    const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+    const iPacked = oh.indexOf('Packed Date') + 1;
+    const iLink   = oh.indexOf('Linked Shipment') + 1;
+    const iChan   = oh.indexOf('Channel') + 1;
+    const iStat   = oh.indexOf('Status') + 1;
 
-  return jsonResponse({ result: 'created', qc_id: body.qc_id, orders: results });
+    const shipResults = [];
+    body.order_ids.forEach(id => {
+      const orow = findOrderRow(orders, String(id));
+      if (!orow) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
+      if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
+      if (iChan > 0 && iLink > 0 && orders.getRange(orow, iChan).getValue() !== 'TikTok') {
+        orders.getRange(orow, iLink).setValue(body.tracking_id);
+      }
+      if (iStat > 0) {
+        orders.getRange(orow, iStat).setValue('Enviado');
+        applyStatusSideEffects(orders, orow, 'Enviado', oh);
+      }
+      shipResults.push({ order_id: id, result: 'shipped' });
+    });
+    result.result = 'created';
+    result.orders = shipResults;
+  }
+
+  return jsonResponse(result);
 }
 
 // Batch read for thumbnails / order-history views.
