@@ -1,16 +1,22 @@
-// qc.js — Vel Papier QC capture page logic
+// qc.js — Vel Papier QC capture page logic (multi-photo galleries)
 
 const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
+const MAX_PHOTOS = 5;
 
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 let allActiveOrders = [];
-let selected = null;
-let selectedAddonIds = new Set();
+let allQcRows = [];       // fetched once at page load, looked up in memory
+let selected = null;      // { tracking_id, order_ids:[{id,channel}], customer_id, username }
+let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
-const photos = { content: null, gift: null, box: null };
 
+// Photo galleries: array of {url} objects, up to MAX_PHOTOS each
+const gallery = { content: [], box: [] };
+
+
+// ── Auth ─────────────────────────────────────────────────────────────────
 
 async function ensureAuth() {
   await window.__qcAuthPromise;
@@ -47,22 +53,24 @@ async function apiPost(data) {
   return r.json();
 }
 
+
+// ── Sync current progress to the Sheet ──────────────────────────────────────
+
 async function syncToSheet() {
-  console.log('[syncToSheet] called, selected=', selected, 'photos=', photos);
-  if (!selected) { console.log('[syncToSheet] EARLY RETURN: no selected'); return; }
-  if (!photos.content && !photos.gift && !photos.box) { console.log('[syncToSheet] EARLY RETURN: no photos'); return; }
+  if (!selected) return;
+  if (gallery.content.length === 0 && gallery.box.length === 0) return;
   try {
+    const allOrders = [...selected.order_ids, ...selectedAddons];
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
-      order_ids:     [...selected.order_ids, ...Array.from(selectedAddonIds)],
+      order_ids:     allOrders,
       customer_id:   selected.customer_id,
       username:      selected.username,
       packer:        document.getElementById('packer-select').value,
-      photo_content: photos.content ? photos.content.url : '',
-      photo_gift:    (photos.gift || {}).url || '',
-      photo_box:     (photos.box || {}).url || '',
+      content_urls:  gallery.content.map(p => p.url),
+      box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
     if (res.qc_id) currentQcId = res.qc_id;
@@ -70,6 +78,9 @@ async function syncToSheet() {
     console.error('[syncToSheet] failed:', e);
   }
 }
+
+
+// ── Init ─────────────────────────────────────────────────────────────────
 
 document.getElementById('packer-select').value = localStorage.getItem('vp_packer') || 'Mariana';
 document.getElementById('packer-select').onchange = e => localStorage.setItem('vp_packer', e.target.value);
@@ -79,13 +90,20 @@ document.getElementById('packer-select').onchange = e => localStorage.setItem('v
   await loadPending();
 })();
 
+
+// ── Pending list ─────────────────────────────────────────────────────────
+
 async function loadPending() {
   const list = document.getElementById('pending-list');
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
 
   try {
-    const data = await apiGet('action=orders&status=Pagado,No Pagado');
-    allActiveOrders = data.records || [];
+    const [ordersData, qcData] = await Promise.all([
+      apiGet('action=orders&status=Pagado,No Pagado'),
+      apiGet('action=qc'),
+    ]);
+    allActiveOrders = ordersData.records || [];
+    allQcRows = qcData.records || [];
   } catch (e) {
     list.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
     return;
@@ -108,8 +126,16 @@ async function loadPending() {
   list.innerHTML = Object.entries(groups).map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
-    const productsList = orders.map(o => o['Products']).filter(Boolean).join('; ');
-    const orderIds = orders.map(o => o['Order ID']).filter(Boolean);
+    const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
+
+    const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
+    const photoCount = qcRow
+      ? ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
+          .filter(c => qcRow[c]).length
+      : 0;
+    const progressBadge = photoCount > 0
+      ? `<div class="pending-progress">✓ ${photoCount} foto${photoCount !== 1 ? 's' : ''} guardada${photoCount !== 1 ? 's' : ''}</div>`
+      : '';
 
     return `
       <div class="pending-card" onclick='openCapture(${JSON.stringify({
@@ -117,72 +143,68 @@ async function loadPending() {
         order_ids: orderIds,
         customer_id: first['Customer ID'] || '',
         username: username,
-        products: productsList,
-      }).replace(/'/g, "&apos;")}).catch(e => console.error(e))'>
+      }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
           <span class="pending-username">@${escapeHtml(username)}</span>
           <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}</span>
         </div>
-        <div class="pending-products">${escapeHtml(productsList || '—')}</div>
         ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
+        ${progressBadge}
       </div>`;
   }).join('');
 }
 
-async function openCapture(shipment) {
+
+// ── Capture view ─────────────────────────────────────────────────────────
+
+function openCapture(shipment) {
   selected = shipment;
   currentQcId = null;
+  selectedAddons = [];
+  gallery.content = [];
+  gallery.box = [];
+  document.getElementById('qc-notes').value = '';
 
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">@${escapeHtml(shipment.username)}</div>
-    <div class="ship-summary-products">${escapeHtml(shipment.products || '—')}</div>
     ${shipment.tracking_id ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
   `;
 
   renderAddonOrders(shipment.customer_id);
 
-  selectedAddonIds = new Set();
-  photos.content = null;
-  photos.gift = null;
-  photos.box = null;
-  document.getElementById('qc-notes').value = '';
-
+  // Restore from the already-loaded bulk QC data — instant, no network call
   let restored = false;
   if (shipment.tracking_id) {
-    try {
-      const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(shipment.tracking_id)}`);
-      const row = (data.records || [])[0];
-      if (row && (row['Photo1 Content'] || row['Photo2 Gift'] || row['Photo3 Box'])) {
-        currentQcId = row['QC ID'];
-        photos.content = row['Photo1 Content'] ? { url: row['Photo1 Content'] } : null;
-        photos.gift    = row['Photo2 Gift']    ? { url: row['Photo2 Gift'] }    : null;
-        photos.box     = row['Photo3 Box']     ? { url: row['Photo3 Box'] }     : null;
-        document.getElementById('qc-notes').value = row['Notes'] || '';
-        const savedOrderIds = String(row['Order IDs'] || '').split(' + ').filter(Boolean);
-        savedOrderIds.forEach(id => { if (!shipment.order_ids.includes(id)) selectedAddonIds.add(id); });
-        restored = true;
-      }
-    } catch (e) {
-      console.warn('[openCapture] could not check for existing progress:', e);
+    const row = allQcRows.find(r => r['Tracking ID'] === shipment.tracking_id);
+    if (row) {
+      currentQcId = row['QC ID'] || null;
+      gallery.content = ['Content1','Content2','Content3','Content4','Content5']
+        .map(c => row[c]).filter(Boolean).map(url => ({ url }));
+      gallery.box = ['Box1','Box2','Box3','Box4','Box5']
+        .map(c => row[c]).filter(Boolean).map(url => ({ url }));
+      document.getElementById('qc-notes').value = row['Notes'] || '';
+
+      const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
+      const manualIds  = String(row['Manual Order IDs']  || '').split(' + ').filter(Boolean);
+      shopifyIds.forEach(id => selectedAddons.push({ id, channel: 'Shopify' }));
+      manualIds.forEach(id  => selectedAddons.push({ id, channel: 'Manual' }));
+
+      if (gallery.content.length || gallery.box.length) restored = true;
     }
   }
 
   if (restored) showToast('Progreso anterior restaurado');
 
-  resetSlotVisual('content');
-  resetSlotVisual('gift');
-  resetSlotVisual('box');
-  ['content', 'gift', 'box'].forEach(name => {
-    if (photos[name]) setSlotState(name, 'done', photos[name].url);
-  });
-  selectedAddonIds.forEach(orderId => {
-    const el = document.getElementById(`addon-${cssEscape(orderId)}`);
+  renderGallery('content');
+  renderGallery('box');
+  selectedAddons.forEach(a => {
+    const el = document.getElementById(`addon-${cssEscape(a.id)}`);
     if (el) el.classList.add('selected');
   });
 
   document.getElementById('view-pending').style.display = 'none';
   document.getElementById('view-capture').style.display = 'block';
-  document.getElementById('qc-submit').disabled = !photos.content;
+  document.getElementById('qc-submit').disabled = gallery.content.length === 0;
   window.scrollTo(0, 0);
 }
 
@@ -209,7 +231,7 @@ function renderAddonOrders(customerId) {
 
   section.style.display = 'block';
   list.innerHTML = addons.map(o => `
-    <div class="addon-item" id="addon-${escapeAttr(o['Order ID'])}" onclick="toggleAddon('${escapeAttr(o['Order ID'])}')">
+    <div class="addon-item" id="addon-${escapeAttr(o['Order ID'])}" onclick="toggleAddon('${escapeAttr(o['Order ID'])}', '${escapeAttr(o['Channel'])}')">
       <div class="addon-checkbox">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
@@ -221,100 +243,105 @@ function renderAddonOrders(customerId) {
   `).join('');
 }
 
-function toggleAddon(orderId) {
+function toggleAddon(orderId, channel) {
   const el = document.getElementById(`addon-${cssEscape(orderId)}`);
-  if (selectedAddonIds.has(orderId)) {
-    selectedAddonIds.delete(orderId);
+  const idx = selectedAddons.findIndex(a => a.id === orderId);
+  if (idx >= 0) {
+    selectedAddons.splice(idx, 1);
     el.classList.remove('selected');
   } else {
-    selectedAddonIds.add(orderId);
+    selectedAddons.push({ id: orderId, channel: channel });
     el.classList.add('selected');
   }
   syncToSheet();
 }
 
-function resetSlotVisual(name) {
-  const slot = document.getElementById(`slot-${name}`);
-  slot.className = name === 'content' ? 'slot required' : 'slot';
-  const existingThumb = slot.querySelector('.slot-thumb');
-  if (existingThumb) existingThumb.remove();
-  const icon = slot.querySelector('.slot-icon');
-  if (icon) icon.style.display = '';
-  const spinner = slot.querySelector('.slot-spinner');
-  if (spinner) spinner.remove();
-}
 
-function setSlotState(name, state, previewUrl) {
-  const slot = document.getElementById(`slot-${name}`);
-  const icon = slot.querySelector('.slot-icon');
-  let spinner = slot.querySelector('.slot-spinner');
-  let thumb = slot.querySelector('.slot-thumb');
+// ── Photo galleries ──────────────────────────────────────────────────────
 
-  slot.classList.remove('done', 'retry', 'uploading');
+function renderGallery(group) {
+  const galEl = document.getElementById(`gallery-${group}`);
+  const btnEl = document.getElementById(`add-btn-${group}`);
 
-  if (state === 'uploading') {
-    slot.classList.add('uploading');
-    if (icon) icon.style.display = 'none';
-    if (!spinner) {
-      spinner = document.createElement('div');
-      spinner.className = 'slot-spinner';
-      slot.insertBefore(spinner, slot.querySelector('.slot-label'));
-    }
-  } else if (state === 'done') {
-    slot.classList.add('done');
-    if (spinner) spinner.remove();
-    if (icon) icon.style.display = 'none';
-    if (!thumb && previewUrl) {
-      thumb = document.createElement('img');
-      thumb.className = 'slot-thumb';
-      thumb.src = previewUrl;
-      slot.insertBefore(thumb, slot.querySelector('.slot-label'));
-    }
-  } else if (state === 'retry') {
-    slot.classList.add('retry');
-    if (spinner) spinner.remove();
-    if (thumb) thumb.remove();
-    if (icon) icon.style.display = '';
+  galEl.innerHTML = gallery[group].map((p, i) => `
+    <div class="photo-thumb">
+      <img src="${p.url}" loading="lazy">
+      <button class="photo-thumb-delete" onclick="deletePhoto('${group}', ${i})">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+  `).join('');
+
+  if (gallery[group].length >= MAX_PHOTOS) {
+    btnEl.classList.add('limit-reached');
+  } else {
+    btnEl.classList.remove('limit-reached');
   }
 }
 
-function bindSlot(name) {
-  const input = document.querySelector(`#slot-${name} input`);
+function deletePhoto(group, index) {
+  gallery[group].splice(index, 1);
+  renderGallery(group);
+  document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+  syncToSheet();
+}
+
+function bindAddButton(group) {
+  const btn = document.getElementById(`add-btn-${group}`);
+  const input = btn.querySelector('input');
   input.onchange = async () => {
     const f = input.files[0];
+    input.value = '';
     if (!f) return;
+    if (gallery[group].length >= MAX_PHOTOS) return;
+
     const previewUrl = URL.createObjectURL(f);
-    setSlotState(name, 'uploading');
+    const placeholderIdx = gallery[group].length;
+    gallery[group].push({ url: previewUrl, uploading: true });
+    renderUploadingPlaceholder(group, placeholderIdx);
     uploadsInFlight++;
     document.getElementById('qc-submit').disabled = true;
+
     try {
-      photos[name] = await uploadPhoto(f, 'velpapier/qc');
-      setSlotState(name, 'done', previewUrl);
+      const uploaded = await uploadPhoto(f, 'velpapier/qc');
+      gallery[group][placeholderIdx] = { url: uploaded.url };
+      renderGallery(group);
       await syncToSheet();
     } catch (e) {
-      console.error('[bindSlot] upload failed:', e);
-      photos[name] = null;
-      setSlotState(name, 'retry');
+      console.error(`[bindAddButton:${group}] upload failed:`, e);
+      gallery[group].splice(placeholderIdx, 1);
+      renderGallery(group);
       showToast('Error al subir foto, intenta de nuevo', true);
     }
     uploadsInFlight--;
-    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || !photos.content;
-    input.value = '';
+    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || gallery.content.length === 0;
   };
 }
-['content', 'gift', 'box'].forEach(bindSlot);
+['content', 'box'].forEach(bindAddButton);
+
+function renderUploadingPlaceholder(group, idx) {
+  const galEl = document.getElementById(`gallery-${group}`);
+  const div = document.createElement('div');
+  div.className = 'photo-thumb uploading';
+  div.id = `uploading-${group}-${idx}`;
+  div.innerHTML = '<div class="spinner"></div>';
+  galEl.appendChild(div);
+}
 
 document.getElementById('qc-notes').addEventListener('change', syncToSheet);
+
+
+// ── Submit ───────────────────────────────────────────────────────────────
 
 async function submitQC() {
   const btn = document.getElementById('qc-submit');
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
-  if (!photos.content) { showToast('Falta la foto de contenido', true); return; }
+  if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
 
   btn.disabled = true;
   btn.textContent = 'Guardando…';
 
-  const allOrderIds = [...selected.order_ids, ...Array.from(selectedAddonIds)];
+  const allOrders = [...selected.order_ids, ...selectedAddons];
 
   try {
     const res = await apiPost({
@@ -322,13 +349,12 @@ async function submitQC() {
       qc_id:         currentQcId || undefined,
       finalize:      true,
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
-      order_ids:     allOrderIds,
+      order_ids:     allOrders,
       customer_id:   selected.customer_id,
       username:      selected.username,
       packer:        document.getElementById('packer-select').value,
-      photo_content: photos.content.url,
-      photo_gift:    (photos.gift || {}).url || '',
-      photo_box:     (photos.box || {}).url || '',
+      content_urls:  gallery.content.map(p => p.url),
+      box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
 
@@ -344,6 +370,9 @@ async function submitQC() {
     btn.textContent = 'Enviar';
   }
 }
+
+
+// ── Helpers ──────────────────────────────────────────────────────────────
 
 function escapeHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
