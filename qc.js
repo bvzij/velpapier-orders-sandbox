@@ -76,6 +76,7 @@ async function syncToSheet() {
       box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
+    if (mySeq !== syncSeq) return;  // a newer sync started while we were waiting — ignore this stale response
     if (res.qc_id) currentQcId = res.qc_id;
   } catch (e) {
     console.error('[syncToSheet] failed:', e);
