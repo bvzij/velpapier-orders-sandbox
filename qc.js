@@ -88,6 +88,12 @@ document.getElementById('packer-select').onchange = e => localStorage.setItem('v
 (async function init() {
   await ensureAuth();
   await loadPending();
+  setInterval(() => {
+    // Only poll while looking at the list — never interrupt an active capture session
+    if (document.getElementById('view-pending').style.display !== 'none') {
+      refreshQcBadges();
+    }
+  }, 8000);
 })();
 
 
@@ -108,6 +114,13 @@ async function loadPending() {
     list.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
     return;
   }
+
+  renderPendingList();
+}
+
+function renderPendingList() {
+  const list = document.getElementById('pending-list');
+  const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
 
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
 
@@ -208,11 +221,24 @@ function openCapture(shipment) {
   window.scrollTo(0, 0);
 }
 
-function backToPending() {
+async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
   document.getElementById('view-pending').style.display = 'block';
   selected = null;
   currentQcId = null;
+  await refreshQcBadges();
+}
+
+// Lightweight refresh: re-fetch only QC rows (small/fast) and re-render
+// badges + list, without touching allActiveOrders or doing a full reload.
+async function refreshQcBadges() {
+  try {
+    const qcData = await apiGet('action=qc');
+    allQcRows = qcData.records || [];
+    renderPendingList();
+  } catch (e) {
+    console.warn('[refreshQcBadges] failed:', e);
+  }
 }
 
 function renderAddonOrders(customerId) {
@@ -265,7 +291,7 @@ function renderGallery(group) {
 
   galEl.innerHTML = gallery[group].map((p, i) => `
     <div class="photo-thumb">
-      <img src="${p.url}" loading="lazy">
+      <img src="${p.url}" loading="lazy" onclick="openLightbox('${p.url.replace(/'/g, "\\'")}')">
       <button class="photo-thumb-delete" onclick="deletePhoto('${group}', ${i})">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
@@ -280,6 +306,7 @@ function renderGallery(group) {
 }
 
 function deletePhoto(group, index) {
+  if (!confirm('¿Eliminar esta foto?')) return;
   gallery[group].splice(index, 1);
   renderGallery(group);
   document.getElementById('qc-submit').disabled = gallery.content.length === 0;
@@ -371,6 +398,16 @@ async function submitQC() {
   }
 }
 
+
+// ── Lightbox ─────────────────────────────────────────────────────────────
+
+function openLightbox(url) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;-webkit-tap-highlight-color:transparent';
+  overlay.innerHTML = `<img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px">`;
+  overlay.onclick = () => overlay.remove();
+  document.body.appendChild(overlay);
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
