@@ -122,8 +122,6 @@ function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
 
-  const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
-
   if (tikTokOrders.length === 0) {
     list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
     return;
