@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = 'PASTE_YOUR_NEW_QC_SHEET_ID_HERE';
 
-const SCRIPT_VERSION = '2026-08-15.3';
+const SCRIPT_VERSION = '2026-08-18.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -829,6 +829,11 @@ function getUploadSignature(e) {
 // returns qc_id; subsequent calls update photos/notes in place.
 // Order-side shipping effects (Packed Date, Linked Shipment, Enviado) only
 // fire when finalize=true — that's what the "Enviar" button sends.
+//
+// Expects body.order_ids as an array of {id, channel} objects, split into
+// TikTok / Shopify / Manual columns. Expects body.content_urls and
+// body.box_urls as arrays (up to 5 each) — written into Content1..5 /
+// Box1..5, left-padded with '' for any unused slots.
 function saveQC(body) {
   if (!body.tracking_id) {
     return jsonResponse({ error: 'tracking_id es obligatorio' });
@@ -843,17 +848,21 @@ function saveQC(body) {
     row = findRowByColumn(qcSheet, 'A', qcId);
     if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
   } else {
-    // Look for an existing row for this tracking ID before creating a new one
     const existing = sheetToObjects(qcSheet).find(r => r['Tracking ID'] === body.tracking_id);
     if (existing) {
       qcId = existing['QC ID'];
       row = existing._rowIndex;
     } else {
       qcId = generateQCID(qcSheet);
-      qcSheet.appendRow([
-        qcId, body.tracking_id, '', body.customer_id || '', body.username || '',
-        body.packer || '', nowISO(), '', '', '', '', 'Activo', ''
-      ]);
+      const blank = new Array(h.length).fill('');
+      blank[h.indexOf('QC ID')] = qcId;
+      blank[h.indexOf('Tracking ID')] = body.tracking_id;
+      blank[h.indexOf('Customer ID')] = body.customer_id || '';
+      blank[h.indexOf('Primary Username')] = body.username || '';
+      blank[h.indexOf('Packer')] = body.packer || '';
+      blank[h.indexOf('Timestamp')] = nowISO();
+      blank[h.indexOf('Status')] = 'Activo';
+      qcSheet.appendRow(blank);
       row = qcSheet.getLastRow();
     }
   }
@@ -862,18 +871,33 @@ function saveQC(body) {
     const idx = h.indexOf(col) + 1;
     if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
   };
-  if (body.order_ids)     set('Order IDs', body.order_ids.join(' + '));
-  if (body.photo_content !== undefined) set('Photo1 Content', body.photo_content);
-  if (body.photo_gift !== undefined)    set('Photo2 Gift', body.photo_gift);
-  if (body.photo_box !== undefined)     set('Photo3 Box', body.photo_box);
-  if (body.notes !== undefined)         set('Notes', body.notes);
+
+  // Split incoming order_ids ([{id, channel}]) into the three channel columns
+  if (body.order_ids) {
+    const tiktok  = body.order_ids.filter(o => o.channel === 'TikTok').map(o => o.id);
+    const shopify = body.order_ids.filter(o => o.channel === 'Shopify').map(o => o.id);
+    const manual  = body.order_ids.filter(o => o.channel !== 'TikTok' && o.channel !== 'Shopify').map(o => o.id);
+    set('TikTok Order IDs',  tiktok.join(' + '));
+    set('Shopify Order IDs', shopify.join(' + '));
+    set('Manual Order IDs',  manual.join(' + '));
+  }
+
+  // Multi-photo arrays -> Content1..5 / Box1..5
+  if (body.content_urls) {
+    for (let i = 0; i < 5; i++) set('Content' + (i + 1), body.content_urls[i] || '');
+  }
+  if (body.box_urls) {
+    for (let i = 0; i < 5; i++) set('Box' + (i + 1), body.box_urls[i] || '');
+  }
+  if (body.notes !== undefined) set('Notes', body.notes);
 
   const result = { result: 'saved', qc_id: qcId };
 
   // Finalize: trigger the real shipping side-effects
   if (body.finalize) {
-    if (!(body.order_ids || []).length || !body.photo_content) {
-      return jsonResponse({ error: 'order_ids y foto de contenido son obligatorios para finalizar' });
+    const allOrderIds = (body.order_ids || []).map(o => o.id);
+    if (!allOrderIds.length || !(body.content_urls || []).some(Boolean)) {
+      return jsonResponse({ error: 'order_ids y al menos una foto de contenido son obligatorios para finalizar' });
     }
     const orders = getOrdersSheet();
     const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
@@ -883,7 +907,7 @@ function saveQC(body) {
     const iStat   = oh.indexOf('Status') + 1;
 
     const shipResults = [];
-    body.order_ids.forEach(id => {
+    allOrderIds.forEach(id => {
       const orow = findOrderRow(orders, String(id));
       if (!orow) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
       if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
