@@ -48,8 +48,9 @@ async function apiPost(data) {
 }
 
 async function syncToSheet() {
-  if (!selected) return;
-  if (!photos.content && !photos.gift && !photos.box) return;
+  console.log('[syncToSheet] called, selected=', selected, 'photos=', photos);
+  if (!selected) { console.log('[syncToSheet] EARLY RETURN: no selected'); return; }
+  if (!photos.content && !photos.gift && !photos.box) { console.log('[syncToSheet] EARLY RETURN: no photos'); return; }
   try {
     const res = await apiPost({
       action:        'save_qc',
