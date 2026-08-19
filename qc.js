@@ -70,7 +70,9 @@ async function pushAddPhoto(group, url) {
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
-      session_id:    activeSession ? activeSession['Session ID'] : '',
+      // Session ID is intentionally NOT set here — only at finalize (Enviar).
+      // Otherwise a row that's touched but never shipped would still count
+      // as "packed in this session," polluting counts and history.
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     [...selected.order_ids, ...selectedAddons],
       customer_id:   selected.customer_id,
@@ -113,7 +115,6 @@ async function pushNotesAndOrders() {
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
-      session_id:    activeSession ? activeSession['Session ID'] : '',
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     [...selected.order_ids, ...selectedAddons],
       customer_id:   selected.customer_id,
@@ -880,15 +881,11 @@ function bindAddButton(group) {
       renderGallery(group);
       const res = await pushAddPhoto(group, uploaded.url);
       if (res && res.blocked) {
-        gallery[group].splice(placeholderIdx, 1);
-        renderGallery(group);
-        if (confirm('Este pedido ya fue enviado. ¿Quieres editarlo de todos modos?')) {
-          document.getElementById('edit-shipped-checkbox').checked = true;
-          toggleEditShipped();
-          // Re-add locally now that editing is unlocked — user can hit "Guardar cambios" when ready
-          gallery[group].push({ url: uploaded.url });
-          renderGallery(group);
-        }
+        // Reaching here means the lock didn't prevent the click (edge case,
+        // e.g. race with a poll). Auto-unlock edit mode and keep the photo
+        // the user just took — no extra popup, the checkbox is confirmation enough.
+        document.getElementById('edit-shipped-checkbox').checked = true;
+        toggleEditShipped();
       }
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
@@ -930,8 +927,9 @@ async function submitQC() {
     btn.textContent = 'Guardando…';
     try {
       const res = await apiPost({
-        action:              'save_qc',
-        qc_id:               currentQcId,
+        action:               'save_qc',
+        qc_id:                currentQcId,
+        tracking_id:          selected.tracking_id,
         confirm_edit_shipped: true,
         content_urls:  gallery.content.filter(p => !p.uploading).map(p => p.url),
         box_urls:      gallery.box.filter(p => !p.uploading).map(p => p.url),
