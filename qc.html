@@ -123,6 +123,7 @@
       border-radius: 50%; animation: spin 0.7s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse-rec { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
     .photo-thumb-delete {
       position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%;
@@ -207,7 +208,24 @@
 
   <div class="qc-body">
 
-    <div id="view-pending">
+    <!-- Session gate: shown when no session is active -->
+    <div id="view-session-gate" style="display:none">
+      <div style="text-align:center;padding:3rem 1rem">
+        <div style="font-size:15px;color:var(--text-muted);margin-bottom:1.5rem">No hay ninguna sesión de empaque activa</div>
+        <button class="qc-submit" style="max-width:280px;margin:0 auto" onclick="handleStartSession()">Iniciar sesión de empaque</button>
+      </div>
+    </div>
+
+    <!-- Live session banner: shown above the list while a session is active -->
+    <div id="session-banner" style="display:none;background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="width:9px;height:9px;border-radius:50%;background:#d33;display:inline-block;animation:pulse-rec 1.4s ease-in-out infinite"></span>
+        <span style="font-size:12px;font-weight:700" id="session-live-count">Sesión activa · 0 empacados</span>
+      </div>
+      <button style="background:none;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 10px;font-size:11px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer" onclick="handleEndSession()">Finalizar sesión</button>
+    </div>
+
+    <div id="view-pending" style="display:none">
       <div style="margin-bottom:10px">
         <select id="sort-select" class="packer-select" style="width:100%" onchange="renderPendingList()">
           <option value="az">A-Z</option>
