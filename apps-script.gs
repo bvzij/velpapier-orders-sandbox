@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-18.4';
+const SCRIPT_VERSION = '2026-08-18.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1024,24 +1024,30 @@ function getSessions(e) {
 
 // Start a new session. Fails if one is already active (only one at a time).
 function startSession(body) {
-  const sheet = getSessionsSheet();
-  const rows = sheetToObjects(sheet);
-  const existingActive = rows.find(r => r['Status'] === 'Activa');
-  if (existingActive) {
-    return jsonResponse({
-      result: 'already_active',
-      session_id: existingActive['Session ID'],
-      session: existingActive
-    });
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);  // wait up to 10s for exclusive access — prevents two devices creating duplicate sessions
+  try {
+    const sheet = getSessionsSheet();
+    const rows = sheetToObjects(sheet);
+    const existingActive = rows.find(r => r['Status'] === 'Activa');
+    if (existingActive) {
+      return jsonResponse({
+        result: 'already_active',
+        session_id: existingActive['Session ID'],
+        session: existingActive
+      });
+    }
+
+    const todayStr = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyyMMdd');
+    const todayCount = rows.filter(r => String(r['Session ID']).startsWith('SES-' + todayStr)).length;
+    const sessionId = 'SES-' + todayStr + '-' + (todayCount + 1);
+
+    sheet.appendRow([sessionId, nowISO(), '', 'Activa', '', '', '']);
+
+    return jsonResponse({ result: 'started', session_id: sessionId });
+  } finally {
+    lock.releaseLock();
   }
-
-  const todayStr = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyyMMdd');
-  const todayCount = rows.filter(r => String(r['Session ID']).startsWith('SES-' + todayStr)).length;
-  const sessionId = 'SES-' + todayStr + '-' + (todayCount + 1);
-
-  sheet.appendRow([sessionId, nowISO(), '', 'Activa', '', '', '']);
-
-  return jsonResponse({ result: 'started', session_id: sessionId });
 }
 
 // End the active session: stamps End Time, computes Participants /
@@ -1099,6 +1105,10 @@ function endSession(body) {
   set('Participants', allParticipants.join(', '));
   set('Total Packages', totalPackages);
   set('Total Items', totalItems);
+  const startMs = Date.parse(rowVals[h.indexOf('Start Time')]);
+  if (!isNaN(startMs) && h.indexOf('Duration (min)') >= 0) {
+    set('Duration (min)', Math.round((Date.now() - startMs) / 60000));
+  }
   sheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
   return jsonResponse({
