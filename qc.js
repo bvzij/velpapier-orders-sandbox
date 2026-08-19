@@ -76,7 +76,7 @@ async function syncToSheet() {
       box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
-    if (mySeq !== syncSeq) return;  // a newer sync started while we were waiting — ignore this stale response
+    if (mySeq !== syncSeq) return;
     if (res.qc_id) currentQcId = res.qc_id;
   } catch (e) {
     console.error('[syncToSheet] failed:', e);
@@ -93,7 +93,6 @@ document.getElementById('packer-select').onchange = e => localStorage.setItem('v
   await ensureAuth();
   await loadPending();
   setInterval(() => {
-    // Only poll while looking at the list — never interrupt an active capture session
     if (document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
     }
@@ -138,39 +137,21 @@ function renderPendingList() {
     groups[tid].push(r);
   });
 
-  const sortMode = document.getElementById('sort-select')?.value || 'new-old';
+  const sortSelect = document.getElementById('sort-select');
+  const sortMode = sortSelect ? sortSelect.value : 'new-old';
   const entries = Object.entries(groups);
   entries.sort(([, aOrders], [, bOrders]) => {
     const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
     const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
     const aDate = new Date(aOrders[0]['Created Date'] || aOrders[0]['Created Time'] || 0).getTime();
     const bDate = new Date(bOrders[0]['Created Date'] || bOrders[0]['Created Time'] || 0).getTime();
-    switch (sortMode) {
-      case 'old-new': return aDate - bDate;
-      case 'az':       return aUser.localeCompare(bUser);
-      case 'za':       return bUser.localeCompare(aUser);
-      case 'new-old':
-      default:          return bDate - aDate;
-    }
+    if (sortMode === 'old-new') return aDate - bDate;
+    if (sortMode === 'az') return aUser.localeCompare(bUser);
+    if (sortMode === 'za') return bUser.localeCompare(aUser);
+    return bDate - aDate; // new-old (default)
   });
 
-  const sortMode = document.getElementById('sort-select')?.value || 'new-old';
-  const entries = Object.entries(groups);
-  entries.sort(([, aOrders], [, bOrders]) => {
-    const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
-    const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
-    const aDate = new Date(aOrders[0]['Created Date'] || aOrders[0]['Created Time'] || 0).getTime();
-    const bDate = new Date(bOrders[0]['Created Date'] || bOrders[0]['Created Time'] || 0).getTime();
-    switch (sortMode) {
-      case 'old-new': return aDate - bDate;
-      case 'az':       return aUser.localeCompare(bUser);
-      case 'za':       return bUser.localeCompare(aUser);
-      case 'new-old':
-      default:          return bDate - aDate;
-    }
-  });
-  
-  list.innerHTML = Object.entries(groups).map(([tid, orders]) => {
+  list.innerHTML = entries.map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
     const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
@@ -219,7 +200,6 @@ function openCapture(shipment) {
 
   renderAddonOrders(shipment.customer_id);
 
-  // Restore from the already-loaded bulk QC data — instant, no network call
   let restored = false;
   if (shipment.tracking_id) {
     const row = allQcRows.find(r => r['Tracking ID'] === shipment.tracking_id);
@@ -263,8 +243,6 @@ async function backToPending() {
   await refreshQcBadges();
 }
 
-// Lightweight refresh: re-fetch only QC rows (small/fast) and re-render
-// badges + list, without touching allActiveOrders or doing a full reload.
 async function refreshQcBadges() {
   try {
     const qcData = await apiGet('action=qc');
@@ -442,6 +420,7 @@ function openLightbox(url) {
   overlay.onclick = () => overlay.remove();
   document.body.appendChild(overlay);
 }
+
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
