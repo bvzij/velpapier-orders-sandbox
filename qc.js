@@ -103,7 +103,7 @@ function currentPacker() {
 
 function updatePackersBtnLabel() {
   const label = document.getElementById('packers-btn-label');
-  label.textContent = checkedPackers.length ? 'Empacando: ' + checkedPackers.join(', ') : 'Empacando: —';
+  label.textContent = checkedPackers.length ? checkedPackers.join(', ') : '—';
 }
 updatePackersBtnLabel();
 
@@ -124,17 +124,6 @@ function renderPackersChecklist() {
     </label>
   `).join('');
 }
-function openSearchModal() {
-  document.getElementById('search-modal').style.display = 'flex';
-  const input = document.getElementById('search-input');
-  input.focus();  // brings up the mobile keyboard immediately, no extra tap needed
-}
-function closeSearchModal() {
-  document.getElementById('search-modal').style.display = 'none';
-  document.getElementById('search-input').value = '';
-  renderPendingList();
-}
-
 function togglePacker(name) {
   const idx = checkedPackers.indexOf(name);
   if (idx >= 0) checkedPackers.splice(idx, 1);
