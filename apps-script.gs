@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-18.3';
+const SCRIPT_VERSION = '2026-08-18.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -901,6 +901,9 @@ function saveQC(body) {
   }
   if (body.notes !== undefined) set('Notes', body.notes);
   if (body.packer) set('Packer', body.packer);
+  // Finalizing marks the QC row itself, so other devices polling QC rows can
+  // drop this shipment from their pending list without refetching all orders.
+  if (body.finalize) set('Status', 'Enviado');
 
   qcSheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
