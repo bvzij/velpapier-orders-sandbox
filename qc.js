@@ -89,7 +89,7 @@ async function syncToSheet() {
 // ── Init ─────────────────────────────────────────────────────────────────
 
 // Known packer names (persisted, editable via the modal's "+" field)
-let knownPackers = JSON.parse(localStorage.getItem('vp_known_packers') || '["Vel","Bob","Mariana","Mau"]');
+let knownPackers = JSON.parse(localStorage.getItem('vp_known_packers') || '["Bob","Mariana","Mau"]');
 // Which of them are actively packing right now (persisted per device)
 let checkedPackers = JSON.parse(localStorage.getItem('vp_checked_packers') || '[]');
 
@@ -124,11 +124,23 @@ function renderPackersChecklist() {
     </label>
   `).join('');
 }
+function openSearchModal() {
+  document.getElementById('search-modal').style.display = 'flex';
+  const input = document.getElementById('search-input');
+  input.focus();  // brings up the mobile keyboard immediately, no extra tap needed
+}
+function closeSearchModal() {
+  document.getElementById('search-modal').style.display = 'none';
+  document.getElementById('search-input').value = '';
+  renderPendingList();
+}
+
 function togglePacker(name) {
   const idx = checkedPackers.indexOf(name);
   if (idx >= 0) checkedPackers.splice(idx, 1);
   else checkedPackers.push(name);
   saveCheckedPackers();
+  pushParticipants();
 }
 function addManualPacker() {
   const input = document.getElementById('packer-manual-input');
@@ -138,6 +150,22 @@ function addManualPacker() {
   if (!checkedPackers.includes(name)) { checkedPackers.push(name); saveCheckedPackers(); }
   input.value = '';
   renderPackersChecklist();
+  pushParticipants();
+}
+
+// Push the checked-packer list to the session row so every device sees the
+// same "who's packing" state, instead of each device only knowing its own.
+async function pushParticipants() {
+  if (!activeSession) return;
+  try {
+    await apiPost({
+      action: 'update_session_participants',
+      session_id: activeSession['Session ID'],
+      participants: checkedPackers,
+    });
+  } catch (e) {
+    console.warn('[pushParticipants] failed:', e);
+  }
 }
 
 (async function init() {
@@ -156,6 +184,7 @@ async function checkSessionAndRoute() {
   // Hide both views while we determine state — prevents the wrong one flashing
   document.getElementById('view-session-gate').style.display = 'none';
   document.getElementById('session-banner').style.display = 'none';
+  document.getElementById('header-end-session-btn').style.display = 'none';
   document.getElementById('view-pending').style.display = 'none';
   try {
     const data = await apiGet('action=active_session');
@@ -167,6 +196,18 @@ async function checkSessionAndRoute() {
 
   if (activeSession) {
     document.getElementById('session-banner').style.display = 'flex';
+    document.getElementById('header-end-session-btn').style.display = 'block';
+    // Adopt whoever is already marked as packing on this session (server is
+    // the source of truth) instead of trusting only this device's local list.
+    const liveParticipants = String(activeSession['Participants'] || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    if (liveParticipants.length) {
+      checkedPackers = liveParticipants;
+      saveCheckedPackers();
+      liveParticipants.forEach(name => { if (!knownPackers.includes(name)) knownPackers.push(name); });
+      saveKnownPackers();
+    }
+    updatePackersBtnLabel();
     await loadPending();
   } else {
     document.getElementById('view-session-gate').style.display = 'block';
@@ -302,9 +343,20 @@ function renderPendingList() {
     groups[tid].push(r);
   });
 
+  // Search filter — by username or tracking ID
+  const searchInput = document.getElementById('search-input');
+  const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  let filteredEntries = Object.entries(groups);
+  if (query) {
+    filteredEntries = filteredEntries.filter(([tid, orders]) => {
+      const username = (orders[0]['Username'] || orders[0]['Primary Username'] || '').toLowerCase();
+      return username.includes(query) || tid.toLowerCase().includes(query);
+    });
+  }
+
   const sortSelect = document.getElementById('sort-select');
   const sortMode = sortSelect ? sortSelect.value : 'az';
-  const entries = Object.entries(groups);
+  const entries = filteredEntries;
   entries.sort(([, aOrders], [, bOrders]) => {
     const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
     const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
@@ -315,6 +367,11 @@ function renderPendingList() {
     if (sortMode === 'za') return bUser.localeCompare(aUser);
     return bDate - aDate; // new-old (default)
   });
+
+  if (entries.length === 0) {
+    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Sin órdenes TikTok pendientes de empacar 🎉'}</div>`;
+    return;
+  }
 
   list.innerHTML = entries.map(([tid, orders]) => {
     const first = orders[0];
@@ -414,8 +471,23 @@ async function backToPending() {
 
 async function refreshQcBadges() {
   try {
-    const qcData = await apiGet('action=qc');
+    const [qcData, sessionData] = await Promise.all([
+      apiGet('action=qc'),
+      activeSession ? apiGet('action=active_session') : Promise.resolve({ session: activeSession }),
+    ]);
     allQcRows = qcData.records || [];
+    if (sessionData.session) {
+      activeSession = sessionData.session;
+      const liveParticipants = String(activeSession['Participants'] || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      // Only adopt if it actually differs, to avoid clobbering a checkbox
+      // the user is mid-click on this exact device
+      if (liveParticipants.join(',') !== checkedPackers.join(',')) {
+        checkedPackers = liveParticipants;
+        saveCheckedPackers();
+        updatePackersBtnLabel();
+      }
+    }
     updateSessionBanner();
     renderPendingList();
   } catch (e) {
