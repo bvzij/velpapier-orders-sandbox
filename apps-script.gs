@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-19.1';
+const SCRIPT_VERSION = '2026-08-20.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -875,12 +875,27 @@ function saveQC(body) {
   }
 
   // Build the full row in memory, then write it in ONE setValues call.
-  // (Previously this did ~12 individual setValue calls = ~12 round trips.)
   const rowVals = qcSheet.getRange(row, 1, 1, h.length).getValues()[0];
   const set = (col, val) => {
     const idx = h.indexOf(col);
     if (idx >= 0 && val !== undefined) rowVals[idx] = val;
   };
+  const get = (col) => {
+    const idx = h.indexOf(col);
+    return idx >= 0 ? rowVals[idx] : '';
+  };
+
+  // Guard: once a row is Enviado (shipped), refuse further photo/content
+  // changes unless the caller explicitly confirms via body.confirm_edit_shipped.
+  // Prevents one device silently corrupting a shipment another device already
+  // finalized — the classic "board the plane after it landed" bug.
+  const isAlreadyShipped = get('Status') === 'Enviado';
+  const isPhotoOrDataChange = body.add_content || body.remove_content ||
+    body.add_box || body.remove_box || body.content_urls || body.box_urls ||
+    body.notes !== undefined || body.order_ids;
+  if (isAlreadyShipped && isPhotoOrDataChange && !body.confirm_edit_shipped) {
+    return jsonResponse({ error: 'already_shipped', qc_id: qcId });
+  }
 
   if (body.session_id) set('Session ID', body.session_id);
 
@@ -894,13 +909,42 @@ function saveQC(body) {
     set('Manual Order IDs',  manual.join(' + '));
   }
 
-  // Multi-photo arrays -> Content1..5 / Box1..5
+  // ─── Delta photo operations (preferred path) ──────────────────────────
+  // add_content / add_box: append a URL to the first empty slot (1..5).
+  // remove_content / remove_box: remove a specific URL, shifting the rest down.
+  // These only ever touch ONE group's slots, so two devices adding to
+  // different groups (or the same group) can never wipe each other's photos —
+  // unlike sending a full array, which overwrites everything unconditionally.
+  function applyDelta(prefix, addUrl, removeUrl) {
+    const cols = [1, 2, 3, 4, 5].map(n => prefix + n);
+    let vals = cols.map(c => get(c));
+    if (removeUrl) {
+      vals = vals.filter(v => v !== removeUrl);
+      while (vals.length < 5) vals.push('');
+    }
+    if (addUrl) {
+      const emptyIdx = vals.indexOf('');
+      if (emptyIdx >= 0) vals[emptyIdx] = addUrl;
+      // if no empty slot (already 5), silently ignore — UI already blocks this
+    }
+    cols.forEach((c, i) => set(c, vals[i]));
+  }
+  if (body.add_content || body.remove_content) {
+    applyDelta('Content', body.add_content, body.remove_content);
+  }
+  if (body.add_box || body.remove_box) {
+    applyDelta('Box', body.add_box, body.remove_box);
+  }
+
+  // ─── Full-array legacy path (still used by finalize, which submits the
+  // deliberate final state as a single confirm action) ───────────────────
   if (body.content_urls) {
     for (let i = 0; i < 5; i++) set('Content' + (i + 1), body.content_urls[i] || '');
   }
   if (body.box_urls) {
     for (let i = 0; i < 5; i++) set('Box' + (i + 1), body.box_urls[i] || '');
   }
+
   if (body.notes !== undefined) set('Notes', body.notes);
   if (body.packer) set('Packer', body.packer);
   // Finalizing marks the QC row itself, so other devices polling QC rows can
@@ -909,35 +953,91 @@ function saveQC(body) {
 
   qcSheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
-  const result = { result: 'saved', qc_id: qcId };
+  const result = {
+    result: 'saved',
+    qc_id: qcId,
+    content_urls: [1,2,3,4,5].map(n => get('Content' + n)).filter(Boolean),
+    box_urls:     [1,2,3,4,5].map(n => get('Box' + n)).filter(Boolean),
+  };
 
-  // Finalize: trigger the real shipping side-effects
+  // Finalize: trigger the real shipping side-effects (batched — no per-order
+  // full-sheet re-reads, which was the main cause of the 7-9s save time).
   if (body.finalize) {
     const allOrderIds = (body.order_ids || []).map(o => o.id);
-    if (!allOrderIds.length || !(body.content_urls || []).some(Boolean)) {
+    const finalContentUrls = result.content_urls;
+    if (!allOrderIds.length || finalContentUrls.length === 0) {
       return jsonResponse({ error: 'order_ids y al menos una foto de contenido son obligatorios para finalizar' });
     }
+
     const orders = getOrdersSheet();
-    const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
-    const iPacked = oh.indexOf('Packed Date') + 1;
-    const iLink   = oh.indexOf('Linked Shipment') + 1;
-    const iChan   = oh.indexOf('Channel') + 1;
-    const iStat   = oh.indexOf('Status') + 1;
+    const oLastCol = orders.getLastColumn();
+    const oh = orders.getRange(1, 1, 1, oLastCol).getValues()[0];
+    const iPacked = oh.indexOf('Packed Date');
+    const iLink   = oh.indexOf('Linked Shipment');
+    const iChan   = oh.indexOf('Channel');
+    const iStat   = oh.indexOf('Status');
+    const iCust   = oh.indexOf('Customer ID');
+
+    const oLastRow = orders.getLastRow();
+    const oData = oLastRow > 1 ? orders.getRange(2, 1, oLastRow - 1, oLastCol).getValues() : [];
+    const idToRowIdx = {};  // Order ID -> index into oData
+    oData.forEach((r, i) => { idToRowIdx[String(r[0])] = i; });  // col A = Order ID
 
     const shipResults = [];
+    const touchedCustomers = new Set();
+
     allOrderIds.forEach(id => {
-      const orow = findOrderRow(orders, String(id));
-      if (!orow) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
-      if (iPacked > 0) orders.getRange(orow, iPacked).setValue(nowISO());
-      if (iChan > 0 && iLink > 0 && orders.getRange(orow, iChan).getValue() !== 'TikTok') {
-        orders.getRange(orow, iLink).setValue(body.tracking_id);
+      const idx = idToRowIdx[String(id)];
+      if (idx === undefined) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
+      const r = oData[idx];
+      if (iPacked >= 0) r[iPacked] = nowISO();
+      if (iChan >= 0 && iLink >= 0 && r[iChan] !== 'TikTok') r[iLink] = body.tracking_id;
+      if (iStat >= 0) {
+        r[iStat] = 'Enviado';
+        const shippedIdx = oh.indexOf('Shipped Date');
+        if (shippedIdx >= 0) r[shippedIdx] = nowISO();
       }
-      if (iStat > 0) {
-        orders.getRange(orow, iStat).setValue('Enviado');
-        applyStatusSideEffects(orders, orow, 'Enviado', oh);
-      }
+      if (iCust >= 0 && r[iCust]) touchedCustomers.add(r[iCust]);
       shipResults.push({ order_id: id, result: 'shipped' });
     });
+
+    // Write all order row changes back in ONE batch
+    if (oData.length > 0) {
+      orders.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    }
+
+    // Recompute shipment counts for only the customers actually affected,
+    // using the in-memory order data we already have (no re-read).
+    if (touchedCustomers.size > 0 && iCust >= 0 && iChan >= 0 && iStat >= 0) {
+      const counts = {};
+      oData.forEach(r => {
+        const cid = r[iCust];
+        if (!cid || !touchedCustomers.has(cid)) return;
+        if (r[iChan] !== 'TikTok' && r[iChan] !== 'Shopify') return;
+        if (r[iStat] === 'Enviado' || r[iStat] === 'Archivado') {
+          counts[cid] = (counts[cid] || 0) + 1;
+        }
+      });
+
+      const customersSheet = getCustomersSheet();
+      const cLastCol = customersSheet.getLastColumn();
+      const ch = customersSheet.getRange(1, 1, 1, cLastCol).getValues()[0];
+      const cIdIdx = ch.indexOf('Customer ID');
+      const cCountIdx = ch.indexOf('Shipment Count');
+      if (cIdIdx >= 0 && cCountIdx >= 0) {
+        const cLastRow = customersSheet.getLastRow();
+        const cData = cLastRow > 1 ? customersSheet.getRange(2, 1, cLastRow - 1, cLastCol).getValues() : [];
+        let dirty = false;
+        cData.forEach(r => {
+          if (touchedCustomers.has(r[cIdIdx])) {
+            r[cCountIdx] = counts[r[cIdIdx]] || 0;
+            dirty = true;
+          }
+        });
+        if (dirty) customersSheet.getRange(2, 1, cData.length, cLastCol).setValues(cData);
+      }
+    }
+
     result.result = 'created';
     result.orders = shipResults;
   }
