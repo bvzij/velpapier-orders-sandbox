@@ -208,6 +208,14 @@
   <div class="qc-body">
 
     <div id="view-pending">
+      <div style="margin-bottom:10px">
+        <select id="sort-select" class="packer-select" style="width:100%" onchange="renderPendingList()">
+          <option value="new-old">Más reciente primero</option>
+          <option value="old-new">Más antiguo primero</option>
+          <option value="az">A-Z</option>
+          <option value="za">Z-A</option>
+        </select>
+      </div>
       <div id="pending-list"></div>
     </div>
 
