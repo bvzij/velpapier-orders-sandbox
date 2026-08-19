@@ -98,12 +98,17 @@ document.getElementById('packer-select').onchange = e => localStorage.setItem('v
     if (activeSession && document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
     }
-  }, 8000);
+  }, 4000);
 })();
 
 // Checks whether a session is currently active and shows the right view:
 // gate (no session) vs. pending list + live banner (session running).
 async function checkSessionAndRoute() {
+  // Hide both views while we determine state — prevents the wrong one flashing
+  document.getElementById('view-session-gate').style.display = 'none';
+  document.getElementById('session-banner').style.display = 'none';
+  document.getElementById('participants-box').style.display = 'none';
+  document.getElementById('view-pending').style.display = 'none';
   try {
     const data = await apiGet('action=active_session');
     activeSession = data.session || null;
@@ -113,32 +118,49 @@ async function checkSessionAndRoute() {
   }
 
   if (activeSession) {
-    document.getElementById('view-session-gate').style.display = 'none';
     document.getElementById('session-banner').style.display = 'flex';
+    document.getElementById('participants-box').style.display = 'block';
+    // Pre-tick whoever is currently selected as packer on this device
+    const me = document.getElementById('packer-select').value;
+    document.querySelectorAll('.participant-chk').forEach(c => { if (c.value === me) c.checked = true; });
     await loadPending();
   } else {
     document.getElementById('view-session-gate').style.display = 'block';
-    document.getElementById('session-banner').style.display = 'none';
-    document.getElementById('view-pending').style.display = 'none';
   }
 }
 
+let startingSession = false;
+
 async function handleStartSession() {
+  if (startingSession) return;
+  startingSession = true;
+  const btn = document.getElementById('start-session-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cargando…'; }
   try {
     const res = await apiPost({ action: 'start_session' });
     if (res.error) throw new Error(res.error);
-    showToast('Sesión iniciada: ' + res.session_id);
+    if (res.result === 'already_active') {
+      showToast('Te uniste a la sesión ' + res.session_id);
+    } else {
+      showToast('Sesión iniciada: ' + res.session_id);
+    }
     await checkSessionAndRoute();
   } catch (e) {
     showToast('Error al iniciar sesión: ' + e.message, true);
   }
+  startingSession = false;
+  if (btn) { btn.disabled = false; btn.textContent = 'Iniciar / unirse a sesión'; }
 }
 
 async function handleEndSession() {
   if (!activeSession) return;
   if (!confirm('¿Finalizar la sesión de empaque actual?')) return;
   try {
-    const res = await apiPost({ action: 'end_session', session_id: activeSession['Session ID'] });
+    const res = await apiPost({
+      action: 'end_session',
+      session_id: activeSession['Session ID'],
+      participants: Array.from(document.querySelectorAll('.participant-chk:checked')).map(c => c.value),
+    });
     if (res.error) throw new Error(res.error);
     showSessionSummary(res);
     activeSession = null;
@@ -149,21 +171,33 @@ async function handleEndSession() {
 }
 
 function showSessionSummary(summary) {
-  const startTime = activeSessionStartMs;
-  const durationMin = startTime ? Math.round((Date.now() - startTime) / 60000) : null;
-  const avgSec = summary.total_packages > 0 && durationMin
-    ? Math.round((durationMin * 60) / summary.total_packages)
-    : null;
+  const startMs = summary.start_time ? Date.parse(summary.start_time) : activeSessionStartMs;
+  const totalSec = startMs ? Math.round((Date.now() - startMs) / 1000) : null;
 
   const lines = [
     `📦 ${summary.total_packages} paquete${summary.total_packages !== 1 ? 's' : ''} empacado${summary.total_packages !== 1 ? 's' : ''}`,
     `🧩 ${summary.total_items} artículo${summary.total_items !== 1 ? 's' : ''} en total`,
-    durationMin !== null ? `⏱ ${durationMin} min de duración` : '',
-    avgSec !== null ? `⚡ ~${avgSec}s por paquete` : '',
+    totalSec !== null ? `⏱ Duración: ${formatHM(totalSec)}` : '',
+    (totalSec !== null && summary.total_packages > 0)
+      ? `⚡ Promedio: ${formatMS(Math.round(totalSec / summary.total_packages))} por paquete` : '',
     summary.participants && summary.participants.length ? `👥 ${summary.participants.join(', ')}` : '',
   ].filter(Boolean);
 
   alert('Sesión finalizada\n\n' + lines.join('\n'));
+}
+
+// 3725 -> "1h 2m"
+function formatHM(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.round((totalSeconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// 95 -> "1m 35s"
+function formatMS(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 let activeSessionStartMs = null;
