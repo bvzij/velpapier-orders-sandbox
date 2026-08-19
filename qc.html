@@ -198,11 +198,10 @@
   <header class="qc-header">
     <div class="qc-title">Vel Papier <span>· Control de calidad</span></div>
     <div class="packer-row">
-      <span class="packer-label">Empacador:</span>
-      <select class="packer-select" id="packer-select">
-        <option value="Mariana">Mariana</option>
-        <option value="Bob">Bob</option>
-      </select>
+      <button id="packers-btn" onclick="openPackersModal()" style="background:var(--bg);border:0.5px solid var(--border-strong);border-radius:var(--radius-md);padding:7px 12px;font-size:13px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer;display:flex;align-items:center;gap:6px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+        <span id="packers-btn-label">Empacando: —</span>
+      </button>
     </div>
   </header>
 
@@ -281,6 +280,18 @@
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
   </button>
 
+</div>
+
+<div class="modal-overlay" id="packers-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:600;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:340px">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px">¿Quién está empacando?</div>
+    <div id="packers-checklist" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div>
+    <div style="display:flex;gap:6px;margin-bottom:14px">
+      <input type="text" id="packer-manual-input" placeholder="Agregar nombre…" style="flex:1;padding:8px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit">
+      <button onclick="addManualPacker()" style="padding:8px 12px;font-size:13px;font-weight:600;font-family:inherit;background:var(--bg);border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);cursor:pointer">+</button>
+    </div>
+    <button class="qc-submit" onclick="closePackersModal()">Listo</button>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
