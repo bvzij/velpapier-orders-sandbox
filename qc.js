@@ -55,33 +55,78 @@ async function apiPost(data) {
 }
 
 
-// ── Sync current progress to the Sheet ──────────────────────────────────────
+// ── Delta photo sync ─────────────────────────────────────────────────────
+// Each add/remove is its own request that only touches ONE photo in ONE
+// group. This is what lets two devices safely add photos to the same or
+// different groups without ever wiping each other's work — unlike the old
+// approach of syncing the entire local gallery array on every change.
 
 let syncSeq = 0;
 
-async function syncToSheet() {
-  if (!selected) return;
-  if (!currentQcId && gallery.content.length === 0 && gallery.box.length === 0) return;
+async function pushAddPhoto(group, url) {
+  if (!selected) return null;
   const mySeq = ++syncSeq;
   try {
-    const allOrders = [...selected.order_ids, ...selectedAddons];
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
       session_id:    activeSession ? activeSession['Session ID'] : '',
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
-      order_ids:     allOrders,
+      order_ids:     [...selected.order_ids, ...selectedAddons],
       customer_id:   selected.customer_id,
       username:      selected.username,
       packer:        currentPacker(),
-      content_urls:  gallery.content.map(p => p.url),
-      box_urls:      gallery.box.map(p => p.url),
+      [group === 'content' ? 'add_content' : 'add_box']: url,
+    });
+    if (res.error === 'already_shipped') return { blocked: true };
+    if (res.error) throw new Error(res.error);
+    if (mySeq === syncSeq && res.qc_id) currentQcId = res.qc_id;
+    return res;
+  } catch (e) {
+    console.error('[pushAddPhoto] failed:', e);
+    return null;
+  }
+}
+
+async function pushRemovePhoto(group, url) {
+  if (!selected || !currentQcId) return null;
+  try {
+    const res = await apiPost({
+      action: 'save_qc',
+      qc_id:  currentQcId,
+      [group === 'content' ? 'remove_content' : 'remove_box']: url,
+    });
+    if (res.error === 'already_shipped') return { blocked: true };
+    if (res.error) throw new Error(res.error);
+    return res;
+  } catch (e) {
+    console.error('[pushRemovePhoto] failed:', e);
+    return null;
+  }
+}
+
+async function pushNotesAndOrders() {
+  if (!selected) return;
+  if (!currentQcId && gallery.content.length === 0 && gallery.box.length === 0) return;
+  try {
+    const res = await apiPost({
+      action:        'save_qc',
+      qc_id:         currentQcId || undefined,
+      session_id:    activeSession ? activeSession['Session ID'] : '',
+      tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
+      order_ids:     [...selected.order_ids, ...selectedAddons],
+      customer_id:   selected.customer_id,
+      username:      selected.username,
+      packer:        currentPacker(),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
-    if (mySeq !== syncSeq) return;
+    if (res.error === 'already_shipped') {
+      showToast('Este pedido ya fue enviado — no se pueden guardar más cambios', true);
+      return;
+    }
     if (res.qc_id) currentQcId = res.qc_id;
   } catch (e) {
-    console.error('[syncToSheet] failed:', e);
+    console.error('[pushNotesAndOrders] failed:', e);
   }
 }
 
@@ -161,11 +206,57 @@ async function pushParticipants() {
   await ensureAuth();
   await checkSessionAndRoute();
   setInterval(() => {
-    if (activeSession && document.getElementById('view-pending').style.display !== 'none') {
+    if (!activeSession) return;
+    if (document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
+    } else if (document.getElementById('view-capture').style.display !== 'none') {
+      pollCaptureUpdates();
     }
   }, 4000);
 })();
+
+// While inside an order, quietly check the server for photos another device
+// may have added/removed, and merge them in — this is the real-time sync
+// that was missing before (previously only the list view polled).
+let pollingCapture = false;
+async function pollCaptureUpdates() {
+  if (!selected || !selected.tracking_id || !currentQcId || pollingCapture) return;
+  pollingCapture = true;
+  try {
+    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(selected.tracking_id)}`);
+    const row = (data.records || [])[0];
+    if (!row) { pollingCapture = false; return; }
+
+    if (row['Status'] === 'Enviado' && !shippedLockShown) {
+      shippedLockShown = true;
+      showToast('⚠ Este pedido ya fue enviado desde otro dispositivo', true);
+    }
+
+    ['content', 'box'].forEach(group => {
+      const cols = group === 'content'
+        ? ['Content1','Content2','Content3','Content4','Content5']
+        : ['Box1','Box2','Box3','Box4','Box5'];
+      const serverUrls = cols.map(c => row[c]).filter(Boolean);
+      const localUrls = gallery[group].filter(p => !p.uploading).map(p => p.url);
+
+      // Only touch the gallery if the server genuinely has something new —
+      // avoids clobbering a photo that's mid-upload on this exact device.
+      const hasNew = serverUrls.some(u => !localUrls.includes(u));
+      const hasRemoved = localUrls.some(u => !serverUrls.includes(u));
+      if (hasNew || hasRemoved) {
+        const uploadingPlaceholders = gallery[group].filter(p => p.uploading);
+        gallery[group] = [...serverUrls.map(url => ({ url })), ...uploadingPlaceholders];
+        renderGallery(group);
+      }
+    });
+
+    document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+  } catch (e) {
+    console.warn('[pollCaptureUpdates] failed:', e);
+  }
+  pollingCapture = false;
+}
+let shippedLockShown = false;
 
 // Checks whether a session is currently active and shows the right view:
 // gate (no session) vs. pending list + live banner (session running).
@@ -402,6 +493,7 @@ function openCapture(shipment) {
   pendingScrollY = window.scrollY;
   selected = shipment;
   currentQcId = null;
+  shippedLockShown = false;
   selectedAddons = [];
   gallery.content = [];
   gallery.box = [];
@@ -445,7 +537,9 @@ function openCapture(shipment) {
 
   document.getElementById('view-pending').style.display = 'none';
   document.getElementById('view-capture').style.display = 'block';
-  document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+  const submitBtn = document.getElementById('qc-submit');
+  submitBtn.disabled = gallery.content.length === 0;
+  submitBtn.textContent = 'Enviar';  // reset — otherwise a previous "Guardando…" sticks forever
   window.scrollTo(0, 0);
 }
 
@@ -522,7 +616,7 @@ function toggleAddon(orderId, channel) {
     selectedAddons.push({ id: orderId, channel: channel });
     el.classList.add('selected');
   }
-  syncToSheet();
+  pushNotesAndOrders();
 }
 
 
@@ -550,10 +644,15 @@ function renderGallery(group) {
 
 function deletePhoto(group, index) {
   if (!confirm('¿Eliminar esta foto?')) return;
+  const removedUrl = gallery[group][index].url;
   gallery[group].splice(index, 1);
   renderGallery(group);
   document.getElementById('qc-submit').disabled = gallery.content.length === 0;
-  syncToSheet();
+  pushRemovePhoto(group, removedUrl).then(res => {
+    if (res && res.blocked) {
+      showToast('Este pedido ya fue enviado — no se puede modificar', true);
+    }
+  });
 }
 
 function bindAddButton(group) {
@@ -576,7 +675,12 @@ function bindAddButton(group) {
       const uploaded = await uploadPhoto(f, 'velpapier/qc');
       gallery[group][placeholderIdx] = { url: uploaded.url };
       renderGallery(group);
-      await syncToSheet();
+      const res = await pushAddPhoto(group, uploaded.url);
+      if (res && res.blocked) {
+        showToast('Este pedido ya fue enviado — no se puede modificar', true);
+        gallery[group].splice(placeholderIdx, 1);
+        renderGallery(group);
+      }
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
       gallery[group].splice(placeholderIdx, 1);
@@ -598,7 +702,7 @@ function renderUploadingPlaceholder(group, idx) {
   galEl.appendChild(div);
 }
 
-document.getElementById('qc-notes').addEventListener('change', syncToSheet);
+document.getElementById('qc-notes').addEventListener('change', pushNotesAndOrders);
 
 
 // ── Submit ───────────────────────────────────────────────────────────────
@@ -607,6 +711,7 @@ async function submitQC() {
   const btn = document.getElementById('qc-submit');
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
   if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
+  if (uploadsInFlight > 0) { showToast('Espera a que terminen de subir las fotos', true); return; }
 
   btn.disabled = true;
   btn.textContent = 'Guardando…';
@@ -624,11 +729,17 @@ async function submitQC() {
       customer_id:   selected.customer_id,
       username:      selected.username,
       packer:        currentPacker(),
-      content_urls:  gallery.content.map(p => p.url),
-      box_urls:      gallery.box.map(p => p.url),
+      content_urls:  gallery.content.filter(p => !p.uploading).map(p => p.url),
+      box_urls:      gallery.box.filter(p => !p.uploading).map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
     });
 
+    if (res.error === 'already_shipped') {
+      showToast('Este pedido ya fue enviado desde otro dispositivo', true);
+      btn.disabled = false;
+      btn.textContent = 'Enviar';
+      return;
+    }
     if (res.error) throw new Error(res.error);
 
     showToast('✓ Empacado y enviado');
