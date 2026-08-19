@@ -212,7 +212,7 @@
     <div id="view-session-gate" style="display:none">
       <div style="text-align:center;padding:3rem 1rem">
         <div style="font-size:15px;color:var(--text-muted);margin-bottom:1.5rem">No hay ninguna sesión de empaque activa</div>
-        <button class="qc-submit" style="max-width:280px;margin:0 auto" onclick="handleStartSession()">Iniciar sesión de empaque</button>
+        <button class="qc-submit" id="start-session-btn" style="max-width:280px;margin:0 auto" onclick="handleStartSession()">Iniciar / unirse a sesión</button>
       </div>
     </div>
 
@@ -223,6 +223,17 @@
         <span style="font-size:12px;font-weight:700" id="session-live-count">Sesión activa · 0 empacados</span>
       </div>
       <button style="background:none;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 10px;font-size:11px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer" onclick="handleEndSession()">Finalizar sesión</button>
+    </div>
+
+    <!-- Who took part in this session (auto-detected packers are merged in on end) -->
+    <div id="participants-box" style="display:none;background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:10px 14px;margin-bottom:14px">
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:6px">Participantes de la sesión</div>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;margin-right:14px;cursor:pointer">
+        <input type="checkbox" class="participant-chk" value="Mariana"> Mariana
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:5px;font-size:13px;margin-right:14px;cursor:pointer">
+        <input type="checkbox" class="participant-chk" value="Bob"> Bob
+      </label>
     </div>
 
     <div id="view-pending" style="display:none">
