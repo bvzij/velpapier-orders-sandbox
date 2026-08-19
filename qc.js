@@ -107,7 +107,6 @@ async function checkSessionAndRoute() {
   // Hide both views while we determine state — prevents the wrong one flashing
   document.getElementById('view-session-gate').style.display = 'none';
   document.getElementById('session-banner').style.display = 'none';
-  document.getElementById('participants-box').style.display = 'none';
   document.getElementById('view-pending').style.display = 'none';
   try {
     const data = await apiGet('action=active_session');
@@ -119,10 +118,6 @@ async function checkSessionAndRoute() {
 
   if (activeSession) {
     document.getElementById('session-banner').style.display = 'flex';
-    document.getElementById('participants-box').style.display = 'block';
-    // Pre-tick whoever is currently selected as packer on this device
-    const me = document.getElementById('packer-select').value;
-    document.querySelectorAll('.participant-chk').forEach(c => { if (c.value === me) c.checked = true; });
     await loadPending();
   } else {
     document.getElementById('view-session-gate').style.display = 'block';
@@ -154,12 +149,16 @@ async function handleStartSession() {
 
 async function handleEndSession() {
   if (!activeSession) return;
-  if (!confirm('¿Finalizar la sesión de empaque actual?')) return;
+  const who = prompt(
+    '¿Quiénes participaron en esta sesión?\n(separa con comas — se suman a los empacadores detectados automáticamente)',
+    document.getElementById('packer-select').value
+  );
+  if (who === null) return;  // cancelled
   try {
     const res = await apiPost({
       action: 'end_session',
       session_id: activeSession['Session ID'],
-      participants: Array.from(document.querySelectorAll('.participant-chk:checked')).map(c => c.value),
+      participants: who.split(',').map(s => s.trim()).filter(Boolean),
     });
     if (res.error) throw new Error(res.error);
     showSessionSummary(res);
@@ -245,9 +244,15 @@ function renderPendingList() {
     return;
   }
 
+  // Tracking IDs already finalized (possibly on another device) — drop them
+  const finalizedTids = new Set(
+    allQcRows.filter(r => r['Status'] === 'Enviado').map(r => r['Tracking ID'])
+  );
+
   const groups = {};
   tikTokOrders.forEach(r => {
     const tid = r['Tracking ID'] || ('order:' + r['Order ID']);
+    if (finalizedTids.has(tid)) return;
     if (!groups[tid]) groups[tid] = [];
     groups[tid].push(r);
   });
@@ -300,7 +305,10 @@ function renderPendingList() {
 
 // ── Capture view ─────────────────────────────────────────────────────────
 
+let pendingScrollY = 0;
+
 function openCapture(shipment) {
+  pendingScrollY = window.scrollY;
   selected = shipment;
   currentQcId = null;
   selectedAddons = [];
@@ -356,6 +364,7 @@ async function backToPending() {
   selected = null;
   currentQcId = null;
   await refreshQcBadges();
+  window.scrollTo(0, pendingScrollY);
 }
 
 async function refreshQcBadges() {
@@ -518,7 +527,6 @@ async function submitQC() {
 
     showToast('✓ Empacado y enviado');
     backToPending();
-    loadPending();
 
   } catch (e) {
     showToast('Error: ' + e.message, true);
@@ -534,7 +542,13 @@ function openLightbox(url) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;-webkit-tap-highlight-color:transparent';
   overlay.innerHTML = `<img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px">`;
-  overlay.onclick = () => overlay.remove();
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (ev) => { if (ev.key === 'Escape') close(); };
+  overlay.onclick = close;
+  document.addEventListener('keydown', onKey);
   document.body.appendChild(overlay);
 }
 
