@@ -228,30 +228,35 @@ async function pollCaptureUpdates() {
     if (!row) { pollingCapture = false; return; }
     if (!currentQcId && row['QC ID']) currentQcId = row['QC ID'];
 
-    if (row['Status'] === 'Enviado' && !shippedLockShown && !localFinalizeInProgress) {
+    const nowShipped = row['Status'] === 'Enviado';
+    if (nowShipped && !shippedLockShown && !localFinalizeInProgress) {
       shippedLockShown = true;
-      showToast('⚠ Este pedido ya fue enviado desde otro dispositivo', true);
+      applyShippedLock(true);
     }
 
-    ['content', 'box'].forEach(group => {
-      const cols = group === 'content'
-        ? ['Content1','Content2','Content3','Content4','Content5']
-        : ['Box1','Box2','Box3','Box4','Box5'];
-      const serverUrls = cols.map(c => row[c]).filter(Boolean);
-      const localUrls = gallery[group].filter(p => !p.uploading).map(p => p.url);
+    // Never merge server photos into a gallery that's mid-edit on this
+    // device (editing a shipped order overwrites wholesale on save — pulling
+    // in server changes mid-edit would be confusing and could clobber intent).
+    if (!isEditingShipped) {
+      ['content', 'box'].forEach(group => {
+        const cols = group === 'content'
+          ? ['Content1','Content2','Content3','Content4','Content5']
+          : ['Box1','Box2','Box3','Box4','Box5'];
+        const serverUrls = cols.map(c => row[c]).filter(Boolean);
+        const localUrls = gallery[group].filter(p => !p.uploading).map(p => p.url);
 
-      // Only touch the gallery if the server genuinely has something new —
-      // avoids clobbering a photo that's mid-upload on this exact device.
-      const hasNew = serverUrls.some(u => !localUrls.includes(u));
-      const hasRemoved = localUrls.some(u => !serverUrls.includes(u));
-      if (hasNew || hasRemoved) {
-        const uploadingPlaceholders = gallery[group].filter(p => p.uploading);
-        gallery[group] = [...serverUrls.map(url => ({ url })), ...uploadingPlaceholders];
-        renderGallery(group);
-      }
-    });
-
-    document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+        // Only touch the gallery if the server genuinely has something new —
+        // avoids clobbering a photo that's mid-upload on this exact device.
+        const hasNew = serverUrls.some(u => !localUrls.includes(u));
+        const hasRemoved = localUrls.some(u => !serverUrls.includes(u));
+        if (hasNew || hasRemoved) {
+          const uploadingPlaceholders = gallery[group].filter(p => p.uploading);
+          gallery[group] = [...serverUrls.map(url => ({ url })), ...uploadingPlaceholders];
+          renderGallery(group);
+        }
+      });
+      document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+    }
   } catch (e) {
     console.warn('[pollCaptureUpdates] failed:', e);
   }
@@ -290,6 +295,7 @@ async function checkSessionAndRoute() {
       saveKnownPackers();
     }
     updatePackersBtnLabel();
+    switchTab('pending');
     await loadPending();
   } else {
     document.getElementById('view-session-gate').style.display = 'block';
@@ -403,6 +409,117 @@ function updateSessionBanner() {
   document.getElementById('session-live-count').textContent = `Sesión activa · ${count} empacado${count !== 1 ? 's' : ''}`;
 }
 
+// ── Tabs: Pendientes / Empacados (this session) / Historial ────────────────
+
+let currentTab = 'pending';
+
+function switchTab(tab) {
+  currentTab = tab;
+  const tabs = { pending: 'tab-pending', packed: 'tab-packed', history: 'tab-history' };
+  Object.entries(tabs).forEach(([key, id]) => {
+    document.getElementById(id).style.display = key === tab ? 'block' : 'none';
+    const btn = document.getElementById(`tab-btn-${key}`);
+    btn.style.background = key === tab ? 'var(--text)' : 'var(--surface2)';
+    btn.style.color = key === tab ? 'var(--surface)' : 'var(--text-muted)';
+  });
+  if (tab === 'packed') renderPackedList();
+  if (tab === 'history') renderHistoryList();
+}
+
+function renderPackedList() {
+  const list = document.getElementById('packed-list');
+  if (!activeSession) { list.innerHTML = '<div class="empty-state">Sin sesión activa</div>'; return; }
+
+  const rows = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado');
+  if (rows.length === 0) {
+    list.innerHTML = '<div class="empty-state">Nada empacado todavía en esta sesión</div>';
+    return;
+  }
+
+  list.innerHTML = rows.map(row => {
+    const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
+      .filter(c => row[c]).length;
+    const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
+    const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
+    const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
+    const orderIds = [
+      ...tikTokIds.map(id => ({ id, channel: 'TikTok' })),
+      ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
+      ...manualIds.map(id => ({ id, channel: 'Manual' })),
+    ];
+    return `
+      <div class="pending-card" onclick='openCapture(${JSON.stringify({
+        tracking_id: row['Tracking ID'] || '',
+        order_ids: orderIds,
+        customer_id: row['Customer ID'] || '',
+        username: row['Primary Username'] || '',
+      }).replace(/'/g, "&apos;")})'>
+        <div class="pending-card-top">
+          <span class="pending-username">${escapeHtml(row['Primary Username'] || '—')}</span>
+          <span class="pending-count">✓ Enviado</span>
+        </div>
+        <div class="pending-tracking">${escapeHtml(row['Tracking ID'] || '')}</div>
+        <div class="pending-progress">${photoCount} foto${photoCount !== 1 ? 's' : ''}</div>
+      </div>`;
+  }).join('');
+}
+
+let historySessions = null;  // cached after first load this page-session
+
+async function renderHistoryList() {
+  const list = document.getElementById('history-list');
+  list.innerHTML = '<div class="empty-state">Cargando…</div>';
+  try {
+    if (!historySessions) {
+      const data = await apiGet('action=sessions');
+      historySessions = data.records || [];
+    }
+    const finished = historySessions.filter(s => s['Status'] === 'Finalizada');
+    if (finished.length === 0) {
+      list.innerHTML = '<div class="empty-state">Sin sesiones anteriores</div>';
+      return;
+    }
+    list.innerHTML = finished.map((s, i) => `
+      <div class="pending-card" onclick="toggleHistorySession(${i})" id="history-session-${i}">
+        <div class="pending-card-top">
+          <span class="pending-username">${escapeHtml(s['Session ID'])}</span>
+          <span class="pending-count">${escapeHtml(String(s['Total Packages'] || 0))} paquetes</span>
+        </div>
+        <div class="pending-tracking">${escapeHtml(s['Participants'] || '—')}</div>
+        <div id="history-session-detail-${i}" style="display:none;margin-top:10px"></div>
+      </div>
+    `).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty-state">Error al cargar el historial</div>';
+  }
+}
+
+async function toggleHistorySession(i) {
+  const detail = document.getElementById(`history-session-detail-${i}`);
+  const isOpen = detail.style.display !== 'none';
+  detail.style.display = isOpen ? 'none' : 'block';
+  if (isOpen || detail.dataset.loaded) return;
+
+  detail.innerHTML = '<div style="font-size:12px;color:var(--text-faint)">Cargando…</div>';
+  try {
+    const sessionId = historySessions[i]['Session ID'];
+    const data = await apiGet(`action=qc&session_id=${encodeURIComponent(sessionId)}`);
+    const rows = data.records || [];
+    detail.innerHTML = rows.length === 0
+      ? '<div style="font-size:12px;color:var(--text-faint)">Sin registros</div>'
+      : rows.map(row => {
+          const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
+            .filter(c => row[c]).length;
+          return `<div style="font-size:12px;padding:6px 0;border-top:0.5px solid var(--border)">
+            <strong>${escapeHtml(row['Primary Username'] || '—')}</strong> · ${escapeHtml(row['Tracking ID'] || '')} · ${photoCount} foto${photoCount !== 1 ? 's' : ''}
+          </div>`;
+        }).join('');
+    detail.dataset.loaded = '1';
+  } catch (e) {
+    detail.innerHTML = '<div style="font-size:12px;color:var(--red-text)">Error al cargar</div>';
+  }
+}
+
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
@@ -491,11 +608,43 @@ function renderPendingList() {
 
 let pendingScrollY = 0;
 
+let isEditingShipped = false;  // true only when the user explicitly checks "Editar de todos modos"
+
+function applyShippedLock(isShipped) {
+  const banner = document.getElementById('shipped-lock-banner');
+  const area = document.getElementById('capture-editable-area');
+  const checkbox = document.getElementById('edit-shipped-checkbox');
+  const submitBtn = document.getElementById('qc-submit');
+
+  if (isShipped) {
+    banner.style.display = 'block';
+    checkbox.checked = isEditingShipped;
+    if (!isEditingShipped) {
+      area.classList.add('locked');
+      submitBtn.style.display = 'none';
+    } else {
+      area.classList.remove('locked');
+      submitBtn.style.display = 'block';
+      submitBtn.textContent = 'Guardar cambios';
+    }
+  } else {
+    banner.style.display = 'none';
+    area.classList.remove('locked');
+    submitBtn.style.display = 'block';
+  }
+}
+
+function toggleEditShipped() {
+  isEditingShipped = document.getElementById('edit-shipped-checkbox').checked;
+  applyShippedLock(true);
+}
+
 function openCapture(shipment) {
   pendingScrollY = window.scrollY;
   selected = shipment;
   currentQcId = null;
   shippedLockShown = false;
+  isEditingShipped = false;
   selectedAddons = [];
   gallery.content = [];
   gallery.box = [];
@@ -509,10 +658,12 @@ function openCapture(shipment) {
   renderAddonOrders(shipment.customer_id);
 
   let restored = false;
+  let rowIsShipped = false;
   if (shipment.tracking_id) {
     const row = allQcRows.find(r => r['Tracking ID'] === shipment.tracking_id);
     if (row) {
       currentQcId = row['QC ID'] || null;
+      rowIsShipped = row['Status'] === 'Enviado';
       gallery.content = ['Content1','Content2','Content3','Content4','Content5']
         .map(c => row[c]).filter(Boolean).map(url => ({ url }));
       gallery.box = ['Box1','Box2','Box3','Box4','Box5']
@@ -528,7 +679,7 @@ function openCapture(shipment) {
     }
   }
 
-  if (restored) showToast('Progreso anterior restaurado');
+  if (restored && !rowIsShipped) showToast('Progreso anterior restaurado');
 
   renderGallery('content');
   renderGallery('box');
@@ -542,6 +693,7 @@ function openCapture(shipment) {
   const submitBtn = document.getElementById('qc-submit');
   submitBtn.disabled = gallery.content.length === 0;
   submitBtn.textContent = 'Enviar';  // reset — otherwise a previous "Guardando…" sticks forever
+  applyShippedLock(rowIsShipped);
   window.scrollTo(0, 0);
 }
 
@@ -583,7 +735,8 @@ async function refreshQcBadges() {
       }
     }
     updateSessionBanner();
-    renderPendingList();
+    if (currentTab === 'packed') renderPackedList();
+    else renderPendingList();
   } catch (e) {
     console.warn('[refreshQcBadges] failed:', e);
   }
@@ -653,17 +806,27 @@ function renderGallery(group) {
   }
 }
 
-function deletePhoto(group, index) {
+async function deletePhoto(group, index) {
   if (!confirm('¿Eliminar esta foto?')) return;
   const removedUrl = gallery[group][index].url;
+
+  // If editing a shipped order, deletion is local-only until "Guardar cambios"
+  // is pressed (full overwrite) — no per-photo server call in that mode.
+  if (isEditingShipped) {
+    gallery[group].splice(index, 1);
+    renderGallery(group);
+    return;
+  }
+
   gallery[group].splice(index, 1);
   renderGallery(group);
   document.getElementById('qc-submit').disabled = gallery.content.length === 0;
-  pushRemovePhoto(group, removedUrl).then(res => {
-    if (res && res.blocked) {
-      showToast('Este pedido ya fue enviado — no se puede modificar', true);
-    }
-  });
+  const res = await pushRemovePhoto(group, removedUrl);
+  if (res && res.blocked) {
+    showToast('Este pedido ya fue enviado — no se puede modificar', true);
+    gallery[group].splice(index, 0, { url: removedUrl });  // restore — server refused
+    renderGallery(group);
+  }
 }
 
 function bindAddButton(group) {
@@ -723,6 +886,33 @@ async function submitQC() {
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
   if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
   if (uploadsInFlight > 0) { showToast('Espera a que terminen de subir las fotos', true); return; }
+
+  // Editing an already-shipped order: full overwrite based on THIS device's
+  // current gallery, explicitly confirmed. Does not touch order/ship status
+  // again (already shipped) — just corrects the photos on record.
+  if (isEditingShipped) {
+    btn.disabled = true;
+    btn.textContent = 'Guardando…';
+    try {
+      const res = await apiPost({
+        action:              'save_qc',
+        qc_id:               currentQcId,
+        confirm_edit_shipped: true,
+        content_urls:  gallery.content.filter(p => !p.uploading).map(p => p.url),
+        box_urls:      gallery.box.filter(p => !p.uploading).map(p => p.url),
+        notes:         document.getElementById('qc-notes').value.trim(),
+      });
+      if (res.error) throw new Error(res.error);
+      showToast('✓ Cambios guardados');
+      backToPending();
+    } catch (e) {
+      showToast('Error: ' + e.message, true);
+      btn.disabled = false;
+      btn.textContent = 'Guardar cambios';
+    }
+    return;
+  }
+
   localFinalizeInProgress = true;  // suppress "shipped elsewhere" false-positive from our own poll tick
 
   btn.disabled = true;
