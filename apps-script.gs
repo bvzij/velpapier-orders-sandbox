@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-18.2';
+const SCRIPT_VERSION = '2026-08-18.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -872,10 +872,15 @@ function saveQC(body) {
     }
   }
 
+  // Build the full row in memory, then write it in ONE setValues call.
+  // (Previously this did ~12 individual setValue calls = ~12 round trips.)
+  const rowVals = qcSheet.getRange(row, 1, 1, h.length).getValues()[0];
   const set = (col, val) => {
-    const idx = h.indexOf(col) + 1;
-    if (idx > 0 && val !== undefined) qcSheet.getRange(row, idx).setValue(val);
+    const idx = h.indexOf(col);
+    if (idx >= 0 && val !== undefined) rowVals[idx] = val;
   };
+
+  if (body.session_id) set('Session ID', body.session_id);
 
   // Split incoming order_ids ([{id, channel}]) into the three channel columns
   if (body.order_ids) {
@@ -895,6 +900,9 @@ function saveQC(body) {
     for (let i = 0; i < 5; i++) set('Box' + (i + 1), body.box_urls[i] || '');
   }
   if (body.notes !== undefined) set('Notes', body.notes);
+  if (body.packer) set('Packer', body.packer);
+
+  qcSheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
   const result = { result: 'saved', qc_id: qcId };
 
@@ -1017,7 +1025,11 @@ function startSession(body) {
   const rows = sheetToObjects(sheet);
   const existingActive = rows.find(r => r['Status'] === 'Activa');
   if (existingActive) {
-    return jsonResponse({ result: 'already_active', session: existingActive });
+    return jsonResponse({
+      result: 'already_active',
+      session_id: existingActive['Session ID'],
+      session: existingActive
+    });
   }
 
   const todayStr = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyyMMdd');
@@ -1069,21 +1081,29 @@ function endSession(body) {
   });
 
   const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rowVals = sheet.getRange(row, 1, 1, h.length).getValues()[0];
   const set = (col, val) => {
-    const idx = h.indexOf(col) + 1;
-    if (idx > 0) sheet.getRange(row, idx).setValue(val);
+    const idx = h.indexOf(col);
+    if (idx >= 0) rowVals[idx] = val;
   };
+
+  // Merge auto-detected packers with any manually-added participants
+  const manualParticipants = (body.participants || []).filter(Boolean);
+  const allParticipants = [...new Set([...packers, ...manualParticipants])];
+
   set('End Time', nowISO());
   set('Status', 'Finalizada');
-  set('Participants', packers.join(', '));
+  set('Participants', allParticipants.join(', '));
   set('Total Packages', totalPackages);
   set('Total Items', totalItems);
+  sheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
   return jsonResponse({
     result: 'ended',
     session_id: body.session_id,
-    participants: packers,
+    participants: allParticipants,
     total_packages: totalPackages,
     total_items: totalItems,
+    start_time: rowVals[h.indexOf('Start Time')],
   });
 }
