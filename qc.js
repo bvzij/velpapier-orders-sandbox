@@ -138,7 +138,7 @@ function renderPendingList() {
   });
 
   const sortSelect = document.getElementById('sort-select');
-  const sortMode = sortSelect ? sortSelect.value : 'new-old';
+  const sortMode = sortSelect ? sortSelect.value : 'az';
   const entries = Object.entries(groups);
   entries.sort(([, aOrders], [, bOrders]) => {
     const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
