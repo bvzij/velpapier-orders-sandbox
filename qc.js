@@ -153,6 +153,22 @@ function renderPendingList() {
       default:          return bDate - aDate;
     }
   });
+
+  const sortMode = document.getElementById('sort-select')?.value || 'new-old';
+  const entries = Object.entries(groups);
+  entries.sort(([, aOrders], [, bOrders]) => {
+    const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
+    const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
+    const aDate = new Date(aOrders[0]['Created Date'] || aOrders[0]['Created Time'] || 0).getTime();
+    const bDate = new Date(bOrders[0]['Created Date'] || bOrders[0]['Created Time'] || 0).getTime();
+    switch (sortMode) {
+      case 'old-new': return aDate - bDate;
+      case 'az':       return aUser.localeCompare(bUser);
+      case 'za':       return bUser.localeCompare(aUser);
+      case 'new-old':
+      default:          return bDate - aDate;
+    }
+  });
   
   list.innerHTML = Object.entries(groups).map(([tid, orders]) => {
     const first = orders[0];
