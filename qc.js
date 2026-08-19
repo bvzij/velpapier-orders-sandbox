@@ -11,6 +11,7 @@ let selected = null;      // { tracking_id, order_ids:[{id,channel}], customer_i
 let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
+let activeSession = null; // { 'Session ID', 'Start Time', ... } or null if no session running
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
 const gallery = { content: [], box: [] };
@@ -67,6 +68,7 @@ async function syncToSheet() {
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
+      session_id:    activeSession ? activeSession['Session ID'] : '',
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
@@ -91,18 +93,86 @@ document.getElementById('packer-select').onchange = e => localStorage.setItem('v
 
 (async function init() {
   await ensureAuth();
-  await loadPending();
+  await checkSessionAndRoute();
   setInterval(() => {
-    if (document.getElementById('view-pending').style.display !== 'none') {
+    if (activeSession && document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
     }
   }, 8000);
 })();
 
+// Checks whether a session is currently active and shows the right view:
+// gate (no session) vs. pending list + live banner (session running).
+async function checkSessionAndRoute() {
+  try {
+    const data = await apiGet('action=active_session');
+    activeSession = data.session || null;
+  } catch (e) {
+    console.error('[checkSessionAndRoute] failed:', e);
+    activeSession = null;
+  }
+
+  if (activeSession) {
+    document.getElementById('view-session-gate').style.display = 'none';
+    document.getElementById('session-banner').style.display = 'flex';
+    await loadPending();
+  } else {
+    document.getElementById('view-session-gate').style.display = 'block';
+    document.getElementById('session-banner').style.display = 'none';
+    document.getElementById('view-pending').style.display = 'none';
+  }
+}
+
+async function handleStartSession() {
+  try {
+    const res = await apiPost({ action: 'start_session' });
+    if (res.error) throw new Error(res.error);
+    showToast('Sesión iniciada: ' + res.session_id);
+    await checkSessionAndRoute();
+  } catch (e) {
+    showToast('Error al iniciar sesión: ' + e.message, true);
+  }
+}
+
+async function handleEndSession() {
+  if (!activeSession) return;
+  if (!confirm('¿Finalizar la sesión de empaque actual?')) return;
+  try {
+    const res = await apiPost({ action: 'end_session', session_id: activeSession['Session ID'] });
+    if (res.error) throw new Error(res.error);
+    showSessionSummary(res);
+    activeSession = null;
+    await checkSessionAndRoute();
+  } catch (e) {
+    showToast('Error al finalizar sesión: ' + e.message, true);
+  }
+}
+
+function showSessionSummary(summary) {
+  const startTime = activeSessionStartMs;
+  const durationMin = startTime ? Math.round((Date.now() - startTime) / 60000) : null;
+  const avgSec = summary.total_packages > 0 && durationMin
+    ? Math.round((durationMin * 60) / summary.total_packages)
+    : null;
+
+  const lines = [
+    `📦 ${summary.total_packages} paquete${summary.total_packages !== 1 ? 's' : ''} empacado${summary.total_packages !== 1 ? 's' : ''}`,
+    `🧩 ${summary.total_items} artículo${summary.total_items !== 1 ? 's' : ''} en total`,
+    durationMin !== null ? `⏱ ${durationMin} min de duración` : '',
+    avgSec !== null ? `⚡ ~${avgSec}s por paquete` : '',
+    summary.participants && summary.participants.length ? `👥 ${summary.participants.join(', ')}` : '',
+  ].filter(Boolean);
+
+  alert('Sesión finalizada\n\n' + lines.join('\n'));
+}
+
+let activeSessionStartMs = null;
+
 
 // ── Pending list ─────────────────────────────────────────────────────────
 
 async function loadPending() {
+  document.getElementById('view-pending').style.display = 'block';
   const list = document.getElementById('pending-list');
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
 
@@ -118,7 +188,18 @@ async function loadPending() {
     return;
   }
 
+  updateSessionBanner();
   renderPendingList();
+}
+
+function updateSessionBanner() {
+  if (!activeSession) return;
+  if (!activeSessionStartMs) {
+    const parsed = Date.parse(activeSession['Start Time']);
+    activeSessionStartMs = isNaN(parsed) ? Date.now() : parsed;
+  }
+  const count = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID']).length;
+  document.getElementById('session-live-count').textContent = `Sesión activa · ${count} empacado${count !== 1 ? 's' : ''}`;
 }
 
 function renderPendingList() {
@@ -247,6 +328,7 @@ async function refreshQcBadges() {
   try {
     const qcData = await apiGet('action=qc');
     allQcRows = qcData.records || [];
+    updateSessionBanner();
     renderPendingList();
   } catch (e) {
     console.warn('[refreshQcBadges] failed:', e);
@@ -387,6 +469,7 @@ async function submitQC() {
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
       finalize:      true,
+      session_id:    activeSession ? activeSession['Session ID'] : '',
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
