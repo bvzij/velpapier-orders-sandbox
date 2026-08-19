@@ -124,6 +124,7 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes pulse-rec { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+    #capture-editable-area.locked { opacity: 0.35; pointer-events: none; user-select: none; }
 
     .photo-thumb-delete {
       position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%;
@@ -229,15 +230,31 @@
     </div>
 
     <div id="view-pending" style="display:none">
-      <div style="margin-bottom:10px">
-        <select id="sort-select" class="packer-select" style="width:100%" onchange="renderPendingList()">
-          <option value="az">A-Z</option>
-          <option value="za">Z-A</option>
-          <option value="new-old">Más reciente primero</option>
-          <option value="old-new">Más antiguo primero</option>
-        </select>
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <button id="tab-btn-pending" onclick="switchTab('pending')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--text);color:var(--surface)">Pendientes</button>
+        <button id="tab-btn-packed" onclick="switchTab('packed')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--surface2);color:var(--text-muted)">Empacados</button>
+        <button id="tab-btn-history" onclick="switchTab('history')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--surface2);color:var(--text-muted)">Historial</button>
       </div>
-      <div id="pending-list"></div>
+
+      <div id="tab-pending">
+        <div style="margin-bottom:10px">
+          <select id="sort-select" class="packer-select" style="width:100%" onchange="renderPendingList()">
+            <option value="az">A-Z</option>
+            <option value="za">Z-A</option>
+            <option value="new-old">Más reciente primero</option>
+            <option value="old-new">Más antiguo primero</option>
+          </select>
+        </div>
+        <div id="pending-list"></div>
+      </div>
+
+      <div id="tab-packed" style="display:none">
+        <div id="packed-list"></div>
+      </div>
+
+      <div id="tab-history" style="display:none">
+        <div id="history-list"></div>
+      </div>
     </div>
 
     <div id="view-capture" style="display:none">
@@ -246,6 +263,16 @@
         Volver
       </button>
 
+      <!-- Shipped-order lock banner: shown + everything below greyed out
+           unless "Editar" is explicitly checked -->
+      <div id="shipped-lock-banner" style="display:none;background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:14px">
+        <div style="font-size:13px;font-weight:700;color:var(--red-text);margin-bottom:8px">⚠ Este pedido ya fue enviado</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer">
+          <input type="checkbox" id="edit-shipped-checkbox" onchange="toggleEditShipped()">
+          Editar de todos modos
+        </label>
+      </div>
+
       <div class="ship-summary" id="ship-summary"></div>
 
       <div class="addon-section" id="addon-section" style="display:none">
@@ -253,27 +280,29 @@
         <div id="addon-list"></div>
       </div>
 
-      <div class="photo-group">
-        <div class="photo-group-title required">Contenido</div>
-        <div class="photo-gallery" id="gallery-content"></div>
-        <button class="add-photo-btn" id="add-btn-content">
-          <input type="file" accept="image/*" capture="environment">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          Agregar foto
-        </button>
-      </div>
+      <div id="capture-editable-area">
+        <div class="photo-group">
+          <div class="photo-group-title required">Contenido</div>
+          <div class="photo-gallery" id="gallery-content"></div>
+          <button class="add-photo-btn" id="add-btn-content">
+            <input type="file" accept="image/*" capture="environment">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            Agregar foto
+          </button>
+        </div>
 
-      <div class="photo-group">
-        <div class="photo-group-title">Caja cerrada</div>
-        <div class="photo-gallery" id="gallery-box"></div>
-        <button class="add-photo-btn" id="add-btn-box">
-          <input type="file" accept="image/*" capture="environment">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          Agregar foto
-        </button>
-      </div>
+        <div class="photo-group">
+          <div class="photo-group-title">Caja cerrada</div>
+          <div class="photo-gallery" id="gallery-box"></div>
+          <button class="add-photo-btn" id="add-btn-box">
+            <input type="file" accept="image/*" capture="environment">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            Agregar foto
+          </button>
+        </div>
 
-      <textarea class="qc-notes" id="qc-notes" placeholder="Notas (opcional)"></textarea>
+        <textarea class="qc-notes" id="qc-notes" placeholder="Notas (opcional)"></textarea>
+      </div>
 
       <button class="qc-submit" id="qc-submit" disabled onclick="submitQC()">Enviar</button>
     </div>
