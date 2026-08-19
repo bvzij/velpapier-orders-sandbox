@@ -92,8 +92,9 @@ async function pushRemovePhoto(group, url) {
   if (!selected || !currentQcId) return null;
   try {
     const res = await apiPost({
-      action: 'save_qc',
-      qc_id:  currentQcId,
+      action:      'save_qc',
+      qc_id:       currentQcId,
+      tracking_id: selected.tracking_id || ('MAN-' + Date.now()),
       [group === 'content' ? 'remove_content' : 'remove_box']: url,
     });
     if (res.error === 'already_shipped') return { blocked: true };
@@ -405,13 +406,18 @@ function updateSessionBanner() {
     const parsed = Date.parse(activeSession['Start Time']);
     activeSessionStartMs = isNaN(parsed) ? Date.now() : parsed;
   }
-  const count = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID']).length;
+  const count = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado').length;
   document.getElementById('session-live-count').textContent = `Sesión activa · ${count} empacado${count !== 1 ? 's' : ''}`;
 }
 
 // ── Tabs: Pendientes / Empacados (this session) / Historial ────────────────
 
 let currentTab = 'pending';
+
+function renderCurrentTab() {
+  if (currentTab === 'packed') renderPackedList();
+  else renderPendingList();
+}
 
 function switchTab(tab) {
   currentTab = tab;
@@ -430,9 +436,19 @@ function renderPackedList() {
   const list = document.getElementById('packed-list');
   if (!activeSession) { list.innerHTML = '<div class="empty-state">Sin sesión activa</div>'; return; }
 
-  const rows = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado');
+  let rows = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado');
+
+  const searchInput = document.getElementById('search-input');
+  const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  if (query) {
+    rows = rows.filter(r =>
+      (r['Primary Username'] || '').toLowerCase().includes(query) ||
+      (r['Tracking ID'] || '').toLowerCase().includes(query)
+    );
+  }
+
   if (rows.length === 0) {
-    list.innerHTML = '<div class="empty-state">Nada empacado todavía en esta sesión</div>';
+    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Nada empacado todavía en esta sesión'}</div>`;
     return;
   }
 
@@ -483,7 +499,7 @@ async function renderHistoryList() {
       <div class="pending-card" onclick="toggleHistorySession(${i})" id="history-session-${i}">
         <div class="pending-card-top">
           <span class="pending-username">${escapeHtml(s['Session ID'])}</span>
-          <span class="pending-count">${escapeHtml(String(s['Total Packages'] || 0))} paquetes</span>
+          <span class="pending-count">${escapeHtml(String(s['Total Packages'] || 0))} paq. (al finalizar)</span>
         </div>
         <div class="pending-tracking">${escapeHtml(s['Participants'] || '—')}</div>
         <div id="history-session-detail-${i}" style="display:none;margin-top:10px"></div>
@@ -504,13 +520,26 @@ async function toggleHistorySession(i) {
   try {
     const sessionId = historySessions[i]['Session ID'];
     const data = await apiGet(`action=qc&session_id=${encodeURIComponent(sessionId)}`);
-    const rows = data.records || [];
+    const rows = (data.records || []).filter(r => r['Status'] === 'Enviado');
     detail.innerHTML = rows.length === 0
       ? '<div style="font-size:12px;color:var(--text-faint)">Sin registros</div>'
-      : rows.map(row => {
+      : rows.map((row, ri) => {
           const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
             .filter(c => row[c]).length;
-          return `<div style="font-size:12px;padding:6px 0;border-top:0.5px solid var(--border)">
+          const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
+          const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
+          const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
+          const orderIds = [
+            ...tikTokIds.map(id => ({ id, channel: 'TikTok' })),
+            ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
+            ...manualIds.map(id => ({ id, channel: 'Manual' })),
+          ];
+          return `<div style="font-size:12px;padding:8px 0;border-top:0.5px solid var(--border);cursor:pointer" onclick='event.stopPropagation(); openCapture(${JSON.stringify({
+            tracking_id: row['Tracking ID'] || '',
+            order_ids: orderIds,
+            customer_id: row['Customer ID'] || '',
+            username: row['Primary Username'] || '',
+          }).replace(/'/g, "&apos;")})'>
             <strong>${escapeHtml(row['Primary Username'] || '—')}</strong> · ${escapeHtml(row['Tracking ID'] || '')} · ${photoCount} foto${photoCount !== 1 ? 's' : ''}
           </div>`;
         }).join('');
@@ -851,9 +880,15 @@ function bindAddButton(group) {
       renderGallery(group);
       const res = await pushAddPhoto(group, uploaded.url);
       if (res && res.blocked) {
-        showToast('Este pedido ya fue enviado — no se puede modificar', true);
         gallery[group].splice(placeholderIdx, 1);
         renderGallery(group);
+        if (confirm('Este pedido ya fue enviado. ¿Quieres editarlo de todos modos?')) {
+          document.getElementById('edit-shipped-checkbox').checked = true;
+          toggleEditShipped();
+          // Re-add locally now that editing is unlocked — user can hit "Guardar cambios" when ready
+          gallery[group].push({ url: uploaded.url });
+          renderGallery(group);
+        }
       }
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
