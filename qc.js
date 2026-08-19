@@ -138,6 +138,22 @@ function renderPendingList() {
     groups[tid].push(r);
   });
 
+  const sortMode = document.getElementById('sort-select')?.value || 'new-old';
+  const entries = Object.entries(groups);
+  entries.sort(([, aOrders], [, bOrders]) => {
+    const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
+    const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
+    const aDate = new Date(aOrders[0]['Created Date'] || aOrders[0]['Created Time'] || 0).getTime();
+    const bDate = new Date(bOrders[0]['Created Date'] || bOrders[0]['Created Time'] || 0).getTime();
+    switch (sortMode) {
+      case 'old-new': return aDate - bDate;
+      case 'az':       return aUser.localeCompare(bUser);
+      case 'za':       return bUser.localeCompare(aUser);
+      case 'new-old':
+      default:          return bDate - aDate;
+    }
+  });
+  
   list.innerHTML = Object.entries(groups).map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
@@ -160,7 +176,7 @@ function renderPendingList() {
         username: username,
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
-          <span class="pending-username">@${escapeHtml(username)}</span>
+          <span class="pending-username">${escapeHtml(username)}</span>
           <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}</span>
         </div>
         ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
@@ -181,7 +197,7 @@ function openCapture(shipment) {
   document.getElementById('qc-notes').value = '';
 
   document.getElementById('ship-summary').innerHTML = `
-    <div class="ship-summary-username">@${escapeHtml(shipment.username)}</div>
+    <div class="ship-summary-username">${escapeHtml(shipment.username)}</div>
     ${shipment.tracking_id ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
   `;
 
