@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-18.1';
+const SCRIPT_VERSION = '2026-08-18.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -123,6 +123,8 @@ function doGet(e) {
 
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
+    if (action === 'active_session') return getActiveSession(e);
+    if (action === 'sessions') return getSessions(e);
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -199,6 +201,8 @@ function doPost(e) {
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
     if (action === 'save_qc') return saveQC(body);
+    if (action === 'start_session') return startSession(body);
+    if (action === 'end_session') return endSession(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -862,6 +866,7 @@ function saveQC(body) {
       blank[h.indexOf('Packer')] = body.packer || '';
       blank[h.indexOf('Timestamp')] = nowISO();
       blank[h.indexOf('Status')] = 'Activo';
+      if (h.indexOf('Session ID') >= 0) blank[h.indexOf('Session ID')] = body.session_id || '';
       qcSheet.appendRow(blank);
       row = qcSheet.getLastRow();
     }
@@ -928,21 +933,36 @@ function saveQC(body) {
 }
 
 // Batch read for thumbnails / order-history views.
-// ?tracking_ids=A,B,C  or  ?order_id=X
+// ?tracking_ids=A,B,C  or  ?order_id=X  or  ?session_id=X
 function getQC(e) {
   const data = getQCSheet().getDataRange().getValues();
   if (data.length < 2) return jsonResponse({ records: [] });
 
   const h = data[0];
+  const iTrk  = h.indexOf('Tracking ID');
+  const iTT   = h.indexOf('TikTok Order IDs');
+  const iShop = h.indexOf('Shopify Order IDs');
+  const iMan  = h.indexOf('Manual Order IDs');
+  const iSess = h.indexOf('Session ID');
+
   const wantTracking = e.parameter.tracking_ids
     ? e.parameter.tracking_ids.split(',').map(s => s.trim())
     : null;
   const wantOrder = e.parameter.order_id || null;
+  const wantSession = e.parameter.session_id || null;
 
   const records = [];
   for (let r = 1; r < data.length; r++) {
-    if (wantTracking && !wantTracking.includes(String(data[r][1]))) continue;
-    if (wantOrder && String(data[r][2]).split(' + ').indexOf(String(wantOrder)) === -1) continue;
+    if (wantTracking && !wantTracking.includes(String(data[r][iTrk]))) continue;
+    if (wantSession && String(data[r][iSess]) !== wantSession) continue;
+    if (wantOrder) {
+      const allIds = [
+        ...String(data[r][iTT]   || '').split(' + '),
+        ...String(data[r][iShop] || '').split(' + '),
+        ...String(data[r][iMan]  || '').split(' + '),
+      ].filter(Boolean);
+      if (allIds.indexOf(String(wantOrder)) === -1) continue;
+    }
     const obj = {};
     h.forEach((k, j) => { obj[k] = data[r][j]; });
     records.push(obj);
@@ -963,4 +983,107 @@ function findRowByColumn(sheet, colLetter, value) {
                  .matchEntireCell(true)
                  .findNext();
   return f ? f.getRow() : null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PACKING SESSIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getSessionsSheet() {
+  return SpreadsheetApp.openById(QC_SHEET_ID).getSheetByName('Sessions');
+}
+
+// Returns the currently open session, if any, or null.
+function getActiveSession(e) {
+  const sheet = getSessionsSheet();
+  const rows = sheetToObjects(sheet);
+  const active = rows.find(r => r['Status'] === 'Activa');
+  return jsonResponse({ session: active || null });
+}
+
+// List all sessions, most recent first. Each includes its own summary stats
+// (recomputed live, not cached) so history stays accurate even if QC rows
+// are edited after a session ends.
+function getSessions(e) {
+  const sheet = getSessionsSheet();
+  const rows = sheetToObjects(sheet);
+  rows.sort((a, b) => String(b['Start Time']).localeCompare(String(a['Start Time'])));
+  return jsonResponse({ records: rows });
+}
+
+// Start a new session. Fails if one is already active (only one at a time).
+function startSession(body) {
+  const sheet = getSessionsSheet();
+  const rows = sheetToObjects(sheet);
+  const existingActive = rows.find(r => r['Status'] === 'Activa');
+  if (existingActive) {
+    return jsonResponse({ result: 'already_active', session: existingActive });
+  }
+
+  const todayStr = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyyMMdd');
+  const todayCount = rows.filter(r => String(r['Session ID']).startsWith('SES-' + todayStr)).length;
+  const sessionId = 'SES-' + todayStr + '-' + (todayCount + 1);
+
+  sheet.appendRow([sessionId, nowISO(), '', 'Activa', '', '', '']);
+
+  return jsonResponse({ result: 'started', session_id: sessionId });
+}
+
+// End the active session: stamps End Time, computes Participants /
+// Total Packages / Total Items from every linked QC row, flips to Finalizada.
+function endSession(body) {
+  if (!body.session_id) return jsonResponse({ error: 'session_id es obligatorio' });
+
+  const sheet = getSessionsSheet();
+  const row = findRowByColumn(sheet, 'A', body.session_id);
+  if (!row) return jsonResponse({ error: 'Sesión no encontrada' });
+
+  const qcSheet = getQCSheet();
+  const qcRows = sheetToObjects(qcSheet).filter(r => r['Session ID'] === body.session_id);
+
+  const packers = [...new Set(qcRows.map(r => r['Packer']).filter(Boolean))];
+  const totalPackages = qcRows.length;
+
+  // Item count: parse "Nx " prefixes from linked orders' Products field where
+  // available (TikTok convention). Falls back to 1 item per order id if the
+  // Products text can't be parsed (e.g. legacy Shopify orders).
+  const ordersSheet = getOrdersSheet();
+  const allOrders = sheetToObjects(ordersSheet);
+  let totalItems = 0;
+  qcRows.forEach(qcRow => {
+    const allIds = [
+      ...String(qcRow['TikTok Order IDs']  || '').split(' + '),
+      ...String(qcRow['Shopify Order IDs'] || '').split(' + '),
+      ...String(qcRow['Manual Order IDs']  || '').split(' + '),
+    ].filter(Boolean);
+    allIds.forEach(id => {
+      const order = allOrders.find(o => o['Order ID'] === id);
+      if (!order || !order['Products']) { totalItems += 1; return; }
+      const lines = String(order['Products']).split(/[\n;]+/).map(l => l.trim()).filter(Boolean);
+      if (lines.length === 0) { totalItems += 1; return; }
+      lines.forEach(line => {
+        const m = line.match(/^(\d+)\s*x\s*/i);
+        totalItems += m ? parseInt(m[1], 10) : 1;
+      });
+    });
+  });
+
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const set = (col, val) => {
+    const idx = h.indexOf(col) + 1;
+    if (idx > 0) sheet.getRange(row, idx).setValue(val);
+  };
+  set('End Time', nowISO());
+  set('Status', 'Finalizada');
+  set('Participants', packers.join(', '));
+  set('Total Packages', totalPackages);
+  set('Total Items', totalItems);
+
+  return jsonResponse({
+    result: 'ended',
+    session_id: body.session_id,
+    participants: packers,
+    total_packages: totalPackages,
+    total_items: totalItems,
+  });
 }
