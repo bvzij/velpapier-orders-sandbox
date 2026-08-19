@@ -73,7 +73,7 @@ async function syncToSheet() {
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
       username:      selected.username,
-      packer:        document.getElementById('packer-select').value,
+      packer:        currentPacker(),
       content_urls:  gallery.content.map(p => p.url),
       box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
@@ -88,8 +88,57 @@ async function syncToSheet() {
 
 // ── Init ─────────────────────────────────────────────────────────────────
 
-document.getElementById('packer-select').value = localStorage.getItem('vp_packer') || 'Mariana';
-document.getElementById('packer-select').onchange = e => localStorage.setItem('vp_packer', e.target.value);
+// Known packer names (persisted, editable via the modal's "+" field)
+let knownPackers = JSON.parse(localStorage.getItem('vp_known_packers') || '["Vel","Bob","Mariana","Mau"]');
+// Which of them are actively packing right now (persisted per device)
+let checkedPackers = JSON.parse(localStorage.getItem('vp_checked_packers') || '[]');
+
+function saveKnownPackers() { localStorage.setItem('vp_known_packers', JSON.stringify(knownPackers)); }
+function saveCheckedPackers() { localStorage.setItem('vp_checked_packers', JSON.stringify(checkedPackers)); }
+
+function currentPacker() {
+  // Used for the single "Packer" column on each QC row — first checked name, or blank
+  return checkedPackers[0] || '';
+}
+
+function updatePackersBtnLabel() {
+  const label = document.getElementById('packers-btn-label');
+  label.textContent = checkedPackers.length ? 'Empacando: ' + checkedPackers.join(', ') : 'Empacando: —';
+}
+updatePackersBtnLabel();
+
+function openPackersModal() {
+  renderPackersChecklist();
+  document.getElementById('packers-modal').style.display = 'flex';
+}
+function closePackersModal() {
+  document.getElementById('packers-modal').style.display = 'none';
+  updatePackersBtnLabel();
+}
+function renderPackersChecklist() {
+  const box = document.getElementById('packers-checklist');
+  box.innerHTML = knownPackers.map(name => `
+    <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer">
+      <input type="checkbox" value="${escapeAttr(name)}" ${checkedPackers.includes(name) ? 'checked' : ''} onchange="togglePacker('${escapeAttr(name)}')">
+      ${escapeHtml(name)}
+    </label>
+  `).join('');
+}
+function togglePacker(name) {
+  const idx = checkedPackers.indexOf(name);
+  if (idx >= 0) checkedPackers.splice(idx, 1);
+  else checkedPackers.push(name);
+  saveCheckedPackers();
+}
+function addManualPacker() {
+  const input = document.getElementById('packer-manual-input');
+  const name = input.value.trim();
+  if (!name) return;
+  if (!knownPackers.includes(name)) { knownPackers.push(name); saveKnownPackers(); }
+  if (!checkedPackers.includes(name)) { checkedPackers.push(name); saveCheckedPackers(); }
+  input.value = '';
+  renderPackersChecklist();
+}
 
 (async function init() {
   await ensureAuth();
@@ -149,16 +198,12 @@ async function handleStartSession() {
 
 async function handleEndSession() {
   if (!activeSession) return;
-  const who = prompt(
-    '¿Quiénes participaron en esta sesión?\n(separa con comas — se suman a los empacadores detectados automáticamente)',
-    document.getElementById('packer-select').value
-  );
-  if (who === null) return;  // cancelled
+  if (!confirm('¿Finalizar la sesión de empaque actual?')) return;
   try {
     const res = await apiPost({
       action: 'end_session',
       session_id: activeSession['Session ID'],
-      participants: who.split(',').map(s => s.trim()).filter(Boolean),
+      participants: checkedPackers,
     });
     if (res.error) throw new Error(res.error);
     showSessionSummary(res);
@@ -517,7 +562,7 @@ async function submitQC() {
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
       username:      selected.username,
-      packer:        document.getElementById('packer-select').value,
+      packer:        currentPacker(),
       content_urls:  gallery.content.map(p => p.url),
       box_urls:      gallery.box.map(p => p.url),
       notes:         document.getElementById('qc-notes').value.trim(),
