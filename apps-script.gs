@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-18.5';
+const SCRIPT_VERSION = '2026-08-19.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -203,6 +203,7 @@ function doPost(e) {
     if (action === 'save_qc') return saveQC(body);
     if (action === 'start_session') return startSession(body);
     if (action === 'end_session') return endSession(body);
+    if (action === 'update_session_participants') return updateSessionParticipants(body);
 
     return jsonResponse({ error: 'Unknown action' });
 
@@ -852,10 +853,11 @@ function saveQC(body) {
     row = findRowByColumn(qcSheet, 'A', qcId);
     if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
   } else {
-    const existing = sheetToObjects(qcSheet).find(r => r['Tracking ID'] === body.tracking_id);
-    if (existing) {
-      qcId = existing['QC ID'];
-      row = existing._rowIndex;
+    const existingRow = findRowByColumn(qcSheet, h.indexOf('Tracking ID') >= 0
+      ? String.fromCharCode(65 + h.indexOf('Tracking ID')) : 'B', body.tracking_id);
+    if (existingRow) {
+      row = existingRow;
+      qcId = qcSheet.getRange(existingRow, h.indexOf('QC ID') + 1).getValue();
     } else {
       qcId = generateQCID(qcSheet);
       const blank = new Array(h.length).fill('');
@@ -989,11 +991,14 @@ function generateQCID(sheet) {
 
 // Generic single-column exact-match finder, reused for QC dedup.
 function findRowByColumn(sheet, colLetter, value) {
-  const f = sheet.getRange(colLetter + ':' + colLetter)
-                 .createTextFinder(String(value))
-                 .matchEntireCell(true)
-                 .findNext();
-  return f ? f.getRow() : null;
+  const colIdx = colLetter.charCodeAt(0) - 64; // 'A' -> 1
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const vals = sheet.getRange(2, colIdx, lastRow - 1, 1).getValues();
+  for (let i = 0; i < vals.length; i++) {
+    if (String(vals[i][0]) === String(value)) return i + 2;
+  }
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1052,6 +1057,23 @@ function startSession(body) {
 
 // End the active session: stamps End Time, computes Participants /
 // Total Packages / Total Items from every linked QC row, flips to Finalizada.
+// Live-update the Participants column while a session is running, so every
+// device shows the same checked-packer list instead of each device having
+// its own local copy that only gets "decided" by whichever device ends it.
+function updateSessionParticipants(body) {
+  if (!body.session_id) return jsonResponse({ error: 'session_id es obligatorio' });
+  const sheet = getSessionsSheet();
+  const row = findRowByColumn(sheet, 'A', body.session_id);
+  if (!row) return jsonResponse({ error: 'Sesión no encontrada' });
+
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = h.indexOf('Participants') + 1;
+  if (idx > 0) {
+    sheet.getRange(row, idx).setValue((body.participants || []).join(', '));
+  }
+  return jsonResponse({ result: 'updated' });
+}
+
 function endSession(body) {
   if (!body.session_id) return jsonResponse({ error: 'session_id es obligatorio' });
 
@@ -1097,8 +1119,14 @@ function endSession(body) {
   };
 
   // Merge auto-detected packers with any manually-added participants
+  // Merge auto-detected packers with the live Participants field (kept in
+  // sync by every device via update_session_participants as checkboxes are
+  // toggled — this is the one true list, not just whichever device happens
+  // to click "end session").
+  const liveParticipants = String(rowVals[h.indexOf('Participants')] || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
   const manualParticipants = (body.participants || []).filter(Boolean);
-  const allParticipants = [...new Set([...packers, ...manualParticipants])];
+  const allParticipants = [...new Set([...packers, ...liveParticipants, ...manualParticipants])];
 
   set('End Time', nowISO());
   set('Status', 'Finalizada');
