@@ -60,7 +60,7 @@ let syncSeq = 0;
 
 async function syncToSheet() {
   if (!selected) return;
-  if (gallery.content.length === 0 && gallery.box.length === 0) return;
+  if (!currentQcId && gallery.content.length === 0 && gallery.box.length === 0) return;
   const mySeq = ++syncSeq;
   try {
     const allOrders = [...selected.order_ids, ...selectedAddons];
