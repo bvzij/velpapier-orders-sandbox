@@ -220,14 +220,15 @@ async function pushParticipants() {
 // that was missing before (previously only the list view polled).
 let pollingCapture = false;
 async function pollCaptureUpdates() {
-  if (!selected || !selected.tracking_id || !currentQcId || pollingCapture) return;
+  if (!selected || !selected.tracking_id || pollingCapture) return;
   pollingCapture = true;
   try {
     const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(selected.tracking_id)}`);
     const row = (data.records || [])[0];
     if (!row) { pollingCapture = false; return; }
+    if (!currentQcId && row['QC ID']) currentQcId = row['QC ID'];
 
-    if (row['Status'] === 'Enviado' && !shippedLockShown) {
+    if (row['Status'] === 'Enviado' && !shippedLockShown && !localFinalizeInProgress) {
       shippedLockShown = true;
       showToast('⚠ Este pedido ya fue enviado desde otro dispositivo', true);
     }
@@ -257,6 +258,7 @@ async function pollCaptureUpdates() {
   pollingCapture = false;
 }
 let shippedLockShown = false;
+let localFinalizeInProgress = false;
 
 // Checks whether a session is currently active and shows the right view:
 // gate (no session) vs. pending list + live banner (session running).
@@ -548,6 +550,7 @@ async function backToPending() {
   document.getElementById('view-pending').style.display = 'block';
   selected = null;
   currentQcId = null;
+  localFinalizeInProgress = false;
   await refreshQcBadges();
   window.scrollTo(0, pendingScrollY);
 }
@@ -556,9 +559,17 @@ async function refreshQcBadges() {
   try {
     const [qcData, sessionData] = await Promise.all([
       apiGet('action=qc'),
-      activeSession ? apiGet('action=active_session') : Promise.resolve({ session: activeSession }),
+      apiGet('action=active_session'),
     ]);
     allQcRows = qcData.records || [];
+
+    // Session ended on another device — route this one back to the gate too.
+    if (activeSession && !sessionData.session) {
+      activeSession = null;
+      await checkSessionAndRoute();
+      return;
+    }
+
     if (sessionData.session) {
       activeSession = sessionData.session;
       const liveParticipants = String(activeSession['Participants'] || '')
@@ -712,6 +723,7 @@ async function submitQC() {
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
   if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
   if (uploadsInFlight > 0) { showToast('Espera a que terminen de subir las fotos', true); return; }
+  localFinalizeInProgress = true;  // suppress "shipped elsewhere" false-positive from our own poll tick
 
   btn.disabled = true;
   btn.textContent = 'Guardando…';
@@ -736,6 +748,7 @@ async function submitQC() {
 
     if (res.error === 'already_shipped') {
       showToast('Este pedido ya fue enviado desde otro dispositivo', true);
+      localFinalizeInProgress = false;
       btn.disabled = false;
       btn.textContent = 'Enviar';
       return;
@@ -747,6 +760,7 @@ async function submitQC() {
 
   } catch (e) {
     showToast('Error: ' + e.message, true);
+    localFinalizeInProgress = false;
     btn.disabled = false;
     btn.textContent = 'Enviar';
   }
