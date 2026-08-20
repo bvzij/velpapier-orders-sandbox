@@ -532,20 +532,7 @@ async function toggleHistorySession(i, targetId) {
       : rows.map((row, ri) => {
           const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
             .filter(c => row[c]).length;
-          const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
-          const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
-          const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
-          const orderIds = [
-            ...tikTokIds.map(id => ({ id, channel: 'TikTok' })),
-            ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
-            ...manualIds.map(id => ({ id, channel: 'Manual' })),
-          ];
-          return `<div style="font-size:12px;padding:8px 0;border-top:0.5px solid var(--border);cursor:pointer" onclick='event.stopPropagation(); openCapture(${JSON.stringify({
-            tracking_id: row['Tracking ID'] || '',
-            order_ids: orderIds,
-            customer_id: row['Customer ID'] || '',
-            username: row['Primary Username'] || '',
-          }).replace(/'/g, "&apos;")})'>
+          return `<div style="font-size:12px;padding:8px 0;border-top:0.5px solid var(--border);cursor:pointer" onclick='event.stopPropagation(); openHistoryOrder(${JSON.stringify(row).replace(/'/g, "&apos;")})'>
             <strong>${escapeHtml(row['Primary Username'] || '—')}</strong> · ${escapeHtml(row['Tracking ID'] || '')} · ${photoCount} foto${photoCount !== 1 ? 's' : ''}
           </div>`;
         }).join('');
@@ -675,6 +662,38 @@ function toggleEditShipped() {
   applyShippedLock(true);
 }
 
+// Opens an order from Historial, which may be viewed with no active session
+// and therefore no populated allQcRows/allActiveOrders. Builds the shipment
+// object directly from the QC row data already fetched for the history
+// detail view, and makes sure every other view (including the session gate)
+// is hidden first.
+function openHistoryOrder(row) {
+  // So openCapture's own lookup (which reads allQcRows) finds this row too,
+  // even if the list was never loaded this session.
+  if (!allQcRows.find(r => r['QC ID'] === row['QC ID'])) {
+    allQcRows = [...allQcRows, row];
+  }
+
+  const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
+  const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
+  const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
+  const orderIds = [
+    ...tikTokIds.map(id => ({ id, channel: 'TikTok' })),
+    ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
+    ...manualIds.map(id => ({ id, channel: 'Manual' })),
+  ];
+
+  document.getElementById('view-session-gate').style.display = 'none';
+  document.getElementById('view-pending').style.display = 'none';
+
+  openCapture({
+    tracking_id: row['Tracking ID'] || '',
+    order_ids: orderIds,
+    customer_id: row['Customer ID'] || '',
+    username: row['Primary Username'] || '',
+  });
+}
+
 function openCapture(shipment) {
   pendingScrollY = window.scrollY;
   selected = shipment;
@@ -735,12 +754,22 @@ function openCapture(shipment) {
 
 async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
-  document.getElementById('view-pending').style.display = 'block';
   selected = null;
   currentQcId = null;
   localFinalizeInProgress = false;
-  await refreshQcBadges();
-  window.scrollTo(0, pendingScrollY);
+
+  if (activeSession) {
+    document.getElementById('view-pending').style.display = 'block';
+    await refreshQcBadges();
+    window.scrollTo(0, pendingScrollY);
+  } else {
+    // Came from Historial with no active session — go back to the gate,
+    // not the (empty, session-only) pending list.
+    document.getElementById('view-session-gate').style.display = 'block';
+    historySessions = null;  // force a fresh fetch in case anything changed
+    renderHistoryList('history-list-gate');
+    window.scrollTo(0, pendingScrollY);
+  }
 }
 
 async function refreshQcBadges() {
