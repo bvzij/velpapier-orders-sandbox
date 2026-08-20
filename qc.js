@@ -482,6 +482,7 @@ function renderPackedList() {
 }
 
 let historySessions = null;  // cached after first load this page-session
+let historySessionsFinished = [];  // filtered+indexed list actually shown/clicked in the UI
 
 async function renderHistoryList() {
   const list = document.getElementById('history-list');
@@ -492,6 +493,7 @@ async function renderHistoryList() {
       historySessions = data.records || [];
     }
     const finished = historySessions.filter(s => s['Status'] === 'Finalizada');
+    historySessionsFinished = finished;  // toggleHistorySession indexes into THIS array, not the raw one
     if (finished.length === 0) {
       list.innerHTML = '<div class="empty-state">Sin sesiones anteriores</div>';
       return;
@@ -519,7 +521,7 @@ async function toggleHistorySession(i) {
 
   detail.innerHTML = '<div style="font-size:12px;color:var(--text-faint)">Cargando…</div>';
   try {
-    const sessionId = historySessions[i]['Session ID'];
+    const sessionId = historySessionsFinished[i]['Session ID'];
     const data = await apiGet(`action=qc&session_id=${encodeURIComponent(sessionId)}`);
     const rows = (data.records || []).filter(r => r['Status'] === 'Enviado');
     detail.innerHTML = rows.length === 0
@@ -656,6 +658,7 @@ function applyShippedLock(isShipped) {
       area.classList.remove('locked');
       submitBtn.style.display = 'block';
       submitBtn.textContent = 'Guardar cambios';
+      submitBtn.disabled = false;  // was hidden (display:none) while locked, so its old disabled state is stale
     }
   } else {
     banner.style.display = 'none';
@@ -818,7 +821,6 @@ function toggleAddon(orderId, channel) {
 
 function renderGallery(group) {
   const galEl = document.getElementById(`gallery-${group}`);
-  const btnEl = document.getElementById(`add-btn-${group}`);
 
   galEl.innerHTML = gallery[group].map((p, i) => `
     <div class="photo-thumb">
@@ -829,11 +831,12 @@ function renderGallery(group) {
     </div>
   `).join('');
 
-  if (gallery[group].length >= MAX_PHOTOS) {
-    btnEl.classList.add('limit-reached');
-  } else {
-    btnEl.classList.remove('limit-reached');
-  }
+  const atLimit = gallery[group].length >= MAX_PHOTOS;
+  [`add-btn-${group}`, `add-btn-${group}-gallery`].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('limit-reached', atLimit);
+  });
 }
 
 async function deletePhoto(group, index) {
@@ -859,8 +862,8 @@ async function deletePhoto(group, index) {
   }
 }
 
-function bindAddButton(group) {
-  const btn = document.getElementById(`add-btn-${group}`);
+function bindAddButton(group, btnId) {
+  const btn = document.getElementById(btnId);
   const input = btn.querySelector('input');
   input.onchange = async () => {
     const f = input.files[0];
@@ -894,10 +897,13 @@ function bindAddButton(group) {
       showToast('Error al subir foto, intenta de nuevo', true);
     }
     uploadsInFlight--;
-    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || gallery.content.length === 0;
+    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
   };
 }
-['content', 'box'].forEach(bindAddButton);
+bindAddButton('content', 'add-btn-content');
+bindAddButton('content', 'add-btn-content-gallery');
+bindAddButton('box', 'add-btn-box');
+bindAddButton('box', 'add-btn-box-gallery');
 
 function renderUploadingPlaceholder(group, idx) {
   const galEl = document.getElementById(`gallery-${group}`);
