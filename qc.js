@@ -301,6 +301,7 @@ async function checkSessionAndRoute() {
     await loadPending();
   } else {
     document.getElementById('view-session-gate').style.display = 'block';
+    renderHistoryList('history-list-gate');
   }
 }
 
@@ -484,8 +485,9 @@ function renderPackedList() {
 let historySessions = null;  // cached after first load this page-session
 let historySessionsFinished = [];  // filtered+indexed list actually shown/clicked in the UI
 
-async function renderHistoryList() {
-  const list = document.getElementById('history-list');
+async function renderHistoryList(targetId) {
+  targetId = targetId || 'history-list-tab';
+  const list = document.getElementById(targetId);
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
   try {
     if (!historySessions) {
@@ -499,13 +501,13 @@ async function renderHistoryList() {
       return;
     }
     list.innerHTML = finished.map((s, i) => `
-      <div class="pending-card" onclick="toggleHistorySession(${i})" id="history-session-${i}">
+      <div class="pending-card" onclick="toggleHistorySession(${i}, '${targetId}')" id="history-session-${targetId}-${i}">
         <div class="pending-card-top">
           <span class="pending-username">${escapeHtml(s['Session ID'])}</span>
           <span class="pending-count">${escapeHtml(String(s['Total Packages'] || 0))} paq. (al finalizar)</span>
         </div>
         <div class="pending-tracking">${escapeHtml(s['Participants'] || '—')}</div>
-        <div id="history-session-detail-${i}" style="display:none;margin-top:10px"></div>
+        <div id="history-session-detail-${targetId}-${i}" style="display:none;margin-top:10px"></div>
       </div>
     `).join('');
   } catch (e) {
@@ -513,8 +515,9 @@ async function renderHistoryList() {
   }
 }
 
-async function toggleHistorySession(i) {
-  const detail = document.getElementById(`history-session-detail-${i}`);
+async function toggleHistorySession(i, targetId) {
+  targetId = targetId || 'history-list-tab';
+  const detail = document.getElementById(`history-session-detail-${targetId}-${i}`);
   const isOpen = detail.style.display !== 'none';
   detail.style.display = isOpen ? 'none' : 'block';
   if (isOpen || detail.dataset.loaded) return;
