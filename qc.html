@@ -284,21 +284,33 @@
         <div class="photo-group">
           <div class="photo-group-title required">Contenido</div>
           <div class="photo-gallery" id="gallery-content"></div>
-          <button class="add-photo-btn" id="add-btn-content">
-            <input type="file" accept="image/*">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            Agregar foto
-          </button>
+          <div style="display:flex;gap:8px">
+            <button class="add-photo-btn" id="add-btn-content-gallery" style="flex:0 0 44px;padding:0">
+              <input type="file" accept="image/*">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            </button>
+            <button class="add-photo-btn" id="add-btn-content" style="flex:1">
+              <input type="file" accept="image/*" capture="environment">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              Agregar foto
+            </button>
+          </div>
         </div>
 
         <div class="photo-group">
           <div class="photo-group-title">Caja cerrada</div>
           <div class="photo-gallery" id="gallery-box"></div>
-          <button class="add-photo-btn" id="add-btn-box">
-            <input type="file" accept="image/*">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            Agregar foto
-          </button>
+          <div style="display:flex;gap:8px">
+            <button class="add-photo-btn" id="add-btn-box-gallery" style="flex:0 0 44px;padding:0">
+              <input type="file" accept="image/*">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+            </button>
+            <button class="add-photo-btn" id="add-btn-box" style="flex:1">
+              <input type="file" accept="image/*" capture="environment">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              Agregar foto
+            </button>
+          </div>
         </div>
 
         <textarea class="qc-notes" id="qc-notes" placeholder="Notas (opcional)"></textarea>
