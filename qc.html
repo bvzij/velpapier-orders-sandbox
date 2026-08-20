@@ -217,10 +217,12 @@
 
     <!-- Session gate: shown when no session is active -->
     <div id="view-session-gate" style="display:none">
-      <div style="text-align:center;padding:3rem 1rem">
+      <div style="text-align:center;padding:2rem 1rem 1rem">
         <div style="font-size:15px;color:var(--text-muted);margin-bottom:1.5rem">No hay ninguna sesión de empaque activa</div>
-        <button class="qc-submit" id="start-session-btn" style="max-width:280px;margin:0 auto" onclick="handleStartSession()">Iniciar / unirse a sesión</button>
+        <button class="qc-submit" id="start-session-btn" style="max-width:280px;margin:0 auto 1.5rem" onclick="handleStartSession()">Iniciar / unirse a sesión</button>
       </div>
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:8px">Historial de sesiones</div>
+      <div id="history-list-gate"></div>
     </div>
 
     <!-- Live session banner: shown above the list while a session is active -->
@@ -253,7 +255,7 @@
       </div>
 
       <div id="tab-history" style="display:none">
-        <div id="history-list"></div>
+        <div id="history-list-tab"></div>
       </div>
     </div>
 
