@@ -223,6 +223,29 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .top-client-row:last-child { border-bottom: none; }
 .top-client-name { font-weight: 500; }
 .top-client-val { color: var(--text-muted); font-size: 12px; }
+
+/* QC History tab */
+.qc-history-card {
+  display: flex; gap: 12px; align-items: flex-start;
+  background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-lg);
+  padding: 12px; margin-bottom: 8px;
+}
+.qc-history-thumbs { display: flex; gap: 6px; flex-shrink: 0; }
+.qc-history-thumbs img {
+  width: 56px; height: 56px; object-fit: cover; border-radius: var(--radius-sm);
+  cursor: pointer; border: 0.5px solid var(--border);
+}
+.qc-history-more {
+  width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+  background: var(--surface2); border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; color: var(--text-muted);
+}
+.qc-history-nophoto {
+  width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
+  background: var(--surface2); border-radius: var(--radius-sm); font-size: 10px; color: var(--text-faint); text-align: center; padding: 4px;
+}
+.qc-history-info { flex: 1; min-width: 0; }
+.qc-history-username { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+.qc-history-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
 .top-client-amount { font-weight: 600; }
 .pending-breakdown { display: flex; flex-direction: column; gap: 8px; }
 .breakdown-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
