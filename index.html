@@ -58,6 +58,7 @@
         <option value="tiktok-ready">Aptos para envío primero</option>
       </select>
       <a href="import.html" class="refresh-btn" style="text-decoration:none">↑ Importar TikTok</a>
+      <a href="qc.html" class="refresh-btn" style="text-decoration:none">📦 Control de calidad</a>
       <button class="refresh-btn" id="undo-btn" onclick="performUndo()" disabled title="Deshacer último cambio de estado">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M3 13a9 9 0 1 0 3-7"></path></svg>
       </button>
@@ -159,6 +160,7 @@
         <button class="tab" data-tab="archivo" onclick="switchTab('archivo')">Archivo <span class="tab-badge" id="badge-archivo">0</span></button>
         <button class="tab" data-tab="tiktok" onclick="switchTab('tiktok')">TikTok <span class="tab-badge" id="badge-tiktok" style="background:#fff0f0;color:#c0392b">0</span></button>
         <button class="tab" data-tab="analytics" onclick="switchTab('analytics')">Análisis <span class="tab-badge" id="badge-analytics" style="background:var(--purple-bg);color:var(--purple-text)">↗</span></button>
+        <button class="tab" data-tab="qc" onclick="switchTab('qc')">Control de calidad</button>
       </div>
 
       <div id="tab-activos"><div class="section-label">Todos los pedidos activos</div><div id="activos-list"></div></div>
@@ -213,6 +215,23 @@
         <div class="analytics-card">
           <div class="analytics-card-title">Top clientes (por valor total)</div>
           <div id="an-top-clients"></div>
+        </div>
+      </div>
+
+      <div id="tab-qc" style="display:none">
+        <div class="section-label">Control de calidad · Historial de envíos empacados</div>
+        <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+          <div class="search-wrap" style="flex:1;min-width:200px">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input class="search-input" type="text" id="qc-search-input" placeholder="Buscar por usuario o tracking..." oninput="renderQCHistory()" autocomplete="off" />
+          </div>
+          <select class="sort-select" id="qc-session-filter" onchange="renderQCHistory()">
+            <option value="">Todas las sesiones</option>
+          </select>
+        </div>
+        <div id="qc-history-list"></div>
+        <div style="text-align:center;margin-top:16px">
+          <button class="refresh-btn" id="qc-load-more-btn" onclick="loadMoreQCHistory()" style="display:none">Cargar más</button>
         </div>
       </div>
     </div>
