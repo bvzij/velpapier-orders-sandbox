@@ -141,7 +141,7 @@ let allRecords = [];
 let activeRecords = [];
 let enviadoRecords = [];
 let archivedRecords = [];
-let tabDataLoaded = { enviado: false, archivo: false };
+let tabDataLoaded = { enviado: false, archivo: false, qc: false };
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let currentTab = 'activos';
 let currentSort = 'newest';
@@ -628,6 +628,112 @@ async function loadArchivoTab() {
     if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadArchivoTab();return false">Reintentar</a></div>';
     showToast('Error al cargar archivo');
   }
+}
+
+// ── QC History tab ──────────────────────────────────────────────────
+
+let allQCRows = [];
+let qcHistoryVisibleCount = 50;
+const QC_HISTORY_PAGE_SIZE = 50;
+
+async function loadQCTab() {
+  const list = document.getElementById('qc-history-list');
+  if (list) list.innerHTML = '<div class="empty-state">Cargando historial de control de calidad...</div>';
+  try {
+    const [qcData, sessionsData] = await Promise.all([
+      apiGet('action=qc'),
+      apiGet('action=sessions'),
+    ]);
+    allQCRows = (qcData.records || []).filter(r => r['Status'] === 'Enviado');
+    // Most recent first
+    allQCRows.sort((a, b) => String(b['Timestamp'] || '').localeCompare(String(a['Timestamp'] || '')));
+
+    const sessionSelect = document.getElementById('qc-session-filter');
+    const sessions = (sessionsData.records || [])
+      .filter(s => s['Status'] === 'Finalizada')
+      .sort((a, b) => String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
+    sessionSelect.innerHTML = '<option value="">Todas las sesiones</option>' +
+      sessions.map(s => `<option value="${escapeHtml(s['Session ID'])}">${escapeHtml(s['Session ID'])} (${escapeHtml(String(s['Total Packages'] || 0))} paq.)</option>`).join('');
+
+    tabDataLoaded.qc = true;
+    qcHistoryVisibleCount = QC_HISTORY_PAGE_SIZE;
+    renderQCHistory();
+  } catch (e) {
+    if (list) list.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadQCTab();return false">Reintentar</a></div>';
+    showToast('Error al cargar el historial de control de calidad');
+  }
+}
+
+function renderQCHistory() {
+  const list = document.getElementById('qc-history-list');
+  const loadMoreBtn = document.getElementById('qc-load-more-btn');
+  if (!list) return;
+
+  const query = (document.getElementById('qc-search-input').value || '').trim().toLowerCase();
+  const sessionFilter = document.getElementById('qc-session-filter').value;
+
+  let rows = allQCRows;
+  if (sessionFilter) rows = rows.filter(r => r['Session ID'] === sessionFilter);
+  if (query) {
+    rows = rows.filter(r =>
+      (r['Primary Username'] || '').toLowerCase().includes(query) ||
+      (r['Tracking ID'] || '').toLowerCase().includes(query)
+    );
+  }
+
+  if (rows.length === 0) {
+    list.innerHTML = `<div class="empty-state">${query || sessionFilter ? 'Sin resultados' : 'Sin envíos registrados todavía'}</div>`;
+    loadMoreBtn.style.display = 'none';
+    return;
+  }
+
+  const visible = rows.slice(0, qcHistoryVisibleCount);
+  list.innerHTML = visible.map(row => {
+    const photoCols = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5'];
+    const photos = photoCols.map(c => row[c]).filter(Boolean);
+    const orderIdCols = ['TikTok Order IDs', 'Shopify Order IDs', 'Manual Order IDs'];
+    const orderCount = orderIdCols.reduce((sum, c) => sum + String(row[c] || '').split(' + ').filter(Boolean).length, 0);
+    const when = formatQCTimestamp(row['Timestamp']);
+
+    return `
+      <div class="qc-history-card">
+        <div class="qc-history-thumbs">
+          ${photos.slice(0, 4).map(url => `<img src="${url}" loading="lazy" onclick="openQCLightbox('${url.replace(/'/g, "\\'")}')">`).join('')}
+          ${photos.length > 4 ? `<div class="qc-history-more">+${photos.length - 4}</div>` : ''}
+          ${photos.length === 0 ? '<div class="qc-history-nophoto">Sin fotos</div>' : ''}
+        </div>
+        <div class="qc-history-info">
+          <div class="qc-history-username">${escapeHtml(row['Primary Username'] || '—')}</div>
+          <div class="qc-history-meta">${escapeHtml(row['Tracking ID'] || '')} · ${orderCount} pedido${orderCount !== 1 ? 's' : ''} · ${escapeHtml(row['Packer'] || '—')}</div>
+          <div class="qc-history-meta" style="color:var(--text-faint)">${when} ${row['Session ID'] ? '· ' + escapeHtml(row['Session ID']) : ''}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  loadMoreBtn.style.display = rows.length > qcHistoryVisibleCount ? 'inline-block' : 'none';
+}
+
+function loadMoreQCHistory() {
+  qcHistoryVisibleCount += QC_HISTORY_PAGE_SIZE;
+  renderQCHistory();
+}
+
+function formatQCTimestamp(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function openQCLightbox(url) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:900;display:flex;align-items:center;justify-content:center;padding:20px;cursor:pointer';
+  overlay.innerHTML = `<img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px">`;
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  overlay.onclick = close;
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
 }
 
 async function updateStatus(id, status) {
@@ -1162,11 +1268,12 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'analytics'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'analytics', 'qc'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
   else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
+  else if (tab === 'qc' && !tabDataLoaded.qc) loadQCTab();
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
