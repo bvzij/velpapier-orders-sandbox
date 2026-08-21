@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-20.1';
+const SCRIPT_VERSION = '2026-08-20.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -645,12 +645,11 @@ function importTikTokOrders(body) {
   const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
 
   const trackingSet = {};
-  const shipCountMap = {};
+  const shipCountMap = {};  // Customer ID -> count of ALL their TikTok orders ever (status-agnostic)
   allOrderData.forEach(r => {
     if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
     const cid = String(r[iCustO] || '');
-    if (cid && (r[iChanO] === 'TikTok' || r[iChanO] === 'Shopify') &&
-        (r[iStatO] === 'Enviado' || r[iStatO] === 'Archivado')) {
+    if (cid && r[iChanO] === 'TikTok') {
       shipCountMap[cid] = (shipCountMap[cid] || 0) + 1;
     }
   });
@@ -676,6 +675,7 @@ function importTikTokOrders(body) {
 
   const rows = [], results = [], unresolved = [];
   let customersDirty = false;
+  const touchedCustomerCounts = {};  // Customer ID -> new total TikTok count, for the Customers sheet write
 
   (body.shipments || []).forEach(s => {
     const tid = String(s.tracking_id || '');
@@ -692,7 +692,9 @@ function importTikTokOrders(body) {
     let shipCount  = 0;
 
     if (customerID) {
-      shipCount = shipCountMap[customerID] || 0;
+      shipCountMap[customerID] = (shipCountMap[customerID] || 0) + 1;  // this new order counts too
+      shipCount = shipCountMap[customerID];
+      touchedCustomerCounts[customerID] = shipCount;
       const idx = custRowMap[customerID];
       if (idx !== undefined) {
         const addr = s.address || {};
@@ -734,6 +736,18 @@ function importTikTokOrders(body) {
   // ─── Write orders in ONE batch ────────────────────────────────────
   if (rows.length)
     orders.getRange(orders.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+
+  // ─── Write updated Shipment Counts (TikTok orders per customer) ───
+  const cCountCol = ch.indexOf('Shipment Count');
+  if (cCountCol >= 0) {
+    Object.keys(touchedCustomerCounts).forEach(cid => {
+      const idx = custRowMap[cid];
+      if (idx !== undefined) {
+        custData[idx][cCountCol] = touchedCustomerCounts[cid];
+        customersDirty = true;
+      }
+    });
+  }
 
   // ─── Write modified customers back in ONE batch ───────────────────
   if (customersDirty && custData.length > 0) {
@@ -976,7 +990,6 @@ function saveQC(body) {
     const iLink   = oh.indexOf('Linked Shipment');
     const iChan   = oh.indexOf('Channel');
     const iStat   = oh.indexOf('Status');
-    const iCust   = oh.indexOf('Customer ID');
 
     const oLastRow = orders.getLastRow();
     const oData = oLastRow > 1 ? orders.getRange(2, 1, oLastRow - 1, oLastCol).getValues() : [];
@@ -984,7 +997,6 @@ function saveQC(body) {
     oData.forEach((r, i) => { idToRowIdx[String(r[0])] = i; });  // col A = Order ID
 
     const shipResults = [];
-    const touchedCustomers = new Set();
 
     allOrderIds.forEach(id => {
       const idx = idToRowIdx[String(id)];
@@ -997,7 +1009,6 @@ function saveQC(body) {
         const shippedIdx = oh.indexOf('Shipped Date');
         if (shippedIdx >= 0) r[shippedIdx] = nowISO();
       }
-      if (iCust >= 0 && r[iCust]) touchedCustomers.add(r[iCust]);
       shipResults.push({ order_id: id, result: 'shipped' });
     });
 
@@ -1006,37 +1017,10 @@ function saveQC(body) {
       orders.getRange(2, 1, oData.length, oLastCol).setValues(oData);
     }
 
-    // Recompute shipment counts for only the customers actually affected,
-    // using the in-memory order data we already have (no re-read).
-    if (touchedCustomers.size > 0 && iCust >= 0 && iChan >= 0 && iStat >= 0) {
-      const counts = {};
-      oData.forEach(r => {
-        const cid = r[iCust];
-        if (!cid || !touchedCustomers.has(cid)) return;
-        if (r[iChan] !== 'TikTok' && r[iChan] !== 'Shopify') return;
-        if (r[iStat] === 'Enviado' || r[iStat] === 'Archivado') {
-          counts[cid] = (counts[cid] || 0) + 1;
-        }
-      });
-
-      const customersSheet = getCustomersSheet();
-      const cLastCol = customersSheet.getLastColumn();
-      const ch = customersSheet.getRange(1, 1, 1, cLastCol).getValues()[0];
-      const cIdIdx = ch.indexOf('Customer ID');
-      const cCountIdx = ch.indexOf('Shipment Count');
-      if (cIdIdx >= 0 && cCountIdx >= 0) {
-        const cLastRow = customersSheet.getLastRow();
-        const cData = cLastRow > 1 ? customersSheet.getRange(2, 1, cLastRow - 1, cLastCol).getValues() : [];
-        let dirty = false;
-        cData.forEach(r => {
-          if (touchedCustomers.has(r[cIdIdx])) {
-            r[cCountIdx] = counts[r[cIdIdx]] || 0;
-            dirty = true;
-          }
-        });
-        if (dirty) customersSheet.getRange(2, 1, cData.length, cLastCol).setValues(cData);
-      }
-    }
+    // Shipment Count is no longer touched here — it's set once at TikTok
+    // import time (see importTikTokOrders) based on cancellation being rare
+    // enough (~1-in-4000) that "imported" is treated as "will ship."
+    // This keeps the Enviar save fast: no per-shipment recalculation.
 
     result.result = 'created';
     result.orders = shipResults;
