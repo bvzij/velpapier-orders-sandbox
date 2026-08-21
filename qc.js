@@ -215,7 +215,33 @@ async function pushParticipants() {
       pollCaptureUpdates();
     }
   }, 4000);
+
+  // Sessions change far less often than photos/orders, so a slower, separate
+  // poll for the "no active session" gate is enough — catches a session
+  // someone else started/finished elsewhere without needing a manual refresh.
+  setInterval(() => {
+    if (activeSession) return;
+    if (document.getElementById('view-session-gate').style.display === 'none') return;
+    refreshGateState();
+  }, 60000);
 })();
+
+// Re-check whether a session has appeared (another device started one) and
+// silently refresh the history list so newly-finalized sessions show up.
+async function refreshGateState() {
+  try {
+    const data = await apiGet('action=active_session');
+    if (data.session) {
+      activeSession = data.session;
+      await checkSessionAndRoute();
+      return;
+    }
+    historySessions = null;
+    renderHistoryList('history-list-gate');
+  } catch (e) {
+    console.warn('[refreshGateState] failed:', e);
+  }
+}
 
 // While inside an order, quietly check the server for photos another device
 // may have added/removed, and merge them in — this is the real-time sync
@@ -914,22 +940,26 @@ function bindAddButton(group, btnId) {
       const uploaded = await uploadPhoto(f, 'velpapier/qc');
       gallery[group][placeholderIdx] = { url: uploaded.url };
       renderGallery(group);
-      const res = await pushAddPhoto(group, uploaded.url);
-      if (res && res.blocked) {
-        // Reaching here means the lock didn't prevent the click (edge case,
-        // e.g. race with a poll). Auto-unlock edit mode and keep the photo
-        // the user just took — no extra popup, the checkbox is confirmation enough.
-        document.getElementById('edit-shipped-checkbox').checked = true;
-        toggleEditShipped();
-      }
+      uploadsInFlight--;
+      document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+
+      // Sync to the sheet in the background — the thumbnail and the submit
+      // button are already usable at this point, they don't need to wait
+      // for this slower, secondary round-trip to Apps Script.
+      pushAddPhoto(group, uploaded.url).then(res => {
+        if (res && res.blocked) {
+          document.getElementById('edit-shipped-checkbox').checked = true;
+          toggleEditShipped();
+        }
+      });
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
       gallery[group].splice(placeholderIdx, 1);
       renderGallery(group);
       showToast('Error al subir foto, intenta de nuevo', true);
+      uploadsInFlight--;
+      document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
     }
-    uploadsInFlight--;
-    document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
   };
 }
 bindAddButton('content', 'add-btn-content');
