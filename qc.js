@@ -518,7 +518,8 @@ async function renderHistoryList(targetId) {
   try {
     if (!historySessions) {
       const data = await apiGet('action=sessions');
-      historySessions = data.records || [];
+      historySessions = (data.records || []).slice()
+        .sort((a, b) => String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
     }
     const finished = historySessions.filter(s => s['Status'] === 'Finalizada');
     historySessionsFinished = finished;  // toggleHistorySession indexes into THIS array, not the raw one
