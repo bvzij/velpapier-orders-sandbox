@@ -1107,6 +1107,7 @@ function renderGrouped(records, containerId, showActions) {
 }
 
 function renderAnalytics() {
+  if (!document.getElementById('an-shipped-revenue')) return;  // moved to analytics.html
   const shipped = allRecords.filter(r => isShipped(r.Status));
   const paid = allRecords.filter(r => r.Status === 'Pagado');
   const unpaid = allRecords.filter(r => r.Status === 'No Pagado');
@@ -1268,12 +1269,13 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'analytics', 'qc'].forEach(t => {
-    document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok'].forEach(t => {
+    const node = document.getElementById(`tab-${t}`);
+    if (!node) return;
+    node.style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
   else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
-  else if (tab === 'qc' && !tabDataLoaded.qc) loadQCTab();
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
