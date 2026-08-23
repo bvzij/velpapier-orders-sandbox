@@ -6,7 +6,7 @@
   <title>Vel Papier · QC</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
   <style>
     body { padding-bottom: env(safe-area-inset-bottom); }
@@ -176,7 +176,7 @@
 <script>
 (function() {
   const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
-  const key = 'vp_qc_auth';
+  const key = 'vp_auth';
   if (localStorage.getItem(key) === correctHash) {
     window.__qcAuthPromise = Promise.resolve();
   } else {
@@ -198,7 +198,7 @@
 
   <header class="qc-header">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-      <div class="qc-title">Vel Papier <span>· Control de calidad</span></div>
+      <div class="qc-title">Empacar <span>· control de calidad</span></div>
       <button id="header-end-session-btn" onclick="handleEndSession()" style="display:none;background:none;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:7px 10px;font-size:11px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer;white-space:nowrap;flex-shrink:0">Finalizar</button>
     </div>
     <div class="packer-row" style="gap:8px">
@@ -339,6 +339,8 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="common.js"></script>
+<script>VP.mountNav('empacar');</script>
 <script src="uploader.js"></script>
 <script src="qc.js"></script>
 </body>
