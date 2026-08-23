@@ -4,7 +4,7 @@ const API         = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3
 const N8N_URL     = 'https://n8n.srv1040167.hstgr.cloud/webhook/tiktok-import';
 const VP_TOKEN    = '0924';  // X-VP-Token header for N8N
 
-let API_TOKEN = '';
+let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 // Files selected by user
 let csvFile = null;
@@ -19,10 +19,22 @@ let activeMatchIdx  = null; // which match card is being resolved
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-// Auth is owned by common.js (single prompt, shared 'vp_token' storage key).
 async function ensureAuth() {
-  await VP.ensureToken();
-  API_TOKEN = VP.token;
+  for (;;) {
+    if (API_TOKEN) {
+      try {
+        const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(API_TOKEN)}`);
+        if ((await r.json()).ok) return;
+      } catch (e) { /* fall through */ }
+    }
+    const input = prompt('Contraseña:');
+    if (input === null) {
+      document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+      throw new Error('unauthenticated');
+    }
+    API_TOKEN = input.trim();
+    localStorage.setItem('vp_token', API_TOKEN);
+  }
 }
 
 
