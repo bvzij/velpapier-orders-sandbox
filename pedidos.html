@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Pedidos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<script>
+  (function() {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const key = 'vp_auth';
+
+  if (localStorage.getItem(key) === correctHash) return;
+
+  const input = prompt('Contraseña requerida:');
+  if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; return; }
+
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash === correctHash) {
+      localStorage.setItem(key, correctHash);
+      location.reload();
+    } else {
+      document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+    }
+  });
+})();
+</script>
+
+<div class="app-layout">
+
+  <header class="app-header">
+    <div class="app-logo">Pedidos <span>· ciclo completo</span></div>
+    <div class="header-right">
+      <div class="search-wrap">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input class="search-input" type="text" id="global-search" placeholder="Buscar cliente..." autocomplete="off"
+          oninput="handleSearchInput()" onblur="hideSearchAutocomplete()" />
+        <button class="search-clear-btn" id="search-clear-btn" onclick="clearSearch()" style="display:none" title="Limpiar búsqueda">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+        <div class="autocomplete-list" id="search-autocomplete-list" style="display:none"></div>
+      </div>
+      <select class="sort-select" onchange="setSort(this.value)">
+        <option value="default">Orden: por defecto</option>
+        <option value="az">Nombre: A → Z</option>
+        <option value="za">Nombre: Z → A</option>
+        <option value="most">Mayor deuda primero</option>
+        <option value="least">Menor deuda primero</option>
+        <option value="newest" selected>Más reciente primero</option>
+        <option value="oldest">Más antiguo primero</option>
+        <option value="tiktok-ready">Aptos para envío primero</option>
+      </select>
+      <button class="refresh-btn" id="undo-btn" onclick="performUndo()" disabled title="Deshacer último cambio de estado">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"></path><path d="M3 13a9 9 0 1 0 3-7"></path></svg>
+      </button>
+      <button class="refresh-btn" id="redo-btn" onclick="performRedo()" disabled title="Rehacer último cambio de estado">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M21 13a9 9 0 1 1-3-7"></path></svg>
+      </button>
+      <button class="refresh-btn" onclick="manualRefresh()">
+        <svg id="refresh-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+        Actualizar
+      </button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="client-list-card">
+  <div class="card-title">Clientes activos</div>
+  <div class="client-list-scroll" id="client-list-scroll"></div>
+</div>
+    <div class="new-order-card">
+      <div class="card-title">Nuevo pedido</div>
+      <div class="form-group" style="position:relative">
+        <label>Usuario TikTok</label>
+        <input type="text" id="new-cliente" placeholder="@usuario" autocomplete="off"
+          oninput="handleClienteInput()" onblur="hideAutocomplete()" />
+        <div class="autocomplete-list" id="autocomplete-list" style="display:none"></div>
+      </div>
+      <div class="form-group">
+        <label>Canal</label>
+        <select id="new-channel">
+          <option value="Manual" selected>Manual</option>
+          <option value="TikTok">TikTok</option>
+          <option value="Shopify">Shopify</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Estado</label>
+        <select id="new-status">
+          <option value="No Pagado" selected>No Pagado</option>
+          <option value="Pagado">Pagado</option>
+        </select>
+      </div>
+      <div id="bulk-items-container"></div>
+      <button class="btn add-bulk-btn" onclick="addBulkItem()">+ Agregar otro producto</button>
+      <div class="form-group" style="margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="gift-checkbox" onchange="renderGiftToggle()" style="width:auto" />
+          <span>Es un regalo</span>
+        </label>
+      </div>
+      <div id="gift-recipient-section" style="display:none;margin-bottom:8px">
+        <div class="form-group" style="position:relative">
+          <label>Destinatario (recipient)</label>
+          <input type="text" id="gift-recipient" placeholder="Usuario del destinatario..." autocomplete="off" oninput="handleGiftRecipientInput()" onblur="setTimeout(()=>{document.getElementById('gift-autocomplete-list').style.display='none'},150)" />
+          <div class="autocomplete-list" id="gift-autocomplete-list" style="display:none"></div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary btn-block" onclick="createRecord()">Guardar pedido</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Por cobrar</div>
+        <div class="stat-value danger" id="stat-unpaid-amount">—</div>
+        <div class="stat-sub" id="stat-unpaid-count">— items</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Pagado, sin enviar</div>
+        <div class="stat-value warn" id="stat-paid-pending">—</div>
+        <div class="stat-sub" id="stat-paid-count">— items</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Alertas activas</div>
+        <div class="stat-value danger" id="stat-alerts">—</div>
+        <div class="stat-sub">+3d sin pagar / +7d sin enviar</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total en sistema</div>
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-sub">No pagado + pagado</div>
+      </div>
+    </div>
+
+    <div id="search-panel" style="display:none">
+      <div class="section-label">Resultados de búsqueda</div>
+      <div id="search-results"></div>
+    </div>
+
+    <div id="main-panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="activos" onclick="switchTab('activos')">Activos <span class="tab-badge" id="badge-activos">0</span></button>
+        <button class="tab" data-tab="cobrar" onclick="switchTab('cobrar')">Por cobrar <span class="tab-badge" id="badge-cobrar">0</span></button>
+        <button class="tab" data-tab="enviar" onclick="switchTab('enviar')">Por enviar <span class="tab-badge" id="badge-enviar">0</span></button>
+        <button class="tab" data-tab="enviado" onclick="switchTab('enviado')">Enviado <span class="tab-badge" id="badge-enviado">0</span></button>
+        <button class="tab" data-tab="archivo" onclick="switchTab('archivo')">Archivo <span class="tab-badge" id="badge-archivo">0</span></button>
+        <button class="tab" data-tab="tiktok" onclick="switchTab('tiktok')">TikTok <span class="tab-badge" id="badge-tiktok" style="background:#fff0f0;color:#c0392b">0</span></button>
+      </div>
+
+      <div id="tab-activos"><div class="section-label">Todos los pedidos activos</div><div id="activos-list"></div></div>
+      <div id="tab-cobrar" style="display:none"><div class="section-label">Sin pagar · alerta después de 3 días</div><div id="cobrar-list"></div></div>
+      <div id="tab-enviar" style="display:none"><div class="section-label">Pagado · sin enviar · alerta después de 7 días</div><div id="enviar-list"></div></div>
+      <div id="tab-enviado" style="display:none"><div class="section-label">Enviados · pendientes de archivar</div><div id="enviado-list"></div></div>
+      <div id="tab-archivo" style="display:none"><div class="section-label">Archivados</div><div id="archivo-list"></div></div>
+
+      <div id="tab-tiktok" style="display:none"><div class="section-label">Órdenes TikTok · Pendientes de envío</div><div id="tiktok-list"></div></div>
+
+    </div>
+
+  </main>
+</div>
+
+<div id="modal-container"></div>
+<div class="toast" id="toast"></div>
+<script src="common.js"></script>
+<script>VP.mountNav('pedidos');</script>
+<script src="app.js"></script>
+</body>
+</html>
