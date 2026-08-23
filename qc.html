@@ -173,6 +173,27 @@
 </head>
 <body>
 
+<script>
+(function() {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const key = 'vp_auth';
+  if (localStorage.getItem(key) === correctHash) {
+    window.__qcAuthPromise = Promise.resolve();
+  } else {
+    const input = prompt('Contraseña:');
+    if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; throw new Error('no auth'); }
+    window.__qcAuthPromise = crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+      const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+      if (hash !== correctHash) {
+        document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+        throw new Error('bad password');
+      }
+      localStorage.setItem(key, correctHash);
+    });
+  }
+})();
+</script>
+
 <div class="qc-layout">
 
   <header class="qc-header">
