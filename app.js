@@ -5,21 +5,8 @@ const HIDE_TIKTOK_FROM_MAIN_TABS = true; // set to true when TikTok tab is fully
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 async function ensureAuth() {
-  for (;;) {
-    if (API_TOKEN) {
-      try {
-        const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(API_TOKEN)}`);
-        if ((await r.json()).ok) return;
-      } catch (e) { /* fall through to prompt */ }
-    }
-    const input = prompt('Contraseña:');
-    if (input === null) {
-      document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
-      throw new Error('unauthenticated');
-    }
-    API_TOKEN = input.trim();
-    localStorage.setItem('vp_token', API_TOKEN);
-  }
+  await VP.ensureToken();
+  API_TOKEN = VP.token;
 }
 
 // Maps internal field names (used throughout the UI) to the new Orders sheet column names.
