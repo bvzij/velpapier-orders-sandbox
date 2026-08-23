@@ -1,6 +1,6 @@
 /* ============================================================================
    analytics.js — the whole picture, computed client-side from four sheets.
-   Everything is attributed by Created Date unless a block says otherwise,
+   All is attributed by Created Date unless a block says otherwise,
    so "September revenue" means orders placed in September.
    ==========================================================================*/
 
