@@ -11,6 +11,21 @@
 </head>
 <body>
 
+<script>
+(function () {
+  const correctHash = 'a7dd571718347974f850dc66f8a8f7bbb64bc1ffd8c5350e479b318b6a9c35ec';
+  const key = 'vp_auth';
+  if (localStorage.getItem(key) === correctHash) return;
+  const input = prompt('Contraseña requerida:');
+  if (!input) { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; return; }
+  crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)).then(buf => {
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (hash === correctHash) { localStorage.setItem(key, correctHash); location.reload(); }
+    else { document.documentElement.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>'; }
+  });
+})();
+</script>
+
 <main class="vp-shell">
 
   <section class="vp-hero">
