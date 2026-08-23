@@ -20,22 +20,8 @@ const gallery = { content: [], box: [] };
 // ── Auth ─────────────────────────────────────────────────────────────────
 
 async function ensureAuth() {
-  await window.__qcAuthPromise;
-  for (;;) {
-    if (API_TOKEN) {
-      try {
-        const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(API_TOKEN)}`);
-        if ((await r.json()).ok) return;
-      } catch (e) { /* fall through */ }
-    }
-    const input = prompt('Token de API:');
-    if (input === null) {
-      document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
-      throw new Error('unauthenticated');
-    }
-    API_TOKEN = input.trim();
-    localStorage.setItem('vp_token', API_TOKEN);
-  }
+  await VP.ensureToken();
+  API_TOKEN = VP.token;
 }
 
 async function apiGet(query) {
