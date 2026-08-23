@@ -7,7 +7,6 @@
 window.VP = (function () {
 
   const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
-  const AUTH_KEY  = 'vp_auth';
   const TOKEN_KEY = 'vp_token';
 
   let token = localStorage.getItem(TOKEN_KEY) || '';
