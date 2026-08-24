@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-20.2';
+const SCRIPT_VERSION = '2026-08-23.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -629,7 +629,12 @@ function authOk(t) {
   return !!want && t === want;
 }
 
-// ─── TikTok bulk import (optimized: reads/writes each sheet once) ──────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// REPLACE the entire existing importTikTokOrders() function with this one.
+// Find it by searching for:  function importTikTokOrders(body) {
+// and replace all the way down to its closing brace (the one right before
+// the "// ─── Bulk customer creation" comment that follows it).
+// ═══════════════════════════════════════════════════════════════════════════
 
 function importTikTokOrders(body) {
   const orders = getOrdersSheet();
@@ -672,6 +677,27 @@ function importTikTokOrders(body) {
 
   const custRowMap = {};
   custData.forEach((r, i) => { custRowMap[String(r[cCol.id])] = i; });
+
+  // ─── Resolve ALL line items across ALL shipments in ONE catalog pass ──
+  // (only for shipments that aren't duplicates — but we don't know that yet
+  // at this point without a second trackingSet lookup, so we resolve for
+  // all incoming shipments; resolving a few extra SKUs for a duplicate
+  // shipment that gets skipped below is harmless and still cheap.)
+  const allLineItems = [];
+  (body.shipments || []).forEach(s => {
+    (s.line_items || []).forEach(li => allLineItems.push(li));
+  });
+  const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
+
+  // ─── Locate the 30 product slot column pairs ──────────────────────
+  const PRODUCT_SLOTS = 30;
+  const slotCols = [];
+  for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+    slotCols.push({
+      catalogCol: oh.indexOf('Product ' + n + ' Catalog ID'),
+      qtyCol: oh.indexOf('Product ' + n + ' Qty'),
+    });
+  }
 
   const rows = [], results = [], unresolved = [];
   let customersDirty = false;
@@ -724,12 +750,31 @@ function importTikTokOrders(body) {
       unresolved.push(s.username);
     }
 
-    rows.push([
-      (s.order_ids || []).join(' + ') || generateUUID(),
-      tid, customerID, primary, 'TikTok', 'Pagado',
-      s.products || '', Number(s.price) || 0,
-      '', '', nowISO(), '', '', '', tid
-    ]);
+    // ─── Build the base row exactly as before ───────────────────────
+    const row = new Array(oh.length).fill('');
+    row[oh.indexOf('Order ID')] = (s.order_ids || []).join(' + ') || generateUUID();
+    row[oh.indexOf('Tracking ID')] = tid;
+    row[oh.indexOf('Customer ID')] = customerID;
+    row[oh.indexOf('Primary Username')] = primary;
+    row[oh.indexOf('Channel')] = 'TikTok';
+    row[oh.indexOf('Status')] = 'Pagado';
+    row[oh.indexOf('Products')] = s.products || '';
+    row[oh.indexOf('Price')] = Number(s.price) || 0;
+    row[oh.indexOf('Created Date')] = nowISO();
+    row[oh.indexOf('Linked Shipment')] = tid;
+
+    // ─── Populate the 30 product slots from resolved line items ─────
+    const lineItems = s.line_items || [];
+    for (let i = 0; i < lineItems.length && i < PRODUCT_SLOTS; i++) {
+      const li = lineItems[i];
+      const skuId = String(li.sku_id || '').trim();
+      const catalogId = skuToCatalogId[skuId] || '';
+      const slot = slotCols[i];
+      if (slot.catalogCol >= 0) row[slot.catalogCol] = catalogId;
+      if (slot.qtyCol >= 0) row[slot.qtyCol] = Number(li.qty) || 0;
+    }
+
+    rows.push(row);
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
   });
 
@@ -1231,4 +1276,250 @@ function endSession(body) {
     total_items: totalItems,
     start_time: rowVals[h.indexOf('Start Time')],
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRODUCT CATALOG — accessors + resolution logic
+// ADD THIS ENTIRE BLOCK ANYWHERE IN apps-script.gs (e.g. right after the
+// existing getQCSheet() function, near the other sheet accessors).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PRODUCT_CATALOG_SHEET_ID = '1XZY9Azw-YizHC6D3l54IMCMKIAFT9qqcVkg4FGf2vSA';
+
+function getProductParentsSheet() {
+  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Parents');
+}
+
+function getProductVariantsSheet() {
+  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Variants');
+}
+
+function getCatalogSuggestionsSheet() {
+  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Catalog Suggestions');
+}
+
+function generateParentID(existingParents) {
+  let maxNum = 0;
+  existingParents.forEach(p => {
+    const id = String(p.parentId || '');
+    if (id.startsWith('PARENT-')) {
+      const n = parseInt(id.replace('PARENT-', ''), 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  });
+  return 'PARENT-' + String(maxNum + 1).padStart(3, '0');
+}
+
+function generateCatalogID(existingVariants) {
+  let maxNum = 0;
+  existingVariants.forEach(v => {
+    const id = String(v.catalogId || '');
+    if (id.startsWith('VAR-')) {
+      const n = parseInt(id.replace('VAR-', ''), 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  });
+  return 'VAR-' + String(maxNum + 1).padStart(3, '0');
+}
+
+// Simple string similarity (0-1) using normalized Levenshtein distance.
+// Used only for the fuzzy Parent-name fallback (Step 3 of resolution).
+function stringSimilarity(a, b) {
+  a = (a || '').toLowerCase().trim();
+  b = (b || '').toLowerCase().trim();
+  if (a === b) return 1;
+  if (!a.length || !b.length) return 0;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  const distance = matrix[b.length][a.length];
+  const maxLen = Math.max(a.length, b.length);
+  return 1 - (distance / maxLen);
+}
+
+const FUZZY_PARENT_THRESHOLD = 0.82; // tune if too many/few suggestions appear
+
+// ─── Main resolution entry point ────────────────────────────────────────────
+// Takes the raw line_items array from one shipment (as sent by the
+// tiktok-import service) and returns an array of { catalogId, qty } pairs,
+// creating new Parent/Variant rows and logging fuzzy suggestions as needed.
+//
+// Call this ONCE per import batch (not per shipment) for performance —
+// pass ALL line items from ALL shipments in the batch, get back a map.
+function resolveLineItemsBatch(allLineItems) {
+  const parentsSheet = getProductParentsSheet();
+  const variantsSheet = getProductVariantsSheet();
+  const suggestionsSheet = getCatalogSuggestionsSheet();
+
+  // ─── Load existing catalog data ONCE ──────────────────────────────
+  const pData = parentsSheet.getDataRange().getValues();
+  const pHeaders = pData[0] || ['Parent ID', 'Parent Name', 'Created Date'];
+  const iPId = pHeaders.indexOf('Parent ID');
+  const iPName = pHeaders.indexOf('Parent Name');
+
+  const parents = pData.slice(1).map((r, i) => ({
+    rowIndex: i + 2,
+    parentId: r[iPId],
+    parentName: r[iPName],
+  }));
+
+  const vData = variantsSheet.getDataRange().getValues();
+  const vHeaders = vData[0] || ['Catalog ID', 'Parent ID', 'Variant Name', 'Your SKU', 'TikTok SKU IDs', 'Notes', 'Created Date'];
+  const iVId = vHeaders.indexOf('Catalog ID');
+  const iVParent = vHeaders.indexOf('Parent ID');
+  const iVName = vHeaders.indexOf('Variant Name');
+  const iVSkus = vHeaders.indexOf('TikTok SKU IDs');
+
+  const variants = vData.slice(1).map((r, i) => ({
+    rowIndex: i + 2,
+    catalogId: r[iVId],
+    parentId: r[iVParent],
+    variantName: r[iVName],
+    tiktokSkuIds: String(r[iVSkus] || '').split(',').map(s => s.trim()).filter(Boolean),
+  }));
+
+  const sData = suggestionsSheet.getDataRange().getValues();
+  const sHeaders = sData[0] || ['New Parent Name Suggested', 'Suggested Parent ID', 'Similarity Score', 'Decision', 'Decided Date'];
+  const iSName = sHeaders.indexOf('New Parent Name Suggested');
+  const iSParent = sHeaders.indexOf('Suggested Parent ID');
+  const iSDecision = sHeaders.indexOf('Decision');
+
+  const rejectedPairs = new Set();
+  sData.slice(1).forEach(r => {
+    if (r[iSDecision] === 'Rejected') {
+      rejectedPairs.add(r[iSName] + '||' + r[iSParent]);
+    }
+  });
+
+  // Fast lookup maps
+  const skuToVariant = {};       // TikTok SKU ID -> variant object
+  variants.forEach(v => {
+    v.tiktokSkuIds.forEach(sku => { skuToVariant[sku] = v; });
+  });
+
+  const nameVarToVariant = {};   // "ParentName||VariantName" -> variant object
+  variants.forEach(v => {
+    const parent = parents.find(p => p.parentId === v.parentId);
+    if (parent) {
+      nameVarToVariant[parent.parentName + '||' + v.variantName] = v;
+    }
+  });
+
+  const newParentRows = [];
+  const newVariantRows = [];
+  const newSuggestionRows = [];
+  const skuAdditions = {}; // variant.rowIndex -> [newSkuIds to append]
+
+  const resultMap = {}; // sku_id -> catalogId (for every line item across the batch)
+
+  allLineItems.forEach(item => {
+    const skuId = String(item.sku_id || '').trim();
+    const productName = String(item.product || '').trim();
+    const variationName = String(item.variation || '').trim();
+    if (!skuId || !productName) return;
+    if (resultMap[skuId]) return; // already resolved earlier in this same batch
+
+    // ─── Step 1: SKU ID already known ─────────────────────────────
+    if (skuToVariant[skuId]) {
+      resultMap[skuId] = skuToVariant[skuId].catalogId;
+      return;
+    }
+
+    // ─── Step 2: Name + Variation exact match ─────────────────────
+    const nameVarKey = productName + '||' + variationName;
+    if (nameVarToVariant[nameVarKey]) {
+      const v = nameVarToVariant[nameVarKey];
+      resultMap[skuId] = v.catalogId;
+      skuToVariant[skuId] = v; // so later items in this batch also hit Step 1
+      if (!skuAdditions[v.rowIndex]) skuAdditions[v.rowIndex] = [];
+      skuAdditions[v.rowIndex].push(skuId);
+      return;
+    }
+
+    // ─── Step 3: fuzzy-match Product Name against existing Parents ─
+    let bestParent = null;
+    let bestScore = 0;
+    parents.forEach(p => {
+      const score = stringSimilarity(productName, p.parentName);
+      if (score > bestScore) { bestScore = score; bestParent = p; }
+    });
+
+    let parentId;
+    if (bestParent && bestScore >= FUZZY_PARENT_THRESHOLD) {
+      const pairKey = productName + '||' + bestParent.parentId;
+      if (!rejectedPairs.has(pairKey)) {
+        parentId = bestParent.parentId;
+        newSuggestionRows.push([
+          productName, bestParent.parentId, bestScore.toFixed(2), 'Pending', ''
+        ]);
+      }
+    }
+
+    // ─── Step 4: no match at all -> brand new Parent ───────────────
+    if (!parentId) {
+      parentId = generateParentID(parents);
+      const newParent = { rowIndex: null, parentId: parentId, parentName: productName };
+      parents.push(newParent);
+      newParentRows.push([parentId, productName, nowISO()]);
+    }
+
+    // Create the new Variant under the resolved Parent
+    const catalogId = generateCatalogID(variants);
+    const newVariant = {
+      rowIndex: null,
+      catalogId: catalogId,
+      parentId: parentId,
+      variantName: variationName,
+      tiktokSkuIds: [skuId],
+    };
+    variants.push(newVariant);
+    newVariantRows.push([catalogId, parentId, variationName, '', skuId, '', nowISO()]);
+
+    resultMap[skuId] = catalogId;
+    skuToVariant[skuId] = newVariant;
+    nameVarToVariant[nameVarKey] = newVariant;
+  });
+
+  // ─── Write everything back in batches ─────────────────────────────
+  if (newParentRows.length) {
+    parentsSheet.getRange(parentsSheet.getLastRow() + 1, 1, newParentRows.length, newParentRows[0].length)
+      .setValues(newParentRows);
+  }
+  if (newVariantRows.length) {
+    variantsSheet.getRange(variantsSheet.getLastRow() + 1, 1, newVariantRows.length, newVariantRows[0].length)
+      .setValues(newVariantRows);
+  }
+  if (newSuggestionRows.length) {
+    suggestionsSheet.getRange(suggestionsSheet.getLastRow() + 1, 1, newSuggestionRows.length, newSuggestionRows[0].length)
+      .setValues(newSuggestionRows);
+  }
+
+  // Append new SKU IDs to existing variants (Step 2 matches, i.e. relists)
+  const skuRowIndexes = Object.keys(skuAdditions);
+  if (skuRowIndexes.length) {
+    skuRowIndexes.forEach(rowIndexStr => {
+      const rowIndex = parseInt(rowIndexStr, 10);
+      const currentVal = variantsSheet.getRange(rowIndex, iVSkus + 1).getValue();
+      const currentList = String(currentVal || '').split(',').map(s => s.trim()).filter(Boolean);
+      const merged = currentList.concat(skuAdditions[rowIndexStr]);
+      variantsSheet.getRange(rowIndex, iVSkus + 1).setValue(merged.join(', '));
+    });
+  }
+
+  return resultMap; // { sku_id: catalogId, ... }
 }
