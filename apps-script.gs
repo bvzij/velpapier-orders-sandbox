@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-23.1';
+const SCRIPT_VERSION = '2026-08-27.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -12,8 +12,12 @@ function getOrdersSheet() {
   return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheets()[0];
 }
 
+function getShopifyMatchesSheet() {
+  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Shopify Customer Matches');
+}
+
 function getCustomersSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheets()[0];
+  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Customers');
 }
 
 function getQCSheet() {
@@ -637,6 +641,7 @@ function authOk(t) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function importTikTokOrders(body) {
+  Logger.log('DEBUG shipments[0]: ' + JSON.stringify((body.shipments || [])[0]));
   const orders = getOrdersSheet();
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
@@ -1460,7 +1465,10 @@ function resolveLineItemsBatch(allLineItems) {
     });
 
     let parentId;
-    if (bestParent && bestScore >= FUZZY_PARENT_THRESHOLD) {
+    if (bestParent && bestScore === 1) {
+      // Exact name match (case/whitespace-normalized) — certain, no suggestion needed.
+      parentId = bestParent.parentId;
+    } else if (bestParent && bestScore >= FUZZY_PARENT_THRESHOLD) {
       const pairKey = productName + '||' + bestParent.parentId;
       if (!rejectedPairs.has(pairKey)) {
         parentId = bestParent.parentId;
