@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-28.1';
+const SCRIPT_VERSION = '2026-08-28.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1736,16 +1736,7 @@ function importShopifyOrder(body) {
     const shopifyOrderId = String(body.shopify_order_id || '');
     const orderName = body.order_name || '';
 
-    if (shopifyOrderId.includes('FORCEBUSY') && !(body._retryCount > 0)) {
-      return jsonResponse({
-        result: 'error',
-        error: 'busy_try_again',
-        message: 'FORCED busy response for testing (first attempt only).',
-        _retryCount: body._retryCount || 0,
-      });
-    }
-
-    const ordersSheet = getOrdersSheet();
+        const ordersSheet = getOrdersSheet();
     const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
 
     // ─── Dedup check: has this Shopify order already been imported? ───
