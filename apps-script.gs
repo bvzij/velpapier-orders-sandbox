@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-27.4';
+const SCRIPT_VERSION = '2026-08-27.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1717,136 +1717,132 @@ function logShopifyMatch(incoming, resolution, shopifyOrderId, orderName) {
   return row[0]; // return the Match ID
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SHOPIFY ORDER IMPORT — the actual endpoint N8N will POST to.
-// ADD THIS BLOCK anywhere in apps-script.gs, after the resolution block
-// (03_ADD_shopify_resolution.gs) since it calls functions defined there.
-//
-// ALSO: add this one line inside doPost()'s action dispatcher, alongside
-// the other "if (action === ...)" lines:
-//     if (action === 'import_shopify_order') return importShopifyOrder(body);
-// ═══════════════════════════════════════════════════════════════════════════
-
 function importShopifyOrder(body) {
-  const ordersSheet = getOrdersSheet();
-  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
-
-  const shopifyOrderId = String(body.shopify_order_id || '');
-  const orderName = body.order_name || ''; // e.g. "#1346"
-
-  // ─── Dedup check: has this Shopify order already been imported? ───
-  const existing = sheetToObjects(ordersSheet);
-  const dup = existing.find(o => String(o['Shopify Order ID'] || '') === shopifyOrderId);
-  if (dup) {
+  const lock = LockService.getScriptLock();
+  const gotLock = lock.tryLock(30000); // wait up to 30s for exclusive access
+  if (!gotLock) {
+    // Another order is mid-write and we waited too long -- fail loudly rather
+    // than risk a silent corrupt write. N8N should retry on a non-2xx-ish
+    // error response, so tell the caller plainly that this needs a retry.
     return jsonResponse({
-      result: 'duplicate',
-      message: 'This Shopify Order ID has already been imported.',
-      existing_row: dup,
+      result: 'error',
+      error: 'busy_try_again',
+      message: 'Server was busy processing another order. Please retry.',
     });
   }
 
-  // ─── Build the "incoming" shape resolveShopifyCustomer() expects ──
-  const incoming = {
-    shopifyCustomerId: body.shopify_customer_id || '',
-    fullName:          body.full_name || '',
-    phone:             body.phone || '',
-    username:          body.username || '',   // from the 'company' field, optional
-    email:             body.email || '',
-    city:              body.city || '',
-    state:             body.state || '',
-    zip:               body.zip || '',
-  };
+  try {
+    const ordersSheet = getOrdersSheet();
+    const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
 
-  const resolution = resolveShopifyCustomer(incoming);
+    const shopifyOrderId = String(body.shopify_order_id || '');
+    const orderName = body.order_name || ''; // e.g. "#1346"
 
-  let customerID = '';
-  let matchId = '';
+    // ─── Dedup check: has this Shopify order already been imported? ───
+    const existing = sheetToObjects(ordersSheet);
+    const dup = existing.find(o => String(o['Shopify Order ID'] || '') === shopifyOrderId);
+    if (dup) {
+      return jsonResponse({
+        result: 'duplicate',
+        message: 'This Shopify Order ID has already been imported.',
+        existing_row: dup,
+      });
+    }
 
-  if (resolution.tier === 'auto') {
-    customerID = resolution.customerId;
+    // ─── Build the "incoming" shape resolveShopifyCustomer() expects ──
+    const incoming = {
+      shopifyCustomerId: body.shopify_customer_id || '',
+      fullName:          body.full_name || '',
+      phone:             body.phone || '',
+      username:          body.username || '',   // from the 'company' field, optional
+      email:             body.email || '',
+      city:              body.city || '',
+      state:             body.state || '',
+      zip:               body.zip || '',
+    };
 
-  } else if (resolution.tier === 'review') {
-    // Order still gets written below with a blank Customer ID -- fulfillment
-    // isn't blocked while Vel reviews. The match is logged so it survives
-    // reloads and shows up in the pending-review queue.
-    matchId = logShopifyMatch(incoming, resolution, shopifyOrderId, orderName);
+    const resolution = resolveShopifyCustomer(incoming);
 
-  } else if (resolution.tier === 'new') {
-    // No reasonable match at all -- create the customer immediately from
-    // Shopify's own (generally reliable) data, and store their Shopify
-    // Customer ID right away so this exact person is a Tier-1 auto-match
-    // on every future order.
-    const customersSheet = getCustomersSheet();
-    const nameParts = (incoming.fullName || '').split(' ');
-    const firstName = nameParts[0] || '';
-    const surname   = nameParts.slice(1).join(' ');
+    let customerID = '';
+    let matchId = '';
 
-    customerID = generateCustomerID(customersSheet);
-    customersSheet.appendRow([
-      customerID,                       // Customer ID
-      incoming.username || '',          // Primary Username
-      '',                                // Aliases
-      incoming.shopifyCustomerId || '', // Shopify Customer ID
-      firstName,                        // First Name
-      surname,                          // Surname
-      '',                                // Initials (TT Format)
-      '',                                // Street + Number
-      incoming.city || '',              // City
-      incoming.state || '',             // State
-      incoming.zip || '',               // ZIP
-      '',                                // Phone Partial
-      incoming.phone || '',             // Phone Full
-      incoming.email || '',             // Email
-      nowISO(),                          // First Order Date
-      0,                                 // Shipment Count
-      'Auto-created from Shopify order ' + orderName, // Notes
-      false,                             // Merge Flag
-    ]);
+    if (resolution.tier === 'auto') {
+      customerID = resolution.customerId;
+
+    } else if (resolution.tier === 'review') {
+      matchId = logShopifyMatch(incoming, resolution, shopifyOrderId, orderName);
+
+    } else if (resolution.tier === 'new') {
+      const customersSheet = getCustomersSheet();
+      const nameParts = (incoming.fullName || '').split(' ');
+      const firstName = nameParts[0] || '';
+      const surname   = nameParts.slice(1).join(' ');
+
+      customerID = generateCustomerID(customersSheet);
+      customersSheet.appendRow([
+        customerID,
+        incoming.username || '',
+        '',
+        incoming.shopifyCustomerId || '',
+        firstName,
+        surname,
+        '',
+        '',
+        incoming.city || '',
+        incoming.state || '',
+        incoming.zip || '',
+        '',
+        incoming.phone || '',
+        incoming.email || '',
+        nowISO(),
+        0,
+        'Auto-created from Shopify order ' + orderName,
+        false,
+      ]);
+    }
+
+    // ─── Write the Orders row (always, regardless of tier) ────────────
+    const row = new Array(oh.length).fill('');
+    row[oh.indexOf('Order ID')] = generateUUID();
+    row[oh.indexOf('Shopify Order ID')] = shopifyOrderId;
+    row[oh.indexOf('Customer ID')] = customerID;
+    row[oh.indexOf('Primary Username')] = (resolution.tier === 'auto') ? (incoming.username || '') : '';
+    row[oh.indexOf('Channel')] = 'Shopify';
+    row[oh.indexOf('Status')] = 'Pagado';
+    row[oh.indexOf('Products')] = body.products || '';
+    row[oh.indexOf('Price')] = Number(body.price) || 0;
+    row[oh.indexOf('Created Date')] = nowISO();
+
+    const PRODUCT_SLOTS = 30;
+    const lineItems = body.line_items || [];
+    const allLineItems = lineItems.map(li => ({
+      sku_id:    li.sku_id || li.variant_id || '',
+      product:   li.product || li.title || '',
+      variation: li.variation || li.variant_title || '',
+      qty:       li.qty || li.quantity || 1,
+    }));
+    const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
+
+    for (let i = 0; i < allLineItems.length && i < PRODUCT_SLOTS; i++) {
+      const li = allLineItems[i];
+      const catalogId = skuToCatalogId[String(li.sku_id)] || '';
+      const catalogCol = oh.indexOf('Product ' + (i + 1) + ' Catalog ID');
+      const qtyCol = oh.indexOf('Product ' + (i + 1) + ' Qty');
+      if (catalogCol >= 0) row[catalogCol] = catalogId;
+      if (qtyCol >= 0) row[qtyCol] = Number(li.qty) || 0;
+    }
+
+    ordersSheet.appendRow(row);
+
+    return jsonResponse({
+      result: 'imported',
+      order_id: row[oh.indexOf('Order ID')],
+      customer_id: customerID,
+      tier: resolution.tier,
+      match_id: matchId,
+    });
+
+  } finally {
+    lock.releaseLock();
   }
-
-  // ─── Write the Orders row (always, regardless of tier) ────────────
-  const row = new Array(oh.length).fill('');
-  row[oh.indexOf('Order ID')] = generateUUID();
-  row[oh.indexOf('Shopify Order ID')] = shopifyOrderId;
-  row[oh.indexOf('Customer ID')] = customerID;
-  // Only write the username directly if this is an auto-attached match (Tier 1).
-  // For 'review' and 'new' tiers, leave it blank on the order row itself --
-  // the raw incoming username is already preserved in Shopify Customer Matches
-  // for review, and for 'new' customers it gets stored on their Customer record.
-  row[oh.indexOf('Primary Username')] = (resolution.tier === 'auto') ? (incoming.username || '') : '';
-  row[oh.indexOf('Channel')] = 'Shopify';
-  row[oh.indexOf('Status')] = 'Pagado';
-  row[oh.indexOf('Products')] = body.products || '';
-  row[oh.indexOf('Price')] = Number(body.price) || 0;
-  row[oh.indexOf('Created Date')] = nowISO();
-
-  // Populate the 30 product slots, same pattern as importTikTokOrders.
-  const PRODUCT_SLOTS = 30;
-  const lineItems = body.line_items || [];
-  const allLineItems = lineItems.map(li => ({
-    sku_id:    li.sku_id || li.variant_id || '', // Shopify variant_id as fallback identifier
-    product:   li.product || li.title || '',
-    variation: li.variation || li.variant_title || '',
-    qty:       li.qty || li.quantity || 1,
-  }));
-  const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
-
-  for (let i = 0; i < allLineItems.length && i < PRODUCT_SLOTS; i++) {
-    const li = allLineItems[i];
-    const catalogId = skuToCatalogId[String(li.sku_id)] || '';
-    const catalogCol = oh.indexOf('Product ' + (i + 1) + ' Catalog ID');
-    const qtyCol = oh.indexOf('Product ' + (i + 1) + ' Qty');
-    if (catalogCol >= 0) row[catalogCol] = catalogId;
-    if (qtyCol >= 0) row[qtyCol] = Number(li.qty) || 0;
-  }
-
-  ordersSheet.appendRow(row);
-
-  return jsonResponse({
-    result: 'imported',
-    order_id: row[oh.indexOf('Order ID')],
-    customer_id: customerID,
-    tier: resolution.tier,
-    match_id: matchId,
-  });
 }
