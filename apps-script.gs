@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-27.3';
+const SCRIPT_VERSION = '2026-08-27.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1809,7 +1809,11 @@ function importShopifyOrder(body) {
   row[oh.indexOf('Order ID')] = generateUUID();
   row[oh.indexOf('Shopify Order ID')] = shopifyOrderId;
   row[oh.indexOf('Customer ID')] = customerID;
-  row[oh.indexOf('Primary Username')] = incoming.username || '';
+  // Only write the username directly if this is an auto-attached match (Tier 1).
+  // For 'review' and 'new' tiers, leave it blank on the order row itself --
+  // the raw incoming username is already preserved in Shopify Customer Matches
+  // for review, and for 'new' customers it gets stored on their Customer record.
+  row[oh.indexOf('Primary Username')] = (resolution.tier === 'auto') ? (incoming.username || '') : '';
   row[oh.indexOf('Channel')] = 'Shopify';
   row[oh.indexOf('Status')] = 'Pagado';
   row[oh.indexOf('Products')] = body.products || '';
