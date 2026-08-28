@@ -1531,3 +1531,186 @@ function resolveLineItemsBatch(allLineItems) {
 
   return resultMap; // { sku_id: catalogId, ... }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHOPIFY CUSTOMER RESOLUTION
+// ADD THIS ENTIRE BLOCK anywhere in apps-script.gs (e.g. right after
+// findCustomerByUsername(), since it's conceptually the Shopify sibling
+// of that TikTok resolution function).
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getShopifyMatchesSheet() {
+  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Shopify Customer Matches');
+}
+
+const SHOPIFY_SCORE_THRESHOLD = 30; // below this, treat as "no reasonable guess" -> straight to new_customer
+
+// Simple Levenshtein-based similarity, 0-1. Reused from the Product Catalog
+// fuzzy-matching (same function name/shape as stringSimilarity() there —
+// if that function already exists in this file, DELETE this duplicate
+// definition and just call the existing one instead.)
+function shopifyStringSimilarity(a, b) {
+  a = (a || '').toLowerCase().trim();
+  b = (b || '').toLowerCase().trim();
+  if (a === b) return 1;
+  if (!a.length || !b.length) return 0;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  const distance = matrix[b.length][a.length];
+  const maxLen = Math.max(a.length, b.length);
+  return 1 - (distance / maxLen);
+}
+
+function normalizePhone(phone) {
+  return String(phone || '').replace(/[^\d]/g, '');
+}
+
+// Compares a full Shopify phone against a customer's Phone Full or
+// redacted Phone Partial (e.g. "(+52)953*****58"). Returns 0-100.
+function phoneMatchScore(shopifyPhoneFull, customerPhoneFull, customerPhonePartial) {
+  const incoming = normalizePhone(shopifyPhoneFull);
+  if (!incoming) return 0;
+
+  const fullOnFile = normalizePhone(customerPhoneFull);
+  if (fullOnFile && fullOnFile === incoming) return 100;
+
+  const partial = String(customerPhonePartial || '');
+  const prefixM = partial.match(/(\d+)\*/);
+  const suffixM = partial.match(/\*(\d+)$/);
+  const prefix = prefixM ? prefixM[1] : '';
+  const suffix = suffixM ? suffixM[1] : '';
+
+  if (prefix && suffix && incoming.startsWith(prefix) && incoming.endsWith(suffix)) {
+    return 100; // both ends line up with the redacted number
+  }
+  if (suffix && incoming.endsWith(suffix)) return 50;
+  if (prefix && incoming.startsWith(prefix)) return 40;
+  return 0;
+}
+
+function scoreShopifyMatch(incoming, customer) {
+  let score = 0;
+
+  // Phone — 40%
+  const phoneScore = phoneMatchScore(
+    incoming.phone,
+    customer['Phone Full'],
+    customer['Phone Partial']
+  );
+  score += phoneScore * 0.40;
+
+  // Full name — 25%
+  const customerFullName = `${customer['First Name'] || ''} ${customer['Surname'] || ''}`.trim();
+  if (incoming.fullName && customerFullName) {
+    score += shopifyStringSimilarity(incoming.fullName, customerFullName) * 100 * 0.25;
+  }
+
+  // Username (optional, from the 'company' field) — 20%
+  // Skipped entirely if either side is blank -- a blank never counts as a match.
+  if (incoming.username) {
+    const candidates = [customer['Primary Username'] || ''].concat(
+      String(customer['Aliases'] || '').split(',').map(a => a.trim())
+    ).filter(Boolean);
+    let bestUsernameScore = 0;
+    candidates.forEach(cand => {
+      const s = shopifyStringSimilarity(normalizeUsername(incoming.username), normalizeUsername(cand));
+      if (s > bestUsernameScore) bestUsernameScore = s;
+    });
+    score += bestUsernameScore * 100 * 0.20;
+  }
+
+  // ZIP exact — flat 10
+  if (incoming.zip && customer['ZIP'] && String(incoming.zip) === String(customer['ZIP'])) {
+    score += 10;
+  }
+
+  // City fuzzy — 5%
+  if (incoming.city && customer['City']) {
+    score += shopifyStringSimilarity(incoming.city, customer['City']) * 100 * 0.05;
+  }
+
+  return Math.round(Math.min(score, 100));
+}
+
+// ─── Main entry point ────────────────────────────────────────────────────
+// incoming = {
+//   shopifyCustomerId, fullName, phone, username, email, city, state, zip
+// }
+// Returns: { tier: 'auto'|'review'|'new', customerId, matchRow }
+function resolveShopifyCustomer(incoming) {
+  const customersSheet = getCustomersSheet();
+  const customers = sheetToObjects(customersSheet);
+
+  // ─── Tier 1: Shopify Customer ID exact match ──────────────────────
+  if (incoming.shopifyCustomerId) {
+    const found = customers.find(c =>
+      String(c['Shopify Customer ID'] || '') === String(incoming.shopifyCustomerId)
+    );
+    if (found) {
+      return { tier: 'auto', customerId: found['Customer ID'] };
+    }
+  }
+
+  // ─── Tier 2: weighted scoring against all customers ───────────────
+  let bestScore = 0, bestCustomer = null;
+  customers.forEach(c => {
+    const s = scoreShopifyMatch(incoming, c);
+    if (s > bestScore) { bestScore = s; bestCustomer = c; }
+  });
+
+  if (bestScore >= SHOPIFY_SCORE_THRESHOLD && bestCustomer) {
+    return {
+      tier: 'review',
+      customerId: '',
+      suggestedCustomerId: bestCustomer['Customer ID'],
+      suggestedCustomerName: bestCustomer['Primary Username'] || `${bestCustomer['First Name']} ${bestCustomer['Surname']}`,
+      score: bestScore,
+    };
+  }
+
+  // ─── Tier 3: no reasonable match ───────────────────────────────────
+  return { tier: 'new', customerId: '' };
+}
+
+// Logs a Tier 2 "review" case as a durable row in Shopify Customer Matches.
+// This is what makes the flag survive page reloads -- it lives in the Sheet,
+// not just in a one-time API response.
+function logShopifyMatch(incoming, resolution, shopifyOrderId, orderName) {
+  const sheet = getShopifyMatchesSheet();
+  const row = [
+    'MATCH-' + Utilities.getUuid().slice(0, 8),      // Match ID
+    shopifyOrderId,                                   // Shopify Order ID
+    incoming.shopifyCustomerId || '',                 // Shopify Customer ID
+    orderName || '',                                  // Order Name/Number
+    incoming.fullName || '',                          // Incoming Name
+    incoming.phone || '',                             // Incoming Phone
+    incoming.username || '',                          // Incoming Username
+    incoming.email || '',                             // Incoming Email
+    [incoming.city, incoming.state, incoming.zip].filter(Boolean).join(' / '), // Incoming Address
+    resolution.suggestedCustomerId || '',             // Suggested Customer ID
+    resolution.suggestedCustomerName || '',           // Suggested Customer Name
+    resolution.score || 0,                            // Match Score
+    'Pending',                                        // Decision
+    '',                                                // Linked Customer ID
+    '',                                                // Decided Date
+    nowISO(),                                          // Created Date
+  ];
+  sheet.appendRow(row);
+  return row[0]; // return the Match ID
+}
