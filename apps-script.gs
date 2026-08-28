@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-27.1';
+const SCRIPT_VERSION = '2026-08-27.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -203,11 +203,13 @@ function doPost(e) {
     if (action === 'update_order') return updateOrder(body);
     if (action === 'delete_order') return deleteOrder(body);
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
+    if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
     if (action === 'save_qc') return saveQC(body);
     if (action === 'start_session') return startSession(body);
     if (action === 'end_session') return endSession(body);
     if (action === 'update_session_participants') return updateSessionParticipants(body);
+    
 
     return jsonResponse({ error: 'Unknown action' });
 
