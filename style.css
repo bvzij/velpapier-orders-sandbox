@@ -802,3 +802,131 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   .vp-hub-card:hover, .vp-qc-card:hover { transform: none; }
   .vp-loading::before { animation: none; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MERGE REVIEW MODAL + PENDING MATCH HINT
+   Add this block anywhere in style.css (e.g. right after .modal-actions).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.merge-review-modal {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.merge-confidence {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface2);
+  margin-bottom: 14px;
+}
+
+.merge-confidence-pct {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1;
+}
+
+.merge-confidence-msg {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+#merge-compare-area {
+  overflow-y: auto;
+  margin-bottom: 14px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.compare-header {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--surface2);
+  position: sticky;
+  top: 0;
+}
+
+.compare-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr;
+  gap: 10px;
+  padding: 9px 12px;
+  font-size: 13px;
+  border-bottom: 0.5px solid var(--border);
+  align-items: center;
+}
+
+.compare-row:last-child { border-bottom: none; }
+
+.compare-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.compare-incoming, .compare-onfile {
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.compare-row.match-exact {
+  background: var(--green-bg);
+}
+.compare-row.match-exact .compare-incoming,
+.compare-row.match-exact .compare-onfile {
+  color: var(--green-text);
+  font-weight: 500;
+}
+
+.compare-row.match-partial {
+  background: var(--amber-bg);
+}
+.compare-row.match-partial .compare-incoming,
+.compare-row.match-partial .compare-onfile {
+  color: var(--amber-text);
+}
+
+.compare-row.match-none .compare-incoming,
+.compare-row.match-none .compare-onfile {
+  color: var(--text-faint);
+}
+
+#merge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pending-match-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 3px 10px;
+  background: var(--amber-bg);
+  border-radius: 99px;
+  white-space: nowrap;
+}
+.pending-match-hint strong {
+  color: var(--amber-text);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
