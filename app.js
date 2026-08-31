@@ -1519,6 +1519,14 @@ function showRelinkPicker(match) {
 }
 
 async function submitMergeDecision(matchId, decision, customerId) {
+  const actionsArea = document.getElementById('merge-actions');
+  if (actionsArea) {
+    actionsArea.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  }
+  const clickedBtn = event && event.target;
+  const originalText = clickedBtn ? clickedBtn.textContent : '';
+  if (clickedBtn) clickedBtn.textContent = 'Guardando...';
+
   try {
     await apiPost({ action: 'resolve_shopify_match', match_id: matchId, decision, customer_id: customerId || '' });
     showToast('✓ Cliente actualizado');
@@ -1526,5 +1534,9 @@ async function submitMergeDecision(matchId, decision, customerId) {
     loadRecords();
   } catch (e) {
     showToast('Error: ' + e.message);
+    if (actionsArea) {
+      actionsArea.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+    if (clickedBtn) clickedBtn.textContent = originalText;
   }
 }
