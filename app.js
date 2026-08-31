@@ -548,16 +548,33 @@ function apiGet(qs) {
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
 }
 
+const CACHE_PREFIX = 'vp_cache_';
+
+// Stale-while-revalidate: returns a cached response instantly (or null if
+// none exists yet), while a real fetch runs in the background and calls
+// onFresh(data) once it lands. Mirrors VP.getCached in common.js, kept
+// local here since this page uses its own apiGet rather than VP.get.
+function getCached(qs, onFresh) {
+  const key = CACHE_PREFIX + qs;
+  let cached = null;
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (raw) cached = JSON.parse(raw);
+  } catch (e) { /* corrupt entry, ignore */ }
+
+  apiGet(qs).then(fresh => {
+    try { sessionStorage.setItem(key, JSON.stringify(fresh)); } catch (e) { /* storage full, non-fatal */ }
+    if (onFresh) onFresh(fresh);
+  }).catch(() => { /* background refresh failed silently */ });
+
+  return cached;
+}
+
 function rebuildAllRecords() {
   allRecords = [...activeRecords, ...enviadoRecords, ...archivedRecords];
 }
 
-async function fetchActive() {
-  const [activeData, customersData, matchesData] = await Promise.all([
-    apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
-    apiGet('action=customers'),
-    apiGet('action=shopify_matches')
-  ]);
+function applyActiveData(activeData, customersData, matchesData) {
   activeRecords = (activeData.records || []).map(mapFromApi);
   allCustomers = {};
   customersById = {};
@@ -570,13 +587,48 @@ async function fetchActive() {
     const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
-  // Pending Shopify matches, keyed by Shopify Order ID for quick lookup
-  // against orders that are still waiting on a customer decision.
   pendingMatchesByShopifyOrderId = {};
   (matchesData.records || []).forEach(m => {
     pendingMatchesByShopifyOrderId[String(m['Shopify Order ID'])] = m;
   });
   rebuildAllRecords();
+}
+
+async function fetchActive() {
+  let gotCache = false;
+  let cachedActive = { records: [] }, cachedCustomers = { records: [] }, cachedMatches = { records: [] };
+
+  const freshActive = getCached('action=orders&status=' + encodeURIComponent('No Pagado,Pagado'), fresh => {
+    cachedActive = fresh;
+    applyActiveData(cachedActive, cachedCustomers, cachedMatches);
+    renderAll();
+  });
+  const freshCustomers = getCached('action=customers', fresh => {
+    cachedCustomers = fresh;
+    applyActiveData(cachedActive, cachedCustomers, cachedMatches);
+    renderAll();
+  });
+  const freshMatches = getCached('action=shopify_matches', fresh => {
+    cachedMatches = fresh;
+    applyActiveData(cachedActive, cachedCustomers, cachedMatches);
+    renderAll();
+  });
+
+  if (freshActive)    { cachedActive = freshActive; gotCache = true; }
+  if (freshCustomers) { cachedCustomers = freshCustomers; gotCache = true; }
+  if (freshMatches)   { cachedMatches = freshMatches; gotCache = true; }
+
+  if (gotCache) {
+    applyActiveData(cachedActive, cachedCustomers, cachedMatches);
+    return;
+  }
+
+  const [activeData, customersData, matchesData] = await Promise.all([
+    apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+    apiGet('action=customers'),
+    apiGet('action=shopify_matches')
+  ]);
+  applyActiveData(activeData, customersData, matchesData);
 }
 
 async function fetchEnviado() {
