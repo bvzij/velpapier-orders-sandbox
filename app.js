@@ -131,6 +131,7 @@ let enviadoRecords = [];
 let archivedRecords = [];
 let tabDataLoaded = { enviado: false, archivo: false, qc: false };
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
+let customersById = {}; // keyed by Customer ID → Primary Username, for backfilling missing order-level usernames
 let currentTab = 'activos';
 let currentSort = 'newest';
 let pendingAction = null;
@@ -542,15 +543,17 @@ async function fetchActive() {
   ]);
   activeRecords = (activeData.records || []).map(mapFromApi);
   allCustomers = {};
+  customersById = {};
   (customersData.records || []).forEach(c => {
     const primary = (c['Primary Username'] || '').trim();
+    const custId = (c['Customer ID'] || '').trim();
+    if (custId) customersById[custId] = primary;
     if (!primary) return;
     const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
     const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
   rebuildAllRecords();
-}
 
 async function fetchEnviado() {
   const data = await apiGet('action=orders&status=Enviado');
@@ -1001,7 +1004,8 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-    info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  const displayName = r.Cliente || customersById[r.CustomerId] || '';
+  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(displayName) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
   const usernameEl = info.querySelector('.order-username');
   if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
 
@@ -1299,8 +1303,11 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
     try {
       const data = await apiGet('action=customers');
       allCustomers = {};
+      customersById = {};
       (data.records || []).forEach(c => {
         const primary = (c['Primary Username'] || '').trim();
+        const custId = (c['Customer ID'] || '').trim();
+        if (custId) customersById[custId] = primary;
         if (!primary) return;
         const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
         const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
