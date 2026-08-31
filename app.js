@@ -508,8 +508,7 @@ async function showCustomerHistoryModal(customerId, displayName) {
     if (!records.length) { list.innerHTML = '<div class="empty-state">Sin pedidos</div>'; return; }
     list.innerHTML = records.map(r => {
       const archiveInfo = r.ArchiveDate ? ` · Archivado: ${formatDate(r.ArchiveDate)}` : '';
-      return `<div class="history-row"><div class="history-row-top"><span class="order-producto">${escapeHtml(r.Producto) || '—'}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}${archiveInfo}</span></div></div>`;
-    }).join('');
+      return `<div class="history-row"><div class="history-row-top"><span class="order-producto">${shopifyOrderLine(r)}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}${archiveInfo}</span></div></div>`;    }).join('');
   } catch (e) {
     const list = document.getElementById('customer-history-list');
     if (list) list.innerHTML = '<div class="empty-state">Error al cargar historial</div>';
