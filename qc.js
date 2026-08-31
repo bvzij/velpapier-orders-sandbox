@@ -3,6 +3,11 @@
 const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
 const MAX_PHOTOS = 5;
 
+// TEMPORARY: packing sessions are disabled while the team gets used to the
+// general workflow first. Flip this back to true to re-enable the session
+// gate, banner, and end-session flow -- everything underneath is untouched.
+const SESSIONS_ENABLED = false;
+
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 let allActiveOrders = [];
@@ -287,6 +292,16 @@ async function checkSessionAndRoute() {
   document.getElementById('session-banner').style.display = 'none';
   document.getElementById('header-end-session-btn').style.display = 'none';
   document.getElementById('view-pending').style.display = 'none';
+
+  if (!SESSIONS_ENABLED) {
+    // Sessions temporarily disabled -- go straight to the pending list,
+    // skip the gate entirely, no session banner or end-session button.
+    activeSession = null;
+    switchTab('pending');
+    await loadPending();
+    return;
+  }
+
   try {
     const data = await apiGet('action=active_session');
     activeSession = data.session || null;
