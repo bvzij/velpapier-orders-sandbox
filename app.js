@@ -513,7 +513,7 @@ function openCustomerHistory(customerId, displayName) {
 
 async function showCustomerHistoryModal(customerId, displayName) {
   const c = document.getElementById('modal-container');
-  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal customer-history-modal"><div class="modal-title">Historial de ${escapeHtml(displayName || customersById[customerId] || customerId)}</div>...
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal customer-history-modal"><div class="modal-title">Historial de ${escapeHtml(displayName || customersById[customerId] || customerId)}</div><div id="customer-history-list" class="customer-history-list"><div class="empty-state">Cargando...</div></div><div class="modal-actions"><button class="btn" id="history-close-btn">Cerrar</button></div></div></div>`;
   document.getElementById('history-close-btn').addEventListener('click', closeModal);
   try {
     const data = await apiGet('action=orders&customer_id=' + encodeURIComponent(customerId));
@@ -524,6 +524,7 @@ async function showCustomerHistoryModal(customerId, displayName) {
     list.innerHTML = records.map(r => {
       const archiveInfo = r.ArchiveDate ? ` · Archivado: ${formatDate(r.ArchiveDate)}` : '';
       return `<div class="history-row"><div class="history-row-top"><span class="order-producto">${shopifyOrderLine(r)}</span><span class="order-precio">${formatMXN(r.Precio)}</span>${channelTag(r.Channel)}</div><div class="history-row-bottom"><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span><span class="order-meta">${formatDate(r['Fecha Creación'])}${archiveInfo}</span></div></div>`;
+    }).join('');
   } catch (e) {
     const list = document.getElementById('customer-history-list');
     if (list) list.innerHTML = '<div class="empty-state">Error al cargar historial</div>';
