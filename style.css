@@ -185,7 +185,30 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-faint); font-size: 14px; }
 
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 500; display: flex; align-items: center; justify-content: center; }
-.modal { background: var(--surface); border-radius: var(--radius-lg); padding: 1.5rem; width: 360px; max-width: 90vw; border: 0.5px solid var(--border); }
+.modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  width: 360px;
+  max-width: 90vw;
+  max-height: 80vh;
+  border: 0.5px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-title {
+  flex-shrink: 0;
+}
+
+.modal-body {
+  flex-shrink: 0;
+}
+
+.modal-actions {
+  flex-shrink: 0;
+}
 .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
 .modal-body { font-size: 13px; color: var(--text-muted); margin-bottom: 1.25rem; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -812,9 +835,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .merge-review-modal {
   width: 640px;
   max-width: 92vw;
+  height: 560px;
   max-height: 85vh;
-  display: flex;
-  flex-direction: column;
 }
 
 .merge-confidence {
@@ -840,6 +862,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 }
 
 #merge-compare-area {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   margin-bottom: 14px;
   border: 0.5px solid var(--border);
@@ -935,15 +959,8 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .relink-picker-modal {
   width: 420px;
   max-width: 92vw;
-}
-
-.relink-picker-modal {
-  width: 420px;
-  max-width: 92vw;
   height: 480px;
   max-height: 80vh;
-  display: flex;
-  flex-direction: column;
 }
 
 .relink-results {
