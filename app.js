@@ -1477,11 +1477,33 @@ async function showMergeReviewModal(match) {
     compareArea.innerHTML = '<div class="empty-state">No se encontró información del cliente sugerido</div>';
   }
 
-  const confirmBtn = document.createElement('button');
+  async function submitMergeDecision(matchId, decision, customerId, clickedBtn) {
+  const actionsArea = document.getElementById('merge-actions');
+  if (actionsArea) {
+    actionsArea.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  }
+  const originalText = clickedBtn ? clickedBtn.textContent : '';
+  if (clickedBtn) clickedBtn.textContent = 'Guardando...';
+
+  try {
+    await apiPost({ action: 'resolve_shopify_match', match_id: matchId, decision, customer_id: customerId || '' });
+    showToast('✓ Cliente actualizado');
+    closeModal();
+    loadRecords();
+  } catch (e) {
+    showToast('Error: ' + e.message);
+    if (actionsArea) {
+      actionsArea.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    }
+    if (clickedBtn) clickedBtn.textContent = originalText;
+  }
+}
+
+    const confirmBtn = document.createElement('button');
   confirmBtn.className = 'btn btn-enviado';
   confirmBtn.textContent = 'Confirmar: es esta persona';
   confirmBtn.disabled = !suggestedId;
-  confirmBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'confirm'));
+  confirmBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'confirm', null, confirmBtn));
   actionsArea.appendChild(confirmBtn);
 
   const relinkBtn = document.createElement('button');
@@ -1493,7 +1515,7 @@ async function showMergeReviewModal(match) {
   const newBtn = document.createElement('button');
   newBtn.className = 'btn';
   newBtn.textContent = 'Crear cliente nuevo';
-  newBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'new'));
+  newBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'new', null, newBtn));
   actionsArea.appendChild(newBtn);
 
   const closeBtn = document.createElement('button');
@@ -1548,7 +1570,7 @@ function showRelinkPicker(match) {
 
     resultsEl.querySelectorAll('.relink-option').forEach(el => {
       el.addEventListener('click', () => {
-        submitMergeDecision(match['Match ID'], 'relink', el.getAttribute('data-id'));
+        submitMergeDecision(match['Match ID'], 'relink', el.getAttribute('data-id'), el);
       });
     });
   }
