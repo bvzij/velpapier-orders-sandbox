@@ -20,6 +20,7 @@ const FIELD_MAP = {
   Channel: 'Channel',
   CustomerId: 'Customer ID',
   ShopifyOrderId: 'Shopify Order ID',
+  ShopifyOrderNumber: 'Shopify Order Number',
   'Fecha Creación': 'Created Date',
   ArchiveDate: 'Archive Date'
 };
@@ -154,6 +155,15 @@ function summarizeProductCount(productsStr) {
     total += m ? parseInt(m[1], 10) : 1;
   });
   return total === 1 ? '1 producto' : `${total} productos`;
+}
+const SHOPIFY_STORE_HANDLE = '41uqww-0a';
+
+function shopifyOrderLine(r) {
+  const count = summarizeProductCount(r.Producto);
+  if (r.Channel !== 'Shopify' || !r.ShopifyOrderId) return count;
+  const label = r.ShopifyOrderNumber ? `Shopify ${r.ShopifyOrderNumber}` : 'Shopify';
+  const url = `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${r.ShopifyOrderId}`;
+  return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en Shopify" onclick="event.stopPropagation()">${escapeHtml(label)}</a> · ${count}`;
 }
 function renderNotas(notas) {
   if (!notas) return '';
@@ -991,7 +1001,7 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${summarizeProductCount(r.Producto)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;  const usernameEl = info.querySelector('.order-username');
+  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
   if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
 
   const hoverZone = document.createElement('div');
