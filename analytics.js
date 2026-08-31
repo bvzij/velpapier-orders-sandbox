@@ -17,24 +17,52 @@ const created   = r => VP.asDate(r['Created Date']);
 const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {} };
 let periodDays = 90;
 
+function rebuildById() {
+  DATA.byId = {};
+  DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
+}
+
 /* ── Boot ───────────────────────────────────────────────────────────── */
 
 (async function init() {
   wirePeriod();
   try {
     await VP.ensureToken();
-    const [o, c, q, s] = await Promise.all([
-      VP.get('action=orders'),
-      VP.get('action=customers'),
-      VP.get('action=qc').catch(() => ({ records: [] })),
-      VP.get('action=sessions').catch(() => ({ records: [] })),
-    ]);
-    DATA.orders    = o.records || [];
-    DATA.customers = c.records || [];
-    DATA.qc        = q.records || [];
-    DATA.sessions  = s.records || [];
-    DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
-    render();
+
+    // Show cached data instantly if we have it, while a fresh fetch runs
+    // quietly in the background and re-renders once it lands. Makes
+    // switching back to this page from another one feel instant instead
+    // of showing a blank loading state every time.
+    let gotCache = false;
+    const cachedOrders    = VP.getCached('action=orders',    fresh => { DATA.orders = fresh.records || []; render(); });
+    const cachedCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
+    const cachedQc        = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
+    const cachedSessions  = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
+
+    if (cachedOrders)    { DATA.orders = cachedOrders.records || []; gotCache = true; }
+    if (cachedCustomers) { DATA.customers = cachedCustomers.records || []; gotCache = true; }
+    if (cachedQc)        { DATA.qc = cachedQc.records || []; gotCache = true; }
+    if (cachedSessions)  { DATA.sessions = cachedSessions.records || []; gotCache = true; }
+
+    if (gotCache) {
+      rebuildById();
+      render();
+    } else {
+      // No cache at all yet (first visit this session) -- fall back to a
+      // normal blocking fetch, same as before.
+      const [o, c, q, s] = await Promise.all([
+        VP.get('action=orders'),
+        VP.get('action=customers'),
+        VP.get('action=qc').catch(() => ({ records: [] })),
+        VP.get('action=sessions').catch(() => ({ records: [] })),
+      ]);
+      DATA.orders    = o.records || [];
+      DATA.customers = c.records || [];
+      DATA.qc        = q.records || [];
+      DATA.sessions  = s.records || [];
+      rebuildById();
+      render();
+    }
   } catch (e) {
     console.error('[analytics]', e);
     document.getElementById('an-content').innerHTML =
