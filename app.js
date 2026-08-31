@@ -1002,7 +1002,8 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+    info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  const usernameEl = info.querySelector('.order-username');
   if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
 
   const hoverZone = document.createElement('div');
