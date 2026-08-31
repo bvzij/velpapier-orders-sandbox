@@ -1020,7 +1020,7 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  const displayName = r.Cliente || customersById[r.CustomerId] || '';
+  const displayName = (customersById[r.CustomerId] || r.Cliente || '').replace(/^@/, '');
   info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(displayName) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
   const usernameEl = info.querySelector('.order-username');
   if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
@@ -1081,7 +1081,7 @@ function groupByCliente(records) {
   const groups = {}, order = [];
   sortRecords(records).forEach(r => {
     const key = customerGroupKey(r);
-    if (!groups[key]) { groups[key] = { key, name: r.Cliente || customersById[r.CustomerId] || 'Sin nombre', items: [] }; order.push(key); }
+    if (!groups[key]) { groups[key] = { key, name: (customersById[r.CustomerId] || r.Cliente || 'Sin nombre').replace(/^@/, ''), items: [] }; order.push(key); }
     groups[key].items.push(r);
   });
   return order.map(k => groups[k]);
