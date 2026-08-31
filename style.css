@@ -947,11 +947,12 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 }
 
 .relink-results {
-  max-height: 280px;
+  flex: 1;
   overflow-y: auto;
   border: 0.5px solid var(--border);
   border-radius: var(--radius-md);
   margin-bottom: 14px;
+  min-height: 0;
 }
 
 .relink-option {
