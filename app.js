@@ -144,6 +144,17 @@ function getInitials(name) { return (name || '?').replace('@', '').substring(0, 
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function summarizeProductCount(productsStr) {
+  if (!productsStr) return '—';
+  const parts = productsStr.split(';').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '—';
+  let total = 0;
+  parts.forEach(p => {
+    const m = p.match(/^(\d+)\s*x/i);
+    total += m ? parseInt(m[1], 10) : 1;
+  });
+  return total === 1 ? '1 producto' : `${total} productos`;
+}
 function renderNotas(notas) {
   if (!notas) return '';
   if (/^https?:\/\//.test(notas.trim())) {
@@ -980,8 +991,7 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${escapeHtml(r.Producto) || '—'}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
-  const usernameEl = info.querySelector('.order-username');
+  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(r.Cliente) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${summarizeProductCount(r.Producto)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;  const usernameEl = info.querySelector('.order-username');
   if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
 
   const hoverZone = document.createElement('div');
