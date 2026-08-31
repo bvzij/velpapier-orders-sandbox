@@ -18,6 +18,35 @@ window.VP = (function () {
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
 
+  const CACHE_PREFIX = 'vp_cache_';
+
+  // Stale-while-revalidate GET: if a cached response exists for this exact
+  // query, resolves with it INSTANTLY (no network wait), then separately
+  // kicks off a real fetch and calls onFresh(data) once it lands -- so the
+  // page can silently swap in up-to-date data a moment later. This is what
+  // makes switching between dashboard pages feel instant instead of
+  // re-showing a blank loading state every single time.
+  //
+  // Usage:
+  //   const cached = VP.getCached('action=orders&...', freshData => { ...re-render... });
+  //   if (cached) render(cached);  // show immediately if we had something
+  //   else { const fresh = await VP.get('action=orders&...'); render(fresh); }
+  function getCached(qs, onFresh) {
+    const key = CACHE_PREFIX + qs;
+    let cached = null;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw) cached = JSON.parse(raw);
+    } catch (e) { /* corrupt cache entry, ignore */ }
+
+    get(qs).then(fresh => {
+      try { sessionStorage.setItem(key, JSON.stringify(fresh)); } catch (e) { /* storage full, non-fatal */ }
+      if (onFresh) onFresh(fresh);
+    }).catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
+
+    return cached;
+  }
+
   function post(data) {
     return fetch(API, {
       method: 'POST',
@@ -481,7 +510,7 @@ window.VP = (function () {
   /* ── Public surface ─────────────────────────────────────────────────── */
 
   return {
-    API, get, post, ensureToken, mountNav, NAV,
+    API, get, getCached, post, ensureToken, mountNav, NAV,
     mxn, mxnExact, num, esc, asDate, daysBetween, fmtDate, fmtDateTime,
     fmtDuration, initials, parseProducts, itemCount, baseProductName,
     toast, lightbox,
