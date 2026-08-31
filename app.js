@@ -1459,15 +1459,20 @@ async function showMergeReviewModal(match) {
   }
 
   if (suggestedCustomer) {
-    const rows = buildComparisonRows(match, suggestedCustomer);
-    compareArea.innerHTML = `
-      <div class="compare-header">
-        <div></div>
-        <div>En el pedido</div>
-        <div>${escapeHtml(suggestedCustomer['Primary Username'] || suggestedId)}</div>
-      </div>
-      ${rows.map(comparisonRowHtml).join('')}
-    `;
+    try {
+      const rows = buildComparisonRows(match, suggestedCustomer);
+      compareArea.innerHTML = `
+        <div class="compare-header">
+          <div></div>
+          <div>En el pedido</div>
+          <div>${escapeHtml(suggestedCustomer['Primary Username'] || suggestedId)}</div>
+        </div>
+        ${rows.map(comparisonRowHtml).join('')}
+      `;
+    } catch (err) {
+      console.error('buildComparisonRows failed:', err);
+      compareArea.innerHTML = '<div class="empty-state">Error: ' + escapeHtml(err.message) + '</div>';
+    }
   } else {
     compareArea.innerHTML = '<div class="empty-state">No se encontró información del cliente sugerido</div>';
   }
