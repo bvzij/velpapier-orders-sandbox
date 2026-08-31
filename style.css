@@ -937,11 +937,13 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   max-width: 92vw;
 }
 
-.relink-search-input {
-  width: 100%;
-  box-sizing: border-box;
-  margin-bottom: 10px;
-  padding: 9px 12px;
+.relink-picker-modal {
+  width: 420px;
+  max-width: 92vw;
+  height: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .relink-results {
