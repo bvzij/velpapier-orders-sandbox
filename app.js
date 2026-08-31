@@ -1503,40 +1503,57 @@ async function showMergeReviewModal(match) {
   actionsArea.appendChild(closeBtn);
 }
 
-// Simple inline picker for "it's actually a different customer" -- reuses
-// the same customer list already loaded (allCustomers) rather than a fresh
-// fetch, since it's already in memory.
+// ═══════════════════════════════════════════════════════════════════════════
+// REPLACE the existing showRelinkPicker() function with this one.
+// It opens a small searchable list INSIDE the existing modal-container,
+// instead of using the browser's ugly native prompt().
+// ═══════════════════════════════════════════════════════════════════════════
+
 function showRelinkPicker(match) {
-  const usernames = Object.keys(allCustomers).sort();
-  const picked = prompt('Escribe el username exacto del cliente correcto:\n\n' + usernames.slice(0, 30).join(', ') + (usernames.length > 30 ? '...' : ''));
-  if (!picked) return;
-  const entry = allCustomers[picked.trim().toLowerCase()];
-  if (!entry) { showToast('Cliente no encontrado'); return; }
-  // We need the Customer ID, not just the username -- look it up from customersById's inverse.
-  const foundId = Object.keys(customersById).find(id => customersById[id].toLowerCase() === picked.trim().toLowerCase());
-  if (!foundId) { showToast('No se pudo resolver el Customer ID'); return; }
-  submitMergeDecision(match['Match ID'], 'relink', foundId);
-}
+  const c = document.getElementById('modal-container');
 
-async function submitMergeDecision(matchId, decision, customerId) {
-  const actionsArea = document.getElementById('merge-actions');
-  if (actionsArea) {
-    actionsArea.querySelectorAll('button').forEach(b => { b.disabled = true; });
-  }
-  const clickedBtn = event && event.target;
-  const originalText = clickedBtn ? clickedBtn.textContent : '';
-  if (clickedBtn) clickedBtn.textContent = 'Guardando...';
+  const options = Object.keys(customersById)
+    .map(id => ({ id, name: customersById[id] || id }))
+    .filter(o => o.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
 
-  try {
-    await apiPost({ action: 'resolve_shopify_match', match_id: matchId, decision, customer_id: customerId || '' });
-    showToast('✓ Cliente actualizado');
-    closeModal();
-    loadRecords();
-  } catch (e) {
-    showToast('Error: ' + e.message);
-    if (actionsArea) {
-      actionsArea.querySelectorAll('button').forEach(b => { b.disabled = false; });
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal relink-picker-modal">
+    <div class="modal-title">Buscar cliente correcto</div>
+    <input type="text" id="relink-search" class="search-input relink-search-input" placeholder="Escribe un nombre de usuario..." autocomplete="off" />
+    <div id="relink-results" class="relink-results"></div>
+    <div class="modal-actions">
+      <button class="btn" id="relink-cancel-btn">Cancelar</button>
+    </div>
+  </div></div>`;
+
+  document.getElementById('relink-cancel-btn').addEventListener('click', () => showMergeReviewModal(match));
+
+  const searchInput = document.getElementById('relink-search');
+  const resultsEl = document.getElementById('relink-results');
+
+  function renderResults(query) {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? options.filter(o => o.name.toLowerCase().includes(q)).slice(0, 25)
+      : options.slice(0, 25);
+
+    if (!filtered.length) {
+      resultsEl.innerHTML = '<div class="empty-state">Sin resultados</div>';
+      return;
     }
-    if (clickedBtn) clickedBtn.textContent = originalText;
+
+    resultsEl.innerHTML = filtered.map(o =>
+      `<div class="relink-option" data-id="${escapeHtml(o.id)}">${escapeHtml(o.name)} <span class="relink-option-id">${escapeHtml(o.id)}</span></div>`
+    ).join('');
+
+    resultsEl.querySelectorAll('.relink-option').forEach(el => {
+      el.addEventListener('click', () => {
+        submitMergeDecision(match['Match ID'], 'relink', el.getAttribute('data-id'));
+      });
+    });
   }
+
+  searchInput.addEventListener('input', () => renderResults(searchInput.value));
+  renderResults('');
+  searchInput.focus();
 }
