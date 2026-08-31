@@ -393,18 +393,53 @@ let activeSessionStartMs = null;
 
 // ── Pending list ─────────────────────────────────────────────────────────
 
+function applyPendingData(ordersData, qcData) {
+  allActiveOrders = ordersData.records || [];
+  allQcRows = qcData.records || [];
+}
+
 async function loadPending() {
   document.getElementById('view-pending').style.display = 'block';
   const list = document.getElementById('pending-list');
-  list.innerHTML = '<div class="empty-state">Cargando…</div>';
 
+  // Cache-first: if we have a snapshot from earlier this session, show it
+  // instantly instead of a blank "Cargando..." state, then quietly refresh
+  // in the background. A 20s auto-refresh timer (see below) keeps this
+  // page from ever drifting far out of date during active packing, since
+  // stale pack-status here risks a real double-pack mistake.
+  let gotCache = false;
+  let cachedOrdersData = { records: [] }, cachedQcData = { records: [] };
+
+  const freshOrders = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
+    cachedOrdersData = fresh;
+    applyPendingData(cachedOrdersData, cachedQcData);
+    updateSessionBanner();
+    renderPendingList();
+  });
+  const freshQc = VP.getCached('action=qc', fresh => {
+    cachedQcData = fresh;
+    applyPendingData(cachedOrdersData, cachedQcData);
+    updateSessionBanner();
+    renderPendingList();
+  });
+
+  if (freshOrders) { cachedOrdersData = freshOrders; gotCache = true; }
+  if (freshQc)     { cachedQcData = freshQc; gotCache = true; }
+
+  if (gotCache) {
+    applyPendingData(cachedOrdersData, cachedQcData);
+    updateSessionBanner();
+    renderPendingList();
+    return;
+  }
+
+  list.innerHTML = '<div class="empty-state">Cargando…</div>';
   try {
     const [ordersData, qcData] = await Promise.all([
       apiGet('action=orders&status=Pagado,No Pagado'),
       apiGet('action=qc'),
     ]);
-    allActiveOrders = ordersData.records || [];
-    allQcRows = qcData.records || [];
+    applyPendingData(ordersData, qcData);
   } catch (e) {
     list.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
     return;
@@ -413,6 +448,16 @@ async function loadPending() {
   updateSessionBanner();
   renderPendingList();
 }
+
+// Keeps the pending list from drifting stale during an active packing
+// session -- forces a real (non-cached) refresh every 20s so this page
+// never shows an order as "still needs packing" long after someone else
+// already packed it.
+setInterval(() => {
+  if (document.getElementById('view-pending').style.display !== 'none') {
+    loadPending();
+  }
+}, 20000);
 
 function updateSessionBanner() {
   if (!activeSession) return;
