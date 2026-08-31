@@ -146,7 +146,7 @@ function showToast(msg) { const t = document.getElementById('toast'); t.textCont
 function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
-function escapeHtml(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function escapeHtml(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 function summarizeProductCount(productsStr) {
   if (!productsStr) return '—';
   const parts = productsStr.split(';').map(s => s.trim()).filter(Boolean);
