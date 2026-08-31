@@ -1136,7 +1136,21 @@ function renderGrouped(records, containerId, showActions) {
     : '';
     header.setAttribute('data-tiktok-ready', hasPendingTikTok);
     group.setAttribute('data-tiktok-ready', hasPendingTikTok);
+        // Careful: only show the suggested-customer hint for orders that are
+    // genuinely still pending review -- never for orders already grouped
+    // under a confirmed Customer ID, to avoid implying uncertainty about a
+    // match that's already settled.
+    const suggestionHtml = grp.pendingMatch
+      ? `<div class="pending-match-hint">Posible cliente: <strong>${escapeHtml(grp.pendingMatch['Suggested Customer Name'] || '—')}</strong> (${grp.pendingMatch['Match Score']}%)</div>`
+      : '';
+
     header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+
+    if (suggestionHtml) {
+      const hintEl = document.createElement('div');
+      hintEl.innerHTML = suggestionHtml;
+      header.appendChild(hintEl.firstChild);
+    }
 
     const bulk = header.querySelector('.customer-bulk-actions');
     const renameBtn = document.createElement('button');
@@ -1148,6 +1162,13 @@ function renderGrouped(records, containerId, showActions) {
     addBtn.textContent = '+'; addBtn.title = 'Agregar pedido';
     addBtn.addEventListener('click', () => showNewOrderModal(cliente));
     bulk.appendChild(addBtn);
+    if (grp.pendingMatch) {
+      const mergeBtn = document.createElement('button');
+      mergeBtn.className = 'btn btn-xs btn-enviado'; mergeBtn.textContent = 'Revisar cliente';
+      mergeBtn.title = 'Confirmar o corregir a qué cliente pertenece este pedido';
+      mergeBtn.addEventListener('click', () => showMergeReviewModal(grp.pendingMatch));
+      bulk.appendChild(mergeBtn);
+    }
     if (showActions) {
       const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
       btn.addEventListener('click', () => showBulkStatusModal(grp));
