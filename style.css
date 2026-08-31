@@ -83,6 +83,7 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .btn { padding: 8px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; cursor: pointer; border: 0.5px solid var(--border-strong); background: var(--surface); color: var(--text); font-family: inherit; transition: all 0.15s; display: inline-flex; align-items: center; gap: 5px; }
 .btn:hover { background: var(--surface2); }
 .btn:active { transform: scale(0.98); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
 .btn-block { width: 100%; justify-content: center; }
 .btn-primary { background: var(--text); color: var(--surface); border-color: var(--text); }
 .btn-primary:hover { opacity: 0.85; background: var(--text); }
