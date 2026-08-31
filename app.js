@@ -1079,17 +1079,34 @@ function renderOrderRow(r, showActions) {
 function customerGroupKey(r) {
   const cid = (r.CustomerId || '').trim();
   if (cid) return 'cid:' + cid.toLowerCase();
-  return 'user:' + (r.Cliente || 'Sin nombre').trim().toLowerCase();
+  // No Customer ID at all -- this order is genuinely unresolved. Give it its
+  // OWN unique group (keyed by Order ID), instead of collapsing every
+  // unresolved order into one shared "Sin nombre" bucket. This is what lets
+  // each pending order be renamed/reviewed independently.
+  return 'pending:' + (r.ID || '').trim();
 }
 
 // Returns an ordered array of { key, name, items }. Orders are grouped by
 // Customer ID so aliases of the same customer collapse into one group; the
 // representative Primary Username is kept as the display label.
+let pendingMergeCounter = 0; // resets each render pass, gives stable-per-render numbering
+
 function groupByCliente(records) {
   const groups = {}, order = [];
+  pendingMergeCounter = 0;
   sortRecords(records).forEach(r => {
     const key = customerGroupKey(r);
-    if (!groups[key]) { groups[key] = { key, name: (customersById[r.CustomerId] || r.Cliente || 'Sin nombre').replace(/^@/, ''), items: [] }; order.push(key); }
+    if (!groups[key]) {
+      let name;
+      if (r.CustomerId) {
+        name = (customersById[r.CustomerId] || r.Cliente || 'Sin nombre').replace(/^@/, '');
+      } else {
+        pendingMergeCounter++;
+        name = pendingMergeCounter === 1 ? 'Pendiente de fusión' : `Pendiente de fusión ${pendingMergeCounter}`;
+      }
+      groups[key] = { key, name, items: [], pendingMatch: pendingMatchesByShopifyOrderId[r.ShopifyOrderId] || null };
+      order.push(key);
+    }
     groups[key].items.push(r);
   });
   return order.map(k => groups[k]);
