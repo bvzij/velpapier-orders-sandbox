@@ -931,3 +931,45 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   cursor: not-allowed;
   pointer-events: none;
 }
+
+.relink-picker-modal {
+  width: 420px;
+  max-width: 92vw;
+}
+
+.relink-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+}
+
+.relink-results {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 14px;
+}
+
+.relink-option {
+  padding: 9px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 0.5px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background 0.1s;
+}
+
+.relink-option:last-child { border-bottom: none; }
+
+.relink-option:hover {
+  background: var(--surface2);
+}
+
+.relink-option-id {
+  font-size: 11px;
+  color: var(--text-faint);
+}
