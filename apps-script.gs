@@ -208,6 +208,7 @@ function doPost(e) {
     if (action === 'start_session') return startSession(body);
     if (action === 'end_session') return endSession(body);
     if (action === 'update_session_participants') return updateSessionParticipants(body);
+    if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     
 
     return jsonResponse({ error: 'Unknown action' });
@@ -1539,10 +1540,6 @@ function resolveLineItemsBatch(allLineItems) {
 // findCustomerByUsername(), since it's conceptually the Shopify sibling
 // of that TikTok resolution function).
 // ═══════════════════════════════════════════════════════════════════════════
-
-function getShopifyMatchesSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Shopify Customer Matches');
-}
 
 const SHOPIFY_SCORE_THRESHOLD = 30; // below this, treat as "no reasonable guess" -> straight to new_customer
 
