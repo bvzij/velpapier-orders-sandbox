@@ -1378,3 +1378,148 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
     } catch (e) { /* silent */ }
   }, 60000);
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MERGE REVIEW MODAL
+// Add this block anywhere in app.js (e.g. right after showCustomerHistoryModal).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Returns a human message for a given match score, in ~10-15% bands.
+function confidenceMessage(score) {
+  if (score >= 90) return 'Casi con toda seguridad es la misma persona.';
+  if (score >= 75) return 'Muy probablemente es la misma persona.';
+  if (score >= 60) return 'Probablemente es la misma persona.';
+  if (score >= 45) return 'Podría ser la misma persona, pero no es claro.';
+  if (score >= 30) return 'Coincidencia débil — revisa con cuidado.';
+  return 'Coincidencia muy débil — probablemente sea otra persona.';
+}
+
+// Simple field-level similarity, reusing the same normalized approach as
+// the backend scorer (kept intentionally simple here -- this is only for
+// display sorting, not a real match decision, which already happened server-side).
+function fieldSimilarity(a, b) {
+  a = String(a || '').toLowerCase().trim();
+  b = String(b || '').toLowerCase().trim();
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.includes(b) || b.includes(a)) return 0.6;
+  return 0;
+}
+
+// Builds the sorted comparison rows: exact matches first, then partial,
+// then complete mismatches at the bottom.
+function buildComparisonRows(match, customer) {
+  const rows = [
+    { label: 'Nombre',   incoming: match['Incoming Name'],  onFile: `${customer['First Name'] || ''} ${customer['Surname'] || ''}`.trim() },
+    { label: 'Teléfono', incoming: match['Incoming Phone'], onFile: customer['Phone Full'] || customer['Phone Partial'] || '' },
+    { label: 'Usuario',  incoming: match['Incoming Username'], onFile: customer['Primary Username'] || '' },
+    { label: 'Email',    incoming: match['Incoming Email'], onFile: customer['Email'] || '' },
+    { label: 'Ciudad',   incoming: (match['Incoming Address'] || '').split(' / ')[0] || '', onFile: customer['City'] || '' },
+    { label: 'Estado',   incoming: (match['Incoming Address'] || '').split(' / ')[1] || '', onFile: customer['State'] || '' },
+    { label: 'CP',       incoming: (match['Incoming Address'] || '').split(' / ')[2] || '', onFile: customer['ZIP'] || '' },
+  ];
+  rows.forEach(r => { r.score = fieldSimilarity(r.incoming, r.onFile); });
+  return rows.sort((a, b) => b.score - a.score);
+}
+
+function comparisonRowHtml(row) {
+  const tier = row.score === 1 ? 'match-exact' : row.score > 0 ? 'match-partial' : 'match-none';
+  return `<div class="compare-row ${tier}">
+    <div class="compare-label">${escapeHtml(row.label)}</div>
+    <div class="compare-incoming">${escapeHtml(row.incoming) || '—'}</div>
+    <div class="compare-onfile">${escapeHtml(row.onFile) || '—'}</div>
+  </div>`;
+}
+
+async function showMergeReviewModal(match) {
+  const c = document.getElementById('modal-container');
+  const score = Number(match['Match Score']) || 0;
+  const suggestedId = match['Suggested Customer ID'];
+
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal merge-review-modal">
+    <div class="modal-title">Revisar cliente sugerido</div>
+    <div class="merge-confidence">
+      <div class="merge-confidence-pct">${score}%</div>
+      <div class="merge-confidence-msg">${escapeHtml(confidenceMessage(score))}</div>
+    </div>
+    <div id="merge-compare-area"><div class="empty-state">Cargando...</div></div>
+    <div class="modal-actions" id="merge-actions"></div>
+  </div></div>`;
+
+  const compareArea = document.getElementById('merge-compare-area');
+  const actionsArea = document.getElementById('merge-actions');
+
+  // Fetch the suggested customer's full record for the comparison.
+  let suggestedCustomer = null;
+  if (suggestedId) {
+    try {
+      const data = await apiGet('action=customers&customer_id=' + encodeURIComponent(suggestedId));
+      suggestedCustomer = data || null;
+    } catch (e) { /* fall through, handled below */ }
+  }
+
+  if (suggestedCustomer) {
+    const rows = buildComparisonRows(match, suggestedCustomer);
+    compareArea.innerHTML = `
+      <div class="compare-header">
+        <div></div>
+        <div>En el pedido</div>
+        <div>${escapeHtml(suggestedCustomer['Primary Username'] || suggestedId)}</div>
+      </div>
+      ${rows.map(comparisonRowHtml).join('')}
+    `;
+  } else {
+    compareArea.innerHTML = '<div class="empty-state">No se encontró información del cliente sugerido</div>';
+  }
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn btn-enviado';
+  confirmBtn.textContent = 'Confirmar: es esta persona';
+  confirmBtn.disabled = !suggestedId;
+  confirmBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'confirm'));
+  actionsArea.appendChild(confirmBtn);
+
+  const relinkBtn = document.createElement('button');
+  relinkBtn.className = 'btn';
+  relinkBtn.textContent = 'Es otra persona (buscar)';
+  relinkBtn.addEventListener('click', () => showRelinkPicker(match));
+  actionsArea.appendChild(relinkBtn);
+
+  const newBtn = document.createElement('button');
+  newBtn.className = 'btn';
+  newBtn.textContent = 'Crear cliente nuevo';
+  newBtn.addEventListener('click', () => submitMergeDecision(match['Match ID'], 'new'));
+  actionsArea.appendChild(newBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn';
+  closeBtn.textContent = 'Cerrar';
+  closeBtn.addEventListener('click', closeModal);
+  actionsArea.appendChild(closeBtn);
+}
+
+// Simple inline picker for "it's actually a different customer" -- reuses
+// the same customer list already loaded (allCustomers) rather than a fresh
+// fetch, since it's already in memory.
+function showRelinkPicker(match) {
+  const usernames = Object.keys(allCustomers).sort();
+  const picked = prompt('Escribe el username exacto del cliente correcto:\n\n' + usernames.slice(0, 30).join(', ') + (usernames.length > 30 ? '...' : ''));
+  if (!picked) return;
+  const entry = allCustomers[picked.trim().toLowerCase()];
+  if (!entry) { showToast('Cliente no encontrado'); return; }
+  // We need the Customer ID, not just the username -- look it up from customersById's inverse.
+  const foundId = Object.keys(customersById).find(id => customersById[id].toLowerCase() === picked.trim().toLowerCase());
+  if (!foundId) { showToast('No se pudo resolver el Customer ID'); return; }
+  submitMergeDecision(match['Match ID'], 'relink', foundId);
+}
+
+async function submitMergeDecision(matchId, decision, customerId) {
+  try {
+    await apiPost({ action: 'resolve_shopify_match', match_id: matchId, decision, customer_id: customerId || '' });
+    showToast('✓ Cliente actualizado');
+    closeModal();
+    loadRecords();
+  } catch (e) {
+    showToast('Error: ' + e.message);
+  }
+}
