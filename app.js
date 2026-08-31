@@ -575,7 +575,8 @@ async function loadRecords() {
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
-    showToast('Error al cargar datos');
+    console.error('loadRecords failed:', e);
+    showToast('Error al cargar datos: ' + e.message);
   } finally {
     icon.classList.remove('spinning');
   }
