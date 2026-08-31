@@ -14,25 +14,49 @@ let QC = [], SESSIONS = [], ORDERS_BY_ID = {};
 let view = 'envios';
 let shown = PAGE;
 
+function applyQcData(q, s, o) {
+  QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
+  QC.sort((a, b) => String(b['Timestamp'] || '').localeCompare(String(a['Timestamp'] || '')));
+  SESSIONS = (s.records || []).sort((a, b) =>
+    String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
+  ORDERS_BY_ID = {};
+  (o.records || []).forEach(r => { ORDERS_BY_ID[r['Order ID']] = r; });
+}
+
 /* ── Boot ───────────────────────────────────────────────────────────── */
 
 (async function init() {
   wire();
   try {
     await VP.ensureToken();
-    const [q, s, o] = await Promise.all([
-      VP.get('action=qc'),
-      VP.get('action=sessions').catch(() => ({ records: [] })),
-      VP.get('action=orders').catch(() => ({ records: [] })),
-    ]);
-    QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
-    QC.sort((a, b) => String(b['Timestamp'] || '').localeCompare(String(a['Timestamp'] || '')));
-    SESSIONS = (s.records || []).sort((a, b) =>
-      String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
-    (o.records || []).forEach(r => { ORDERS_BY_ID[r['Order ID']] = r; });
 
-    fillFilters();
-    render();
+    // Cache-first: show instantly if we have a prior snapshot, refresh
+    // quietly in the background, re-render when fresh data lands.
+    let gotCache = false;
+    let cq = { records: [] }, cs = { records: [] }, co = { records: [] };
+
+    const cachedQ = VP.getCached('action=qc', fresh => { applyQcData(fresh, cs, co); fillFilters(); render(); });
+    const cachedS = VP.getCached('action=sessions', fresh => { cs = fresh; applyQcData(cq, fresh, co); fillFilters(); render(); });
+    const cachedO = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, cs, fresh); fillFilters(); render(); });
+
+    if (cachedQ) { cq = cachedQ; gotCache = true; }
+    if (cachedS) { cs = cachedS; gotCache = true; }
+    if (cachedO) { co = cachedO; gotCache = true; }
+
+    if (gotCache) {
+      applyQcData(cq, cs, co);
+      fillFilters();
+      render();
+    } else {
+      const [q, s, o] = await Promise.all([
+        VP.get('action=qc'),
+        VP.get('action=sessions').catch(() => ({ records: [] })),
+        VP.get('action=orders').catch(() => ({ records: [] })),
+      ]);
+      applyQcData(q, s, o);
+      fillFilters();
+      render();
+    }
   } catch (e) {
     console.error('[calidad]', e);
     document.getElementById('cal-content').innerHTML =
