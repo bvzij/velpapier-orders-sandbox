@@ -132,6 +132,7 @@ let archivedRecords = [];
 let tabDataLoaded = { enviado: false, archivo: false, qc: false };
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let customersById = {}; // keyed by Customer ID → Primary Username, for backfilling missing order-level usernames
+let pendingMatchesByShopifyOrderId = {}; // keyed by Shopify Order ID → pending match record, for the merge review UI
 let currentTab = 'activos';
 let currentSort = 'newest';
 let pendingAction = null;
@@ -552,9 +553,10 @@ function rebuildAllRecords() {
 }
 
 async function fetchActive() {
-  const [activeData, customersData] = await Promise.all([
+  const [activeData, customersData, matchesData] = await Promise.all([
     apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
-    apiGet('action=customers')
+    apiGet('action=customers'),
+    apiGet('action=shopify_matches')
   ]);
   activeRecords = (activeData.records || []).map(mapFromApi);
   allCustomers = {};
@@ -568,8 +570,14 @@ async function fetchActive() {
     const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
+  // Pending Shopify matches, keyed by Shopify Order ID for quick lookup
+  // against orders that are still waiting on a customer decision.
+  pendingMatchesByShopifyOrderId = {};
+  (matchesData.records || []).forEach(m => {
+    pendingMatchesByShopifyOrderId[String(m['Shopify Order ID'])] = m;
+  });
   rebuildAllRecords();
-  }
+}
 
 async function fetchEnviado() {
   const data = await apiGet('action=orders&status=Enviado');
