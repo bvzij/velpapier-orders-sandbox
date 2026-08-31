@@ -161,10 +161,24 @@ const SHOPIFY_STORE_HANDLE = '41uqww-0a';
 
 function shopifyOrderLine(r) {
   const count = summarizeProductCount(r.Producto);
-  if (r.Channel !== 'Shopify' || !r.ShopifyOrderId) return count;
-  const label = r.ShopifyOrderNumber ? `Shopify ${r.ShopifyOrderNumber}` : 'Shopify';
-  const url = `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${r.ShopifyOrderId}`;
-  return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en Shopify" onclick="event.stopPropagation()">${escapeHtml(label)}</a> · ${count}`;
+
+  if (r.Channel === 'Shopify' && r.ShopifyOrderId) {
+    const label = r.ShopifyOrderNumber ? `Shopify ${r.ShopifyOrderNumber}` : 'Shopify';
+    const url = `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${r.ShopifyOrderId}`;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en Shopify" onclick="event.stopPropagation()">${escapeHtml(label)}</a> · ${count}`;
+  }
+
+  if (r.Channel === 'TikTok' && r.ID) {
+    // TikTok orders can combine multiple Order IDs (e.g. "123 + 456") when
+    // several TikTok orders ship together. Link each one separately.
+    const ids = String(r.ID).split('+').map(s => s.trim()).filter(Boolean);
+    const links = ids.map(id =>
+      `<a href="https://seller-mx.tiktok.com/order/detail?order_no=${encodeURIComponent(id)}&shop_region=MX" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en TikTok" onclick="event.stopPropagation()">TikTok</a>`
+    );
+    return `${links.join(' + ')} · ${count}`;
+  }
+
+  return count;
 }
 function renderNotas(notas) {
   if (!notas) return '';
@@ -554,6 +568,7 @@ async function fetchActive() {
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
   rebuildAllRecords();
+  }
 
 async function fetchEnviado() {
   const data = await apiGet('action=orders&status=Enviado');
