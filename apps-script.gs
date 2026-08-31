@@ -1605,22 +1605,37 @@ function phoneMatchScore(shopifyPhoneFull, customerPhoneFull, customerPhoneParti
 function scoreShopifyMatch(incoming, customer) {
   let score = 0;
 
-  // Phone — 40%
+  // Phone — 35%
   const phoneScore = phoneMatchScore(
     incoming.phone,
     customer['Phone Full'],
     customer['Phone Partial']
   );
-  score += phoneScore * 0.40;
+  score += phoneScore * 0.35;
 
-  // Full name — 25%
+  // Full name — 20%
   const customerFullName = `${customer['First Name'] || ''} ${customer['Surname'] || ''}`.trim();
   if (incoming.fullName && customerFullName) {
-    score += shopifyStringSimilarity(incoming.fullName, customerFullName) * 100 * 0.25;
+    score += shopifyStringSimilarity(incoming.fullName, customerFullName) * 100 * 0.20;
   }
 
-  // Username (optional, from the 'company' field) — 20%
-  // Skipped entirely if either side is blank -- a blank never counts as a match.
+  // Email contains name — 15%
+  // Checks whether the customer's on-file first/last name appears inside
+  // the incoming email's local part (e.g. "karelycampos7@gmail.com"
+  // contains both "karely" and "campos"). Catches cases where the shipping
+  // name differs (e.g. ordering for someone else) but the account owner's
+  // email still gives it away.
+  if (incoming.email && (customer['First Name'] || customer['Surname'])) {
+    const localPart = incoming.email.split('@')[0].toLowerCase();
+    const first = (customer['First Name'] || '').toLowerCase().trim();
+    const last = (customer['Surname'] || '').toLowerCase().trim();
+    let emailScore = 0;
+    if (first && first.length >= 3 && localPart.includes(first)) emailScore += 50;
+    if (last && last.length >= 3 && localPart.includes(last)) emailScore += 50;
+    score += Math.min(emailScore, 100) * 0.15;
+  }
+
+  // Username (optional, from the 'company' field) — 15%
   if (incoming.username) {
     const candidates = [customer['Primary Username'] || ''].concat(
       String(customer['Aliases'] || '').split(',').map(a => a.trim())
@@ -1630,7 +1645,7 @@ function scoreShopifyMatch(incoming, customer) {
       const s = shopifyStringSimilarity(normalizeUsername(incoming.username), normalizeUsername(cand));
       if (s > bestUsernameScore) bestUsernameScore = s;
     });
-    score += bestUsernameScore * 100 * 0.20;
+    score += bestUsernameScore * 100 * 0.15;
   }
 
   // ZIP exact — flat 10
@@ -1803,6 +1818,7 @@ function importShopifyOrder(body) {
     const row = new Array(oh.length).fill('');
     row[oh.indexOf('Order ID')] = generateUUID();
     row[oh.indexOf('Shopify Order ID')] = shopifyOrderId;
+    row[oh.indexOf('Shopify Order Number')] = orderName;
     row[oh.indexOf('Customer ID')] = customerID;
     row[oh.indexOf('Primary Username')] = (resolution.tier === 'auto') ? (incoming.username || '') : '';
     row[oh.indexOf('Channel')] = 'Shopify';
@@ -1876,12 +1892,14 @@ function resolveShopifyMatchAction(body) {
     linkedCustomerId = match['Suggested Customer ID'];
     if (!linkedCustomerId) return jsonResponse({ error: 'No suggested customer to confirm' });
     appendShopifyIdToCustomer(linkedCustomerId, match['Shopify Customer ID']);
+    enrichCustomerFromMatch(linkedCustomerId, match);
     setMatchField('Decision', 'Confirmed-Suggested');
 
   } else if (body.decision === 'relink') {
     linkedCustomerId = body.customer_id;
     if (!linkedCustomerId) return jsonResponse({ error: 'customer_id is required for relink' });
     appendShopifyIdToCustomer(linkedCustomerId, match['Shopify Customer ID']);
+    enrichCustomerFromMatch(linkedCustomerId, match);
     setMatchField('Decision', 'Confirmed-Different');
 
   } else if (body.decision === 'new') {
@@ -1957,6 +1975,38 @@ function appendShopifyIdToCustomer(customerId, newShopifyId) {
       }
       return;
     }
+  }
+}
+
+// Fills in any BLANK fields on the customer record using the incoming
+// match data -- never overwrites something already on file, only adds
+// what's genuinely missing (e.g. Phone Full, Email, First/Surname if empty).
+function enrichCustomerFromMatch(customerId, match) {
+  const sheet = getCustomersSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idCol = headers.indexOf('Customer ID');
+
+  const fieldsToFill = {
+    'Phone Full': match['Incoming Phone'],
+    'Email': match['Incoming Email'],
+  };
+  const nameParts = String(match['Incoming Name'] || '').split(' ').filter(Boolean);
+  if (nameParts.length) {
+    fieldsToFill['First Name'] = nameParts[0];
+    fieldsToFill['Surname'] = nameParts.slice(1).join(' ');
+  }
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idCol]) !== String(customerId)) continue;
+    Object.keys(fieldsToFill).forEach(field => {
+      const colIdx = headers.indexOf(field);
+      const newVal = fieldsToFill[field];
+      if (colIdx >= 0 && newVal && !String(data[i][colIdx] || '').trim()) {
+        sheet.getRange(i + 1, colIdx + 1).setValue(newVal);
+      }
+    });
+    return;
   }
 }
 
