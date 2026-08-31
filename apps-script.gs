@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-28.2';
+const SCRIPT_VERSION = '2026-08-30.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -122,9 +122,8 @@ function doGet(e) {
 
     if (action === 'ping') return jsonResponse({ ok: true });
     if (action !== 'version' && !authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
-
+    if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
-
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'active_session') return getActiveSession(e);
@@ -1661,9 +1660,10 @@ function resolveShopifyCustomer(incoming) {
 
   // ─── Tier 1: Shopify Customer ID exact match ──────────────────────
   if (incoming.shopifyCustomerId) {
-    const found = customers.find(c =>
-      String(c['Shopify Customer ID'] || '') === String(incoming.shopifyCustomerId)
-    );
+    const found = customers.find(c => {
+      const ids = String(c['Shopify Customer ID'] || '').split(',').map(s => s.trim()).filter(Boolean);
+      return ids.includes(String(incoming.shopifyCustomerId));
+    });
     if (found) {
       return { tier: 'auto', customerId: found['Customer ID'] };
     }
@@ -1846,4 +1846,149 @@ function importShopifyOrder(body) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESOLVE SHOPIFY MATCH — the endpoint the merge UI/modal will call.
+// ADD THIS BLOCK anywhere in apps-script.gs.
+//
+// ALSO add this line inside doPost()'s dispatcher:
+//     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
+// ═══════════════════════════════════════════════════════════════════════════
+
+// body = {
+//   match_id: 'MATCH-xxxx',
+//   decision: 'confirm' | 'relink' | 'new',
+//   customer_id: '...'   // required for 'relink' (which customer to link to instead)
+// }
+function resolveShopifyMatchAction(body) {
+  const matchesSheet = getShopifyMatchesSheet();
+  const matches = sheetToObjects(matchesSheet);
+  const match = matches.find(m => m['Match ID'] === body.match_id);
+  if (!match) return jsonResponse({ error: 'Match not found' });
+
+  const mh = matchesSheet.getRange(1, 1, 1, matchesSheet.getLastColumn()).getValues()[0];
+  const setMatchField = (col, val) => {
+    const idx = mh.indexOf(col);
+    if (idx >= 0) matchesSheet.getRange(match._rowIndex, idx + 1).setValue(val);
+  };
+
+  let linkedCustomerId = '';
+
+  if (body.decision === 'confirm') {
+    linkedCustomerId = match['Suggested Customer ID'];
+    if (!linkedCustomerId) return jsonResponse({ error: 'No suggested customer to confirm' });
+    appendShopifyIdToCustomer(linkedCustomerId, match['Shopify Customer ID']);
+    setMatchField('Decision', 'Confirmed-Suggested');
+
+  } else if (body.decision === 'relink') {
+    linkedCustomerId = body.customer_id;
+    if (!linkedCustomerId) return jsonResponse({ error: 'customer_id is required for relink' });
+    appendShopifyIdToCustomer(linkedCustomerId, match['Shopify Customer ID']);
+    setMatchField('Decision', 'Confirmed-Different');
+
+  } else if (body.decision === 'new') {
+    const customersSheet = getCustomersSheet();
+    const nameParts = String(match['Incoming Name'] || '').split(' ');
+    const firstName = nameParts[0] || '';
+    const surname = nameParts.slice(1).join(' ');
+
+    linkedCustomerId = generateCustomerID(customersSheet);
+    customersSheet.appendRow([
+      linkedCustomerId,
+      match['Incoming Username'] || '',
+      '',
+      match['Shopify Customer ID'] || '',
+      firstName,
+      surname,
+      '',
+      '',
+      (match['Incoming Address'] || '').split(' / ')[0] || '',
+      (match['Incoming Address'] || '').split(' / ')[1] || '',
+      (match['Incoming Address'] || '').split(' / ')[2] || '',
+      '',
+      match['Incoming Phone'] || '',
+      match['Incoming Email'] || '',
+      nowISO(),
+      0,
+      'Created from Shopify match review (' + match['Match ID'] + ')',
+      false,
+    ]);
+    setMatchField('Decision', 'Created-New');
+
+  } else {
+    return jsonResponse({ error: 'Unknown decision: ' + body.decision });
+  }
+
+  setMatchField('Linked Customer ID', linkedCustomerId);
+  setMatchField('Decided Date', nowISO());
+
+  // ─── Backfill the Orders row that was waiting on this match ───────
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  const rowIndex = findOrderRow(ordersSheet, findOrderIdByShopifyId(ordersSheet, oh, match['Shopify Order ID']));
+  if (rowIndex) {
+    const custCol = oh.indexOf('Customer ID') + 1;
+    const userCol = oh.indexOf('Primary Username') + 1;
+    ordersSheet.getRange(rowIndex, custCol).setValue(linkedCustomerId);
+    // Pull the now-confirmed customer's real Primary Username onto the order.
+    const custData = sheetToObjects(getCustomersSheet());
+    const cust = custData.find(c => c['Customer ID'] === linkedCustomerId);
+    if (cust && userCol > 0) {
+      ordersSheet.getRange(rowIndex, userCol).setValue(cust['Primary Username'] || '');
+    }
+  }
+
+  return jsonResponse({ result: 'resolved', customer_id: linkedCustomerId });
+}
+
+// Appends a Shopify Customer ID to a customer's existing list, if not already present.
+function appendShopifyIdToCustomer(customerId, newShopifyId) {
+  if (!newShopifyId) return;
+  const sheet = getCustomersSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idCol = headers.indexOf('Customer ID');
+  const shopCol = headers.indexOf('Shopify Customer ID');
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idCol]) === String(customerId)) {
+      const current = String(data[i][shopCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (!current.includes(String(newShopifyId))) {
+        current.push(String(newShopifyId));
+        sheet.getRange(i + 1, shopCol + 1).setValue(current.join(', '));
+      }
+      return;
+    }
+  }
+}
+
+// Finds the Order ID whose Shopify Order ID matches, so we can locate its row.
+function findOrderIdByShopifyId(ordersSheet, headers, shopifyOrderId) {
+  const iShop = headers.indexOf('Shopify Order ID');
+  const iOrderId = headers.indexOf('Order ID');
+  const lastRow = ordersSheet.getLastRow();
+  if (lastRow < 2) return null;
+  const data = ordersSheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  for (const row of data) {
+    if (String(row[iShop]) === String(shopifyOrderId)) return row[iOrderId];
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET SHOPIFY MATCHES — for the review UI / pending-count badge.
+// ADD THIS FUNCTION anywhere in apps-script.gs.
+//
+// ALSO add this line inside doGet()'s dispatcher, alongside the others:
+//     if (action === 'shopify_matches') return getShopifyMatches(e);
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getShopifyMatches(e) {
+  const matches = sheetToObjects(getShopifyMatchesSheet());
+  const statusFilter = e.parameter.decision || 'Pending';
+  const filtered = statusFilter === 'all'
+    ? matches
+    : matches.filter(m => m['Decision'] === statusFilter);
+  return jsonResponse({ records: filtered });
 }
