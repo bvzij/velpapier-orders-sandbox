@@ -18,24 +18,63 @@
     <div class="vp-hero-date" id="cal-count">—</div>
   </section>
 
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
-    <div class="vp-period" id="cal-view">
-      <button class="vp-period-btn is-active" data-view="envios">Por envío</button>
-      <button class="vp-period-btn" data-view="sesiones" style="display:none">Por sesión</button>
+  <div class="cal-toolbar">
+    <button class="refresh-btn cal-filter-toggle" id="cal-filter-toggle">Filtros</button>
+    <div class="cal-toolbar-right">
+      <div class="vp-period" id="cal-viewmode">
+        <button class="vp-period-btn is-active" data-mode="tiles">Mosaico</button>
+        <button class="vp-period-btn" data-mode="list">Lista</button>
+      </div>
+      <a class="refresh-btn" href="qc.html" style="text-decoration:none">Ir a empacar →</a>
     </div>
-    <a class="refresh-btn" href="qc.html" style="text-decoration:none">Ir a empacar →</a>
   </div>
 
-  <div class="vp-qc-filters" id="cal-filters">
-    <input class="vp-input" id="cal-search" type="text" placeholder="Buscar usuario o guía…" autocomplete="off" style="flex:1;min-width:220px">
-    <select class="vp-input" id="cal-packer"><option value="">Todos los empacadores</option></select>
-    <select class="vp-input" id="cal-session" style="display:none"><option value="">Todas las sesiones</option></select>
-  </div>
+  <div class="cal-layout">
 
-  <div id="cal-content"><div class="vp-loading">Cargando historial de calidad</div></div>
+    <aside class="cal-sidebar" id="cal-sidebar">
+      <div class="cal-sidebar-head">
+        <span class="cal-sidebar-title">Filtros</span>
+        <button class="cal-sidebar-close" id="cal-sidebar-close" aria-label="Cerrar filtros">&times;</button>
+      </div>
 
-  <div style="text-align:center;margin-top:1.5rem">
-    <button class="refresh-btn" id="cal-more" style="display:none;margin:0 auto">Cargar más</button>
+      <label class="cal-field">
+        <span class="cal-field-label">Buscar</span>
+        <input class="vp-input" id="cal-search" type="text"
+               placeholder="Producto, guía, pedido, usuario…" autocomplete="off">
+        <span class="cal-field-hint">Producto, número de guía, pedido de TikTok o Shopify, o usuario</span>
+      </label>
+
+      <div class="cal-field">
+        <span class="cal-field-label">Cliente</span>
+        <div class="cal-combo">
+          <input class="vp-input" id="cal-customer" type="text"
+                 placeholder="Todos los clientes" autocomplete="off">
+          <div class="cal-combo-list" id="cal-customer-list"></div>
+        </div>
+      </div>
+
+      <div class="cal-field">
+        <span class="cal-field-label">Desde</span>
+        <input class="vp-input" id="cal-from" type="date">
+      </div>
+
+      <div class="cal-field">
+        <span class="cal-field-label">Hasta</span>
+        <input class="vp-input" id="cal-to" type="date">
+      </div>
+
+      <button class="refresh-btn cal-clear-btn" id="cal-clear">Limpiar filtros</button>
+    </aside>
+
+    <div class="cal-sidebar-backdrop" id="cal-sidebar-backdrop"></div>
+
+    <div class="cal-main">
+      <div id="cal-content"><div class="vp-loading">Cargando historial de calidad</div></div>
+      <div style="text-align:center;margin-top:1.5rem">
+        <button class="refresh-btn" id="cal-more" style="display:none;margin:0 auto">Cargar más</button>
+      </div>
+    </div>
+
   </div>
 
 </main>
