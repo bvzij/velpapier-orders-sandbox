@@ -110,6 +110,11 @@ function inPrev(records, sc) {
 
 /* ── Render ─────────────────────────────────────────────────────────── */
 
+// TEMPORARY: packing sessions are disabled while the team gets used to the
+// general workflow first. Flip back to true to bring back the Empaque
+// section here. Mirrors the same flag in qc.js.
+const SESSIONS_ENABLED = false;
+
 function render() {
   const sc   = scope();
   const now  = inScope(DATA.orders, sc);
@@ -130,7 +135,7 @@ function render() {
     blockCustomers(now, sc),
     blockGeography(now),
     blockFulfillment(now),
-    blockPacking(sc),
+    SESSIONS_ENABLED ? blockPacking(sc) : '',
   ].join('');
 
   VP.paintCharts();
