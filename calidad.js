@@ -8,10 +8,10 @@ VP.mountNav('calidad');
 
 const CONTENT_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5'];
 const BOX_COLS     = ['Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
-const PAGE = 36;
 
 let QC = [], ORDERS_BY_ID = {};
-let shown = PAGE;
+let currentPage = 1;
+const PER_PAGE = 100;
 let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
@@ -84,7 +84,15 @@ function wire() {
   // Text + date filters
   ['cal-search', 'cal-from', 'cal-to'].forEach(id => {
     const el = document.getElementById(id);
-    el.addEventListener(id === 'cal-search' ? 'input' : 'change', () => { shown = PAGE; render(); });
+    el.addEventListener(id === 'cal-search' ? 'input' : 'change', () => { currentPage = 1; render(); });
+  });
+
+  // Native date inputs only reliably open their picker when you hit the
+  // small calendar icon — clicking the text/number area does nothing in
+  // several browsers. Force the picker open on any click in the field.
+  ['cal-from', 'cal-to'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('click', () => { if (el.showPicker) el.showPicker(); });
   });
 
   wireCustomerCombo();
@@ -95,14 +103,9 @@ function wire() {
     document.getElementById('cal-to').value = '';
     document.getElementById('cal-customer').value = '';
     customerFilter = '';
-    shown = PAGE;
+    currentPage = 1;
     render();
     closeSidebar();
-  });
-
-  document.getElementById('cal-more').addEventListener('click', () => {
-    shown += PAGE;
-    render();
   });
 }
 
@@ -135,7 +138,7 @@ function wireCustomerCombo() {
   input.addEventListener('input', () => {
     customerFilter = '';        // free typing = loose match, not a locked pick
     renderOptions();
-    shown = PAGE;
+    currentPage = 1;
     render();
   });
 
@@ -146,7 +149,7 @@ function wireCustomerCombo() {
     input.value = opt.dataset.value;
     customerFilter = opt.dataset.value;
     hide();
-    shown = PAGE;
+    currentPage = 1;
     render();
   });
 
@@ -236,25 +239,79 @@ function render() {
     ? `${VP.num(rows.length)} de ${VP.num(QC.length)} envío${QC.length !== 1 ? 's' : ''}`
     : `${VP.num(QC.length)} envío${QC.length !== 1 ? 's' : ''} con registro fotográfico`;
 
-  const el   = document.getElementById('cal-content');
-  const more = document.getElementById('cal-more');
+  const el = document.getElementById('cal-content');
 
   if (!rows.length) {
     el.innerHTML = `<div class="vp-empty-sm">${anyFilterActive()
       ? 'Ningún envío coincide con esos filtros.'
       : 'Todavía no hay envíos registrados.'}</div>`;
-    more.style.display = 'none';
+    document.getElementById('cal-pagination-top').innerHTML = '';
+    document.getElementById('cal-pagination-bottom').innerHTML = '';
     return;
   }
 
-  const visible = rows.slice(0, shown);
+  const totalPages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
+  if (currentPage > totalPages) currentPage = totalPages;
+
+  const start = (currentPage - 1) * PER_PAGE;
+  const visible = rows.slice(start, start + PER_PAGE);
+
   el.innerHTML = viewMode === 'list'
     ? `<div class="cal-list">${visible.map(listRowHtml).join('')}</div>`
     : `<div class="vp-qc-grid">${visible.map(cardHtml).join('')}</div>`;
 
-  more.style.display = rows.length > shown ? 'inline-flex' : 'none';
-  more.textContent = `Cargar más (${VP.num(rows.length - shown)} restantes)`;
+  const paginationHtml = renderPagination(totalPages, rows.length, start, visible.length);
+  document.getElementById('cal-pagination-top').innerHTML = paginationHtml;
+  document.getElementById('cal-pagination-bottom').innerHTML = paginationHtml;
+
+  wireCardClicks(el);
 }
+
+function renderPagination(totalPages, totalCount, start, visibleCount) {
+  if (totalPages <= 1) return '';
+  const rangeStart = start + 1;
+  const rangeEnd = start + visibleCount;
+
+  const btn = (page, label, disabled, active) =>
+    `<button class="cal-page-btn${active ? ' is-active' : ''}" data-page="${page}" ${disabled ? 'disabled' : ''}>${label}</button>`;
+
+  // Keep it to a handful of page buttons even with many pages: first, last,
+  // current, and immediate neighbors — with an ellipsis for the rest.
+  const pages = new Set([1, totalPages, currentPage, currentPage - 1, currentPage + 1]);
+  const sorted = [...pages].filter(p => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+
+  let pageButtons = '';
+  let prev = 0;
+  sorted.forEach(p => {
+    if (p - prev > 1) pageButtons += `<span class="cal-page-ellipsis">…</span>`;
+    pageButtons += btn(p, p, false, p === currentPage);
+    prev = p;
+  });
+
+  return `<div class="cal-pagination">
+    <span class="cal-pagination-range">${VP.num(rangeStart)}–${VP.num(rangeEnd)} de ${VP.num(totalCount)}</span>
+    <div class="cal-pagination-btns">
+      ${btn(currentPage - 1, '‹', currentPage === 1, false)}
+      ${pageButtons}
+      ${btn(currentPage + 1, '›', currentPage === totalPages, false)}
+    </div>
+  </div>`;
+}
+
+function goToPage(page) {
+  currentPage = page;
+  render();
+  document.getElementById('cal-content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Delegate pagination clicks once, on the static wrapper elements, rather
+// than re-binding every render (the buttons themselves are replaced each
+// render, but their container isn't).
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.cal-page-btn');
+  if (!btn || btn.disabled) return;
+  goToPage(Number(btn.dataset.page));
+});
 
 function channelTags(ids) {
   return [
@@ -273,12 +330,12 @@ function cardHtml(r) {
   // tile — otherwise the counter wraps onto its own row and the card breaks.
   const visible = photos.length > 3 ? photos.slice(0, 2) : photos.slice(0, 3);
   const cells = visible.map(u =>
-    `<img src="${VP.esc(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('');
+    `<img src="${VP.esc(u)}" loading="lazy" alt="" data-lightbox="1" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('');
   const extra = photos.length > 3
-    ? `<div class="vp-qc-photos-more" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
+    ? `<div class="vp-qc-photos-more" data-lightbox="1" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
     : '';
 
-  return `<article class="vp-qc-card">
+  return `<article class="vp-qc-card" data-qcid="${VP.esc(r['QC ID'] || '')}">
     <div class="vp-qc-photos">
       ${photos.length ? cells + extra : '<div class="vp-qc-nophoto">Sin fotos</div>'}
     </div>
@@ -301,10 +358,10 @@ function listRowHtml(r) {
   const prods  = productSummary(r);
   const thumb  = photos.length
     ? `<img class="cal-list-thumb" src="${VP.esc(photos[0])}" loading="lazy" alt=""
-            onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
+            data-lightbox="1" onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
     : `<div class="cal-list-thumb cal-list-thumb--empty">—</div>`;
 
-  return `<div class="cal-list-row">
+  return `<div class="cal-list-row" data-qcid="${VP.esc(r['QC ID'] || '')}">
     ${thumb}
     <div class="cal-list-main">
       <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}</div>
@@ -319,4 +376,88 @@ function listRowHtml(r) {
       ${photos.length > 1 ? `<br><span class="cal-list-photocount">${photos.length} fotos</span>` : ''}
     </div>
   </div>`;
+}
+
+// Clicking anywhere on a card/row opens the order detail modal, EXCEPT
+// clicks on a photo (data-lightbox="1"), which keep their existing
+// enlarge-image behavior instead.
+function wireCardClicks(container) {
+  container.querySelectorAll('[data-qcid]').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('[data-lightbox]')) return;
+      const qcId = el.getAttribute('data-qcid');
+      const row = QC.find(r => r['QC ID'] === qcId);
+      if (row) showOrderDetailModal(row);
+    });
+  });
+}
+
+/* ── Order detail modal ────────────────────────────────────────────── */
+
+function showOrderDetailModal(r) {
+  const modalRoot = document.getElementById('modal-container') || createModalRoot();
+  const ids = orderIdsOf(r);
+  const photos = photosOf(r);
+
+  const allOrderIds = [...ids.tiktok, ...ids.shopify, ...ids.manual];
+  const orders = allOrderIds.map(id => ORDERS_BY_ID[id]).filter(Boolean);
+
+  const orderBlocks = orders.length
+    ? orders.map(o => {
+        const items = VP.parseProducts(o['Products'] || '');
+        const itemRows = items.length
+          ? items.map(p => `<div class="cal-detail-item"><span>${VP.esc(p.qty)}×</span><span>${VP.esc(p.name)}</span></div>`).join('')
+          : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
+        return `<div class="cal-detail-order">
+          <div class="cal-detail-order-head">
+            <span class="cal-detail-order-id">${VP.esc(o['Order ID'] || '—')}</span>
+            <span class="cal-detail-order-price">${o['Price'] ? VP.mxn(o['Price']) : '—'}</span>
+          </div>
+          ${itemRows}
+        </div>`;
+      }).join('')
+    : '<div class="vp-empty-sm">No se encontraron los pedidos originales.</div>';
+
+  const photoGrid = photos.length
+    ? `<div class="cal-detail-photos">${photos.map(u =>
+        `<img src="${VP.esc(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>`
+    : '<div class="vp-empty-sm">Sin fotos</div>';
+
+  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
+    <div class="modal cal-detail-modal">
+      <div class="modal-title">${VP.esc(r['Primary Username'] || 'Sin usuario')}</div>
+      <div class="cal-detail-scroll">
+        <div class="cal-detail-meta">
+          <div><span class="cal-detail-label">Guía</span><code>${VP.esc(r['Tracking ID'] || '—')}</code></div>
+          <div><span class="cal-detail-label">Empacado</span>${VP.esc(VP.fmtDateTime(r['Timestamp']))}</div>
+          ${r['Packer'] ? `<div><span class="cal-detail-label">Empacador</span>${VP.esc(r['Packer'])}</div>` : ''}
+          ${r['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span></div>` : ''}
+        </div>
+        <div class="cal-detail-section-title">Pedidos</div>
+        ${orderBlocks}
+        <div class="cal-detail-section-title">Fotos</div>
+        ${photoGrid}
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="cal-detail-close">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('cal-detail-close').addEventListener('click', closeCalDetailModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target.id === 'modal-overlay') closeCalDetailModal();
+  });
+}
+
+function closeCalDetailModal() {
+  const modalRoot = document.getElementById('modal-container');
+  if (modalRoot) modalRoot.innerHTML = '';
+}
+
+function createModalRoot() {
+  const div = document.createElement('div');
+  div.id = 'modal-container';
+  document.body.appendChild(div);
+  return div;
 }
