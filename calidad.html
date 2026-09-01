@@ -21,7 +21,7 @@
   <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
     <div class="vp-period" id="cal-view">
       <button class="vp-period-btn is-active" data-view="envios">Por envío</button>
-      <button class="vp-period-btn" data-view="sesiones">Por sesión</button>
+      <button class="vp-period-btn" data-view="sesiones" style="display:none">Por sesión</button>
     </div>
     <a class="refresh-btn" href="qc.html" style="text-decoration:none">Ir a empacar →</a>
   </div>
@@ -29,7 +29,7 @@
   <div class="vp-qc-filters" id="cal-filters">
     <input class="vp-input" id="cal-search" type="text" placeholder="Buscar usuario o guía…" autocomplete="off" style="flex:1;min-width:220px">
     <select class="vp-input" id="cal-packer"><option value="">Todos los empacadores</option></select>
-    <select class="vp-input" id="cal-session"><option value="">Todas las sesiones</option></select>
+    <select class="vp-input" id="cal-session" style="display:none"><option value="">Todas las sesiones</option></select>
   </div>
 
   <div id="cal-content"><div class="vp-loading">Cargando historial de calidad</div></div>
