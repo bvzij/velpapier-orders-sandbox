@@ -1,7 +1,7 @@
 /* ============================================================================
    calidad.js — the photographic record of everything that left the building.
-   Two ways in: by shipment (what went in this box) or by session (what we
-   packed that afternoon).
+   Filters live in a sidebar (always visible on desktop, a drawer on mobile);
+   results render as tiles or as a compact list.
    ==========================================================================*/
 
 VP.mountNav('calidad');
@@ -10,51 +10,48 @@ const CONTENT_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5'
 const BOX_COLS     = ['Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
 const PAGE = 36;
 
-let QC = [], SESSIONS = [], ORDERS_BY_ID = {};
-let view = 'envios';
+let QC = [], ORDERS_BY_ID = {};
 let shown = PAGE;
+let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
+let customerFilter = '';   // exact username once picked from the combo
+let allUsernames = [];
 
-function applyQcData(q, s, o) {
+function applyQcData(q, o) {
   QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
   QC.sort((a, b) => String(b['Timestamp'] || '').localeCompare(String(a['Timestamp'] || '')));
-  SESSIONS = (s.records || []).sort((a, b) =>
-    String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
   ORDERS_BY_ID = {};
   (o.records || []).forEach(r => { ORDERS_BY_ID[r['Order ID']] = r; });
+  allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
 }
 
 /* ── Boot ───────────────────────────────────────────────────────────── */
 
 (async function init() {
   wire();
+  applyViewMode(viewMode);
   try {
     await VP.ensureToken();
 
     // Cache-first: show instantly if we have a prior snapshot, refresh
     // quietly in the background, re-render when fresh data lands.
     let gotCache = false;
-    let cq = { records: [] }, cs = { records: [] }, co = { records: [] };
+    let cq = { records: [] }, co = { records: [] };
 
-    const cachedQ = VP.getCached('action=qc', fresh => { applyQcData(fresh, cs, co); fillFilters(); render(); });
-    const cachedS = VP.getCached('action=sessions', fresh => { cs = fresh; applyQcData(cq, fresh, co); fillFilters(); render(); });
-    const cachedO = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, cs, fresh); fillFilters(); render(); });
+    const cachedQ = VP.getCached('action=qc', fresh => { cq = fresh; applyQcData(fresh, co); render(); });
+    const cachedO = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, fresh); render(); });
 
     if (cachedQ) { cq = cachedQ; gotCache = true; }
-    if (cachedS) { cs = cachedS; gotCache = true; }
     if (cachedO) { co = cachedO; gotCache = true; }
 
     if (gotCache) {
-      applyQcData(cq, cs, co);
-      fillFilters();
+      applyQcData(cq, co);
       render();
     } else {
-      const [q, s, o] = await Promise.all([
+      const [q, o] = await Promise.all([
         VP.get('action=qc'),
-        VP.get('action=sessions').catch(() => ({ records: [] })),
         VP.get('action=orders').catch(() => ({ records: [] })),
       ]);
-      applyQcData(q, s, o);
-      fillFilters();
+      applyQcData(q, o);
       render();
     }
   } catch (e) {
@@ -66,20 +63,41 @@ function applyQcData(q, s, o) {
 })();
 
 function wire() {
-  document.getElementById('cal-view').addEventListener('click', e => {
+  // Sidebar drawer (mobile/tablet only — on desktop the sidebar is static)
+  const sidebar  = document.getElementById('cal-sidebar');
+  const backdrop = document.getElementById('cal-sidebar-backdrop');
+  const openSidebar  = () => { sidebar.classList.add('is-open'); backdrop.classList.add('is-open'); };
+  const closeSidebar = () => { sidebar.classList.remove('is-open'); backdrop.classList.remove('is-open'); };
+
+  document.getElementById('cal-filter-toggle').addEventListener('click', openSidebar);
+  document.getElementById('cal-sidebar-close').addEventListener('click', closeSidebar);
+  backdrop.addEventListener('click', closeSidebar);
+
+  // Tiles / list toggle
+  document.getElementById('cal-viewmode').addEventListener('click', e => {
     const btn = e.target.closest('.vp-period-btn');
     if (!btn) return;
-    view = btn.dataset.view;
-    document.querySelectorAll('#cal-view .vp-period-btn')
-      .forEach(b => b.classList.toggle('is-active', b === btn));
-    document.getElementById('cal-filters').style.display = view === 'envios' ? 'flex' : 'none';
-    shown = PAGE;
+    applyViewMode(btn.dataset.mode);
     render();
   });
 
-  ['cal-search', 'cal-packer', 'cal-session'].forEach(id => {
+  // Text + date filters
+  ['cal-search', 'cal-from', 'cal-to'].forEach(id => {
     const el = document.getElementById(id);
     el.addEventListener(id === 'cal-search' ? 'input' : 'change', () => { shown = PAGE; render(); });
+  });
+
+  wireCustomerCombo();
+
+  document.getElementById('cal-clear').addEventListener('click', () => {
+    document.getElementById('cal-search').value = '';
+    document.getElementById('cal-from').value = '';
+    document.getElementById('cal-to').value = '';
+    document.getElementById('cal-customer').value = '';
+    customerFilter = '';
+    shown = PAGE;
+    render();
+    closeSidebar();
   });
 
   document.getElementById('cal-more').addEventListener('click', () => {
@@ -88,17 +106,51 @@ function wire() {
   });
 }
 
-function fillFilters() {
-  const packers = [...new Set(QC.map(r => String(r['Packer'] || '').trim()).filter(Boolean))].sort();
-  document.getElementById('cal-packer').innerHTML =
-    '<option value="">Todos los empacadores</option>' +
-    packers.map(p => `<option value="${VP.esc(p)}">${VP.esc(p)}</option>`).join('');
+function applyViewMode(mode) {
+  viewMode = mode === 'list' ? 'list' : 'tiles';
+  localStorage.setItem('vp_cal_viewmode', viewMode);
+  document.querySelectorAll('#cal-viewmode .vp-period-btn')
+    .forEach(b => b.classList.toggle('is-active', b.dataset.mode === viewMode));
+}
 
-  const sids = [...new Set(QC.map(r => String(r['Session ID'] || '').trim()).filter(Boolean))]
-    .sort().reverse();
-  document.getElementById('cal-session').innerHTML =
-    '<option value="">Todas las sesiones</option>' +
-    sids.map(s => `<option value="${VP.esc(s)}">${VP.esc(s)}</option>`).join('');
+/* Customer combo: type to narrow, click to pick. Typing a name that isn't
+   picked from the list still filters loosely, so partial names work too. */
+function wireCustomerCombo() {
+  const input = document.getElementById('cal-customer');
+  const list  = document.getElementById('cal-customer-list');
+
+  const hide = () => { list.classList.remove('is-open'); };
+
+  function renderOptions() {
+    const q = input.value.trim().toLowerCase();
+    const matches = (q ? allUsernames.filter(u => u.toLowerCase().includes(q)) : allUsernames).slice(0, 40);
+    if (!matches.length) { hide(); return; }
+    list.innerHTML = matches
+      .map(u => `<div class="cal-combo-option" data-value="${VP.esc(u)}">${VP.esc(u)}</div>`)
+      .join('');
+    list.classList.add('is-open');
+  }
+
+  input.addEventListener('focus', renderOptions);
+  input.addEventListener('input', () => {
+    customerFilter = '';        // free typing = loose match, not a locked pick
+    renderOptions();
+    shown = PAGE;
+    render();
+  });
+
+  list.addEventListener('mousedown', e => {
+    const opt = e.target.closest('.cal-combo-option');
+    if (!opt) return;
+    e.preventDefault();
+    input.value = opt.dataset.value;
+    customerFilter = opt.dataset.value;
+    hide();
+    shown = PAGE;
+    render();
+  });
+
+  input.addEventListener('blur', () => setTimeout(hide, 120));
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -126,45 +178,90 @@ function productSummary(r) {
   return names;
 }
 
+/* One searchable blob per row: username, tracking, every order id, and every
+   product name. Built once per render pass rather than per keystroke. */
+function searchBlob(r) {
+  const ids = orderIdsOf(r);
+  return [
+    r['Primary Username'] || '',
+    r['Tracking ID'] || '',
+    ...ids.tiktok, ...ids.shopify, ...ids.manual,
+    ...productSummary(r),
+  ].join(' ').toLowerCase();
+}
+
+/* ── Filtering ──────────────────────────────────────────────────────── */
+
+function filteredRows() {
+  const q    = document.getElementById('cal-search').value.trim().toLowerCase();
+  const from = document.getElementById('cal-from').value;
+  const to   = document.getElementById('cal-to').value;
+  const custTyped = document.getElementById('cal-customer').value.trim().toLowerCase();
+
+  let rows = QC;
+
+  if (customerFilter) {
+    rows = rows.filter(r => String(r['Primary Username'] || '').trim() === customerFilter);
+  } else if (custTyped) {
+    rows = rows.filter(r => String(r['Primary Username'] || '').toLowerCase().includes(custTyped));
+  }
+
+  if (from) {
+    const fromMs = new Date(from + 'T00:00:00').getTime();
+    rows = rows.filter(r => { const d = VP.asDate(r['Timestamp']); return d && d.getTime() >= fromMs; });
+  }
+  if (to) {
+    const toMs = new Date(to + 'T23:59:59').getTime();
+    rows = rows.filter(r => { const d = VP.asDate(r['Timestamp']); return d && d.getTime() <= toMs; });
+  }
+
+  if (q) rows = rows.filter(r => searchBlob(r).includes(q));
+
+  return rows;
+}
+
+function anyFilterActive() {
+  return !!(document.getElementById('cal-search').value.trim() ||
+            document.getElementById('cal-from').value ||
+            document.getElementById('cal-to').value ||
+            document.getElementById('cal-customer').value.trim());
+}
+
 /* ── Render ─────────────────────────────────────────────────────────── */
 
 function render() {
-  document.getElementById('cal-count').textContent =
-    `${VP.num(QC.length)} envío${QC.length !== 1 ? 's' : ''} con registro fotográfico`;
+  const rows = filteredRows();
 
-  if (view === 'envios') renderShipments();
-  else renderSessions();
-}
+  document.getElementById('cal-count').textContent = anyFilterActive()
+    ? `${VP.num(rows.length)} de ${VP.num(QC.length)} envío${QC.length !== 1 ? 's' : ''}`
+    : `${VP.num(QC.length)} envío${QC.length !== 1 ? 's' : ''} con registro fotográfico`;
 
-function renderShipments() {
-  const q       = document.getElementById('cal-search').value.trim().toLowerCase();
-  const packer  = document.getElementById('cal-packer').value;
-  const session = document.getElementById('cal-session').value;
-
-  let rows = QC;
-  if (packer)  rows = rows.filter(r => String(r['Packer'] || '').trim() === packer);
-  if (session) rows = rows.filter(r => String(r['Session ID'] || '').trim() === session);
-  if (q) {
-    rows = rows.filter(r =>
-      String(r['Primary Username'] || '').toLowerCase().includes(q) ||
-      String(r['Tracking ID'] || '').toLowerCase().includes(q));
-  }
-
-  const el = document.getElementById('cal-content');
+  const el   = document.getElementById('cal-content');
   const more = document.getElementById('cal-more');
 
   if (!rows.length) {
-    el.innerHTML = `<div class="vp-empty-sm">${q || packer || session
-      ? 'Ningún envío coincide con ese filtro.'
+    el.innerHTML = `<div class="vp-empty-sm">${anyFilterActive()
+      ? 'Ningún envío coincide con esos filtros.'
       : 'Todavía no hay envíos registrados.'}</div>`;
     more.style.display = 'none';
     return;
   }
 
   const visible = rows.slice(0, shown);
-  el.innerHTML = `<div class="vp-qc-grid">${visible.map(cardHtml).join('')}</div>`;
+  el.innerHTML = viewMode === 'list'
+    ? `<div class="cal-list">${visible.map(listRowHtml).join('')}</div>`
+    : `<div class="vp-qc-grid">${visible.map(cardHtml).join('')}</div>`;
+
   more.style.display = rows.length > shown ? 'inline-flex' : 'none';
   more.textContent = `Cargar más (${VP.num(rows.length - shown)} restantes)`;
+}
+
+function channelTags(ids) {
+  return [
+    ids.tiktok.length  ? `<span class="vp-qc-tag tiktok">TikTok · ${ids.tiktok.length}</span>`   : '',
+    ids.shopify.length ? `<span class="vp-qc-tag shopify">Shopify · ${ids.shopify.length}</span>` : '',
+    ids.manual.length  ? `<span class="vp-qc-tag manual">Manual · ${ids.manual.length}</span>`   : '',
+  ].filter(Boolean).join('');
 }
 
 function cardHtml(r) {
@@ -181,13 +278,6 @@ function cardHtml(r) {
     ? `<div class="vp-qc-photos-more" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
     : '';
 
-  const tags = [
-    ids.tiktok.length  ? `<span class="vp-qc-tag tiktok">TikTok · ${ids.tiktok.length}</span>`   : '',
-    ids.shopify.length ? `<span class="vp-qc-tag shopify">Shopify · ${ids.shopify.length}</span>` : '',
-    ids.manual.length  ? `<span class="vp-qc-tag manual">Manual · ${ids.manual.length}</span>`   : '',
-    r['Packer'] ? `<span class="vp-qc-tag">${VP.esc(r['Packer'])}</span>` : '',
-  ].filter(Boolean).join('');
-
   return `<article class="vp-qc-card">
     <div class="vp-qc-photos">
       ${photos.length ? cells + extra : '<div class="vp-qc-nophoto">Sin fotos</div>'}
@@ -197,76 +287,36 @@ function cardHtml(r) {
       <div class="vp-qc-meta">
         <code>${VP.esc(r['Tracking ID'] || '—')}</code><br>
         ${VP.esc(VP.fmtDateTime(r['Timestamp']))}
-        ${r['Session ID'] ? ` · ${VP.esc(r['Session ID'])}` : ''}
         ${prods.length ? `<br><span style="color:var(--text-faint)">${VP.esc(prods.slice(0, 3).join(', '))}${prods.length > 3 ? ` +${prods.length - 3}` : ''}</span>` : ''}
         ${r['Notes'] ? `<br><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span>` : ''}
       </div>
-      <div class="vp-qc-tags">${tags}</div>
+      <div class="vp-qc-tags">${channelTags(ids)}</div>
     </div>
   </article>`;
 }
 
-function renderSessions() {
-  const el = document.getElementById('cal-content');
-  document.getElementById('cal-more').style.display = 'none';
+function listRowHtml(r) {
+  const photos = photosOf(r);
+  const ids    = orderIdsOf(r);
+  const prods  = productSummary(r);
+  const thumb  = photos.length
+    ? `<img class="cal-list-thumb" src="${VP.esc(photos[0])}" loading="lazy" alt=""
+            onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
+    : `<div class="cal-list-thumb cal-list-thumb--empty">—</div>`;
 
-  const finished = SESSIONS.filter(s => s['Status'] === 'Finalizada');
-  const active   = SESSIONS.filter(s => s['Status'] === 'Activa');
-
-  if (!finished.length && !active.length) {
-    el.innerHTML = '<div class="vp-empty-sm">Todavía no hay sesiones registradas.</div>';
-    return;
-  }
-
-  const rowsFor = sid => QC.filter(r => String(r['Session ID'] || '') === sid);
-
-  const block = (s, isActive) => {
-    const sid   = s['Session ID'];
-    const rows  = rowsFor(sid);
-    const start = VP.asDate(s['Start Time']);
-    const end   = VP.asDate(s['End Time']);
-    const mins  = start && end ? (end - start) / 60000 : null;
-    const pkgs  = rows.length;
-    const items = Number(s['Total Items']) || 0;
-
-    return `<div class="vp-sess" id="sess-${VP.esc(sid)}">
-      <button class="vp-sess-head" onclick="toggleSession('${VP.esc(sid)}')">
-        <svg class="vp-sess-chev" width="14" height="14" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="9 18 15 12 9 6"></polyline>
-        </svg>
-        <span>
-          <span class="vp-sess-id">${VP.esc(sid)}${isActive ? ' · en curso' : ''}</span><br>
-          <span class="vp-sess-when">${VP.esc(start ? VP.fmtDateTime(start) : '—')}${s['Participants'] ? ' · ' + VP.esc(s['Participants']) : ''}</span>
-        </span>
-        <span class="vp-sess-stats">
-          <span class="vp-sess-stat"><span class="vp-sess-stat-v">${VP.num(pkgs)}</span><br><span class="vp-sess-stat-l">paquetes</span></span>
-          <span class="vp-sess-stat"><span class="vp-sess-stat-v">${VP.num(items)}</span><br><span class="vp-sess-stat-l">artículos</span></span>
-          <span class="vp-sess-stat"><span class="vp-sess-stat-v">${mins !== null ? VP.fmtDuration(mins * 60) : '—'}</span><br><span class="vp-sess-stat-l">duración</span></span>
-        </span>
-      </button>
-      <div class="vp-sess-body" style="display:none" id="sessbody-${VP.esc(sid)}"></div>
-    </div>`;
-  };
-
-  el.innerHTML =
-    (active.length ? `<div class="vp-eyebrow">En curso</div>` + active.map(s => block(s, true)).join('') + '<div style="height:1.25rem"></div>' : '') +
-    (finished.length ? `<div class="vp-eyebrow">Finalizadas</div>` + finished.map(s => block(s, false)).join('') : '');
+  return `<div class="cal-list-row">
+    ${thumb}
+    <div class="cal-list-main">
+      <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}</div>
+      <div class="cal-list-sub">
+        <code>${VP.esc(r['Tracking ID'] || '—')}</code>
+        ${prods.length ? ` · ${VP.esc(prods.slice(0, 2).join(', '))}${prods.length > 2 ? ` +${prods.length - 2}` : ''}` : ''}
+      </div>
+    </div>
+    <div class="cal-list-tags">${channelTags(ids)}</div>
+    <div class="cal-list-when">
+      ${VP.esc(VP.fmtDateTime(r['Timestamp']))}
+      ${photos.length > 1 ? `<br><span class="cal-list-photocount">${photos.length} fotos</span>` : ''}
+    </div>
+  </div>`;
 }
-
-// Lazily fills a session's photo grid the first time it's opened.
-window.toggleSession = function (sid) {
-  const wrap = document.getElementById('sess-' + sid);
-  const body = document.getElementById('sessbody-' + sid);
-  const open = body.style.display !== 'none';
-
-  body.style.display = open ? 'none' : 'block';
-  wrap.classList.toggle('is-open', !open);
-  if (open || body.dataset.loaded) return;
-
-  const rows = QC.filter(r => String(r['Session ID'] || '') === sid);
-  body.innerHTML = rows.length
-    ? `<div class="vp-qc-grid">${rows.map(cardHtml).join('')}</div>`
-    : '<div class="vp-empty-sm">Esta sesión no tiene envíos registrados.</div>';
-  body.dataset.loaded = '1';
-};
