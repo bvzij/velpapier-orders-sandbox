@@ -2,14 +2,14 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.1';
+const SCRIPT_VERSION = '2026-09-01.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
 // ─── Sheet accessors ───────────────────────────────────────────────────────────
 
 function getOrdersSheet() {
-  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheets()[0];
+  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheetByName('Orders');
 }
 
 function getShopifyMatchesSheet() {
@@ -128,6 +128,7 @@ function doGet(e) {
     if (action === 'qc') return getQC(e);
     if (action === 'active_session') return getActiveSession(e);
     if (action === 'sessions') return getSessions(e);
+    if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -209,6 +210,7 @@ function doPost(e) {
     if (action === 'end_session') return endSession(body);
     if (action === 'update_session_participants') return updateSessionParticipants(body);
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
+    if (action === 'merge_customers') return mergeCustomersAction(body);
     
 
     return jsonResponse({ error: 'Unknown action' });
@@ -2120,4 +2122,184 @@ function appendTikTokImportHistory(allHistoryRecords) {
   });
 
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DUPLICATE CUSTOMER DETECTION + MERGE
+// ADD THIS BLOCK anywhere in apps-script.gs.
+//
+// ALSO add these lines to the dispatchers:
+//   doGet:  if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
+//   doPost: if (action === 'merge_customers') return mergeCustomersAction(body);
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DUPLICATE_SCORE_THRESHOLD = 55;
+
+function phoneSimilarityScore(phoneA, fullA, phoneB, fullB) {
+  const fA = normalizePhone(fullA);
+  const fB = normalizePhone(fullB);
+  if (fA && fB) return fA === fB ? 100 : 0;
+
+  const extract = (partial) => {
+    const s = String(partial || '');
+    const prefixM = s.match(/(\d+)\*/);
+    const suffixM = s.match(/\*(\d+)$/);
+    return { prefix: prefixM ? prefixM[1] : '', suffix: suffixM ? suffixM[1] : '' };
+  };
+  const pa = extract(phoneA);
+  const pb = extract(phoneB);
+  if (!pa.prefix && !pa.suffix) return 0;
+  if (!pb.prefix && !pb.suffix) return 0;
+  if (pa.prefix === pb.prefix && pa.suffix === pb.suffix && (pa.prefix || pa.suffix)) return 100;
+  if (pa.suffix && pa.suffix === pb.suffix) return 50;
+  if (pa.prefix && pa.prefix === pb.prefix) return 40;
+  return 0;
+}
+
+function scoreCustomerPair(a, b) {
+  let score = 0;
+
+  score += phoneSimilarityScore(a['Phone Partial'], a['Phone Full'], b['Phone Partial'], b['Phone Full']) * 0.45;
+
+  const streetA = String(a['Street + Number'] || '');
+  const streetB = String(b['Street + Number'] || '');
+  if (streetA && streetB) {
+    score += shopifyStringSimilarity(streetA, streetB) * 100 * 0.25;
+  }
+
+  if (a['ZIP'] && b['ZIP'] && String(a['ZIP']) === String(b['ZIP'])) {
+    score += 15;
+  }
+
+  const initA = String(a['Initials (TT Format)'] || '').charAt(0).toUpperCase();
+  const initB = String(b['Initials (TT Format)'] || '').charAt(0).toUpperCase();
+  if (initA && initA === initB) {
+    score += 10;
+  }
+
+  const nameA = `${a['First Name'] || ''} ${a['Surname'] || ''}`.trim();
+  const nameB = `${b['First Name'] || ''} ${b['Surname'] || ''}`.trim();
+  if (nameA && nameB) {
+    score += shopifyStringSimilarity(nameA, nameB) * 100 * 0.05;
+  }
+
+  return Math.round(Math.min(score, 100));
+}
+
+// Bucketed by City first -- two customers in different cities are
+// essentially never the same person, so this avoids a full O(n²)
+// comparison across everyone (~850 customers = ~360,000 pairs unbucketed;
+// bucketing cuts this to a low-thousands worst case).
+function findDuplicateCustomers(e) {
+  const customers = sheetToObjects(getCustomersSheet())
+    .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+
+  const buckets = {};
+  customers.forEach(c => {
+    const key = String(c['City'] || '').trim().toLowerCase() || '__no_city__';
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(c);
+  });
+
+  const pairs = [];
+  const seenPairs = new Set();
+
+  Object.values(buckets).forEach(bucket => {
+    for (let i = 0; i < bucket.length; i++) {
+      for (let j = i + 1; j < bucket.length; j++) {
+        const a = bucket[i], b = bucket[j];
+        const pairKey = [a['Customer ID'], b['Customer ID']].sort().join('|');
+        if (seenPairs.has(pairKey)) continue;
+        seenPairs.add(pairKey);
+
+        const score = scoreCustomerPair(a, b);
+        if (score >= DUPLICATE_SCORE_THRESHOLD) {
+          pairs.push({ customer_a: a, customer_b: b, score: score });
+        }
+      }
+    }
+  });
+
+  pairs.sort((x, y) => y.score - x.score);
+
+  return jsonResponse({ pairs: pairs });
+}
+
+// Merges loseId into keepId: appends the loser's username+aliases into the
+// winner's Aliases, repoints every order pointing at the loser's Customer ID
+// over to the winner, and marks (does not delete) the loser's row.
+function mergeCustomersAction(body) {
+  const keepId = body.keep_id;
+  const loseId = body.merge_id;
+  if (!keepId || !loseId || keepId === loseId) {
+    return jsonResponse({ error: 'keep_id and merge_id (different) are required' });
+  }
+
+  const sheet = getCustomersSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idCol = headers.indexOf('Customer ID');
+  const usernameCol = headers.indexOf('Primary Username');
+  const aliasesCol = headers.indexOf('Aliases');
+  const shopifyIdCol = headers.indexOf('Shopify Customer ID');
+  const notesCol = headers.indexOf('Notes');
+
+  let keepRow = -1, loseRow = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idCol]) === String(keepId)) keepRow = i;
+    if (String(data[i][idCol]) === String(loseId)) loseRow = i;
+  }
+  if (keepRow === -1 || loseRow === -1) {
+    return jsonResponse({ error: 'One or both customers not found' });
+  }
+
+  const loserUsername = String(data[loseRow][usernameCol] || '').trim();
+  const loserAliases = String(data[loseRow][aliasesCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const newAliasCandidates = [loserUsername, ...loserAliases].filter(Boolean);
+
+  const currentAliases = String(data[keepRow][aliasesCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const mergedAliases = [...new Set([...currentAliases, ...newAliasCandidates])];
+  if (aliasesCol >= 0) sheet.getRange(keepRow + 1, aliasesCol + 1).setValue(mergedAliases.join(', '));
+
+  const loserShopifyIds = String(data[loseRow][shopifyIdCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (loserShopifyIds.length && shopifyIdCol >= 0) {
+    loserShopifyIds.forEach(sid => appendShopifyIdToCustomer(keepId, sid));
+  }
+
+  const ordersSheet = getOrdersSheet();
+  const oLastRow = ordersSheet.getLastRow();
+  const oLastCol = ordersSheet.getLastColumn();
+  const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
+  const oCustCol = oh.indexOf('Customer ID');
+  let ordersRepointed = 0;
+
+  if (oLastRow > 1) {
+    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
+    oData.forEach((row) => {
+      if (String(row[oCustCol]) === String(loseId)) {
+        row[oCustCol] = keepId;
+        ordersRepointed++;
+      }
+    });
+    if (ordersRepointed > 0) {
+      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    }
+  }
+
+  if (usernameCol >= 0) {
+    sheet.getRange(loseRow + 1, usernameCol + 1).setValue(`${loserUsername} (merged→${keepId})`);
+  }
+  if (notesCol >= 0) {
+    const existingNotes = String(data[loseRow][notesCol] || '');
+    sheet.getRange(loseRow + 1, notesCol + 1).setValue(
+      (existingNotes ? existingNotes + ' | ' : '') + `Merged into ${keepId} on ${nowISO()}`
+    );
+  }
+
+  return jsonResponse({
+    result: 'merged',
+    keep_id: keepId,
+    merge_id: loseId,
+    orders_repointed: ordersRepointed,
+  });
 }
