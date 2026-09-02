@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.2';
+const SCRIPT_VERSION = '2026-09-01.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -88,6 +88,12 @@ function normalizeUsername(username) {
 function findCustomerByUsername(customers, rawUsername) {
   const normalized = normalizeUsername(rawUsername);
   if (!normalized) return null;
+
+  // Records that have been merged into another customer must never be
+  // matched again -- their Primary Username is intentionally stale
+  // (e.g. "chinosss16 (merged→CUST-775)") and would otherwise cause the
+  // fuzzy-match tier to false-positive against the loser record itself.
+  customers = customers.filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
 
   let match = customers.find(c =>
     normalizeUsername(c['Primary Username']) === normalized
