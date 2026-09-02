@@ -19,11 +19,19 @@
 
 document.getElementById('aj-scan-duplicates').addEventListener('click', openDuplicatesModal);
 
+const AJ_DUP_DEFAULT_THRESHOLD = 55;
+
 async function openDuplicatesModal() {
   const modalRoot = document.getElementById('modal-container');
   modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
     <div class="modal aj-merge-modal">
       <div class="modal-title">Clientes duplicados</div>
+      <div class="aj-dup-threshold-row">
+        <span class="aj-dup-threshold-label">Umbral</span>
+        <input type="range" id="aj-dup-threshold-slider" min="0" max="100" step="1" value="${AJ_DUP_DEFAULT_THRESHOLD}">
+        <span class="aj-dup-threshold-value" id="aj-dup-threshold-value">${AJ_DUP_DEFAULT_THRESHOLD}%</span>
+        <button class="btn aj-dup-refresh-btn" id="aj-dup-refresh-btn" title="Buscar de nuevo con este umbral" aria-label="Actualizar">↻</button>
+      </div>
       <div class="aj-merge-scroll" id="aj-duplicates-content">
         <div class="vp-loading">Comparando clientes, puede tardar un momento…</div>
       </div>
@@ -40,13 +48,25 @@ async function openDuplicatesModal() {
     if (e.target.id === 'modal-overlay') modalRoot.innerHTML = '';
   });
 
+  const slider = document.getElementById('aj-dup-threshold-slider');
+  const valueLabel = document.getElementById('aj-dup-threshold-value');
+  slider.addEventListener('input', () => { valueLabel.textContent = slider.value + '%'; });
+  document.getElementById('aj-dup-refresh-btn').addEventListener('click', () => {
+    loadDuplicates(parseInt(slider.value, 10));
+  });
+
+  await loadDuplicates(AJ_DUP_DEFAULT_THRESHOLD);
+}
+
+async function loadDuplicates(threshold) {
+  const content = document.getElementById('aj-duplicates-content');
+  content.innerHTML = '<div class="vp-loading">Comparando clientes, puede tardar un momento…</div>';
   try {
     await VP.ensureToken();
-    const data = await VP.get('action=find_duplicate_customers');
+    const data = await VP.get('action=find_duplicate_customers&threshold=' + threshold);
     renderDuplicates(data.pairs || []);
   } catch (e) {
-    document.getElementById('aj-duplicates-content').innerHTML =
-      `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
+    content.innerHTML = `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
   }
 }
 
