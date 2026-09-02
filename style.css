@@ -447,6 +447,29 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .vp-nav-link.is-active { background: var(--text); color: var(--surface); }
 .vp-nav-link:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
 
+.vp-nav-theme-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  position: relative;
+}
+.vp-nav-theme-toggle:hover { background: var(--surface2); color: var(--text); }
+.vp-nav-theme-toggle:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.vp-nav-theme-toggle svg { position: absolute; transition: opacity .15s, transform .15s; }
+.vp-nav-theme-toggle .vp-theme-icon-moon { opacity: 0; transform: scale(.6) rotate(-90deg); }
+.vp-nav-theme-toggle .vp-theme-icon-sun { opacity: 1; transform: scale(1) rotate(0); }
+.vp-nav-theme-toggle.is-dark .vp-theme-icon-sun { opacity: 0; transform: scale(.6) rotate(90deg); }
+.vp-nav-theme-toggle.is-dark .vp-theme-icon-moon { opacity: 1; transform: scale(1) rotate(0); }
+
 /* ── Page shell for the new pages ───────────────────────────────────── */
 
 .vp-shell { max-width: 1180px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
@@ -1499,6 +1522,27 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 .aj-dup-username { font-weight: 600; margin-bottom: 4px; }
 .aj-dup-detail { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+.aj-dup-expand-btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  border-top: 0.5px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+}
+.aj-dup-expand-btn:hover { background: var(--surface2); color: var(--text); }
+
+.aj-dup-expanded {
+  border-top: 0.5px solid var(--border);
+  background: var(--surface2);
+}
 
 .aj-dup-actions {
   display: flex;
