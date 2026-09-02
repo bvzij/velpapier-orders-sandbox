@@ -62,11 +62,20 @@ function renderDuplicates(pairs) {
     ${VP.num(pairs.length)} par${pairs.length !== 1 ? 'es' : ''} probable${pairs.length !== 1 ? 's' : ''} encontrado${pairs.length !== 1 ? 's' : ''}
   </div>` + pairs.map(pairHtml).join('');
 
-  content.querySelectorAll('.aj-dup-merge-btn').forEach(el => {
+    content.querySelectorAll('.aj-dup-merge-btn').forEach(el => {
     el.addEventListener('click', () => handleMerge(el));
   });
   content.querySelectorAll('.aj-dup-dismiss-btn').forEach(el => {
     el.addEventListener('click', () => el.closest('.aj-dup-pair').remove());
+  });
+  content.querySelectorAll('.aj-dup-expand-btn').forEach(el => {
+    el.addEventListener('click', () => {
+      const expanded = el.nextElementSibling;
+      const isOpen = expanded.style.display === 'block';
+      expanded.style.display = isOpen ? 'none' : 'block';
+      el.setAttribute('aria-expanded', String(!isOpen));
+      el.textContent = isOpen ? 'Ver más ▾' : 'Ver menos ▴';
+    });
   });
 }
 
@@ -76,6 +85,20 @@ function customerDetailHtml(c) {
     [c['Street + Number'], c['City'], c['State']].filter(Boolean).join(', '),
     c['ZIP'] || '',
     c['Aliases'] ? `Alias: ${c['Aliases']}` : '',
+  ].filter(Boolean);
+  return lines.map(l => VP.esc(l)).join('<br>');
+}
+
+function customerFullDetailHtml(c) {
+  const lines = [
+    c['Customer ID'] ? `ID: ${c['Customer ID']}` : '',
+    [c['First Name'], c['Surname']].filter(Boolean).join(' '),
+    c['Initials (TT Format)'] ? `Iniciales: ${c['Initials (TT Format)']}` : '',
+    c['Email'] || '',
+    c['Phone Full'] ? `Tel. completo: ${c['Phone Full']}` : '',
+    c['Phone Partial'] ? `Tel. parcial: ${c['Phone Partial']}` : '',
+    c['Shipment Count'] !== undefined ? `Envíos: ${c['Shipment Count']}` : '',
+    c['Notes'] ? `Notas: ${c['Notes']}` : '',
   ].filter(Boolean);
   return lines.map(l => VP.esc(l)).join('<br>');
 }
@@ -95,6 +118,15 @@ function pairHtml(pair) {
       <div class="aj-dup-side">
         <div class="aj-dup-username">${VP.esc(b['Primary Username'] || b['Customer ID'])}</div>
         <div class="aj-dup-detail">${customerDetailHtml(b)}</div>
+      </div>
+    </div>
+    <button class="aj-dup-expand-btn" type="button" aria-expanded="false">Ver más ▾</button>
+    <div class="aj-dup-compare aj-dup-expanded" style="display:none">
+      <div class="aj-dup-side">
+        <div class="aj-dup-detail">${customerFullDetailHtml(a)}</div>
+      </div>
+      <div class="aj-dup-side">
+        <div class="aj-dup-detail">${customerFullDetailHtml(b)}</div>
       </div>
     </div>
     <div class="aj-dup-actions">
@@ -136,12 +168,14 @@ async function openMergeHistoryModal() {
         <div class="vp-loading">Cargando historial…</div>
       </div>
       <div class="modal-actions">
+        <button class="btn" id="aj-history-back-btn">← Volver a duplicados</button>
         <button class="btn" id="aj-history-close-btn">Cerrar</button>
       </div>
     </div>
   </div>`;
 
   document.getElementById('aj-history-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+  document.getElementById('aj-history-back-btn').addEventListener('click', () => { openDuplicatesModal(); });
   document.getElementById('modal-overlay-history').addEventListener('click', e => {
     if (e.target.id === 'modal-overlay-history') modalRoot.innerHTML = '';
   });
@@ -165,19 +199,25 @@ function renderMergeHistory(records) {
   // Most recent first
   records.sort((a, b) => String(b['Merged Date'] || '').localeCompare(String(a['Merged Date'] || '')));
 
-  el.innerHTML = records.map(r => {
-    const undone = r['Status'] === 'Deshecho';
+    el.innerHTML = records.map(r => {
+    const status = r['Status'];
+    let rightSide;
+    if (status === 'Deshecho') {
+      rightSide = `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Deshecho</span>`;
+    } else if (status === 'Limpiado') {
+      rightSide = `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Eliminado permanentemente</span>`;
+    } else {
+      rightSide = `<div style="display:flex;gap:6px">
+            <button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>
+            <button class="refresh-btn aj-cleanup-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Limpiar</button>
+          </div>`;
+    }
     return `<div class="aj-history-row" data-merge-id="${VP.esc(r['Merge ID'])}">
       <div class="aj-history-main">
         <span class="aj-history-arrow">${VP.esc(r['Merged Username'] || r['Merged Customer ID'])} → ${VP.esc(r['Kept Username'] || r['Kept Customer ID'])}</span>
         <span class="aj-history-date">${VP.esc(VP.fmtDateTime ? VP.fmtDateTime(r['Merged Date']) : r['Merged Date'])}</span>
       </div>
-            ${undone
-        ? `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Deshecho</span>`
-        : `<div style="display:flex;gap:6px">
-            <button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>
-            <button class="refresh-btn aj-cleanup-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Limpiar</button>
-          </div>`}
+      ${rightSide}
     </div>`;
   }).join('');
 
