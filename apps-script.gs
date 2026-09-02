@@ -85,7 +85,7 @@ function generateCustomerID(sheet) {
 
 function normalizeUsername(username) {
   if (!username) return '';
-  return username
+  return String(username)
     .toLowerCase()
     .replace(/^@/, '')
     .replace(/^tiktok\.com\/@?/, '')
