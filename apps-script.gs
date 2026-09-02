@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.3';
+const SCRIPT_VERSION = '2026-09-01.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -135,6 +135,7 @@ function doGet(e) {
     if (action === 'active_session') return getActiveSession(e);
     if (action === 'sessions') return getSessions(e);
     if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
+    if (action === 'merge_history') return getMergeHistory(e);
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -181,7 +182,8 @@ function doGet(e) {
         return jsonResponse(result || null);
       }
 
-      return jsonResponse({ records: customers });
+      const visibleCustomers = customers.filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+      return jsonResponse({ records: visibleCustomers });
     }
 
     return jsonResponse({ error: 'Unknown action' });
@@ -217,6 +219,8 @@ function doPost(e) {
     if (action === 'update_session_participants') return updateSessionParticipants(body);
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     if (action === 'merge_customers') return mergeCustomersAction(body);
+    if (action === 'undo_merge') return undoMergeAction(body);
+    if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
     
 
     return jsonResponse({ error: 'Unknown action' });
@@ -2130,15 +2134,6 @@ function appendTikTokImportHistory(allHistoryRecords) {
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// DUPLICATE CUSTOMER DETECTION + MERGE
-// ADD THIS BLOCK anywhere in apps-script.gs.
-//
-// ALSO add these lines to the dispatchers:
-//   doGet:  if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
-//   doPost: if (action === 'merge_customers') return mergeCustomersAction(body);
-// ═══════════════════════════════════════════════════════════════════════════
-
 const DUPLICATE_SCORE_THRESHOLD = 55;
 
 function phoneSimilarityScore(phoneA, fullA, phoneB, fullB) {
@@ -2260,6 +2255,7 @@ function mergeCustomersAction(body) {
   }
 
   const loserUsername = String(data[loseRow][usernameCol] || '').trim();
+  const keeperUsername = String(data[keepRow][usernameCol] || '').trim();
   const loserAliases = String(data[loseRow][aliasesCol] || '').split(',').map(s => s.trim()).filter(Boolean);
   const newAliasCandidates = [loserUsername, ...loserAliases].filter(Boolean);
 
@@ -2302,10 +2298,197 @@ function mergeCustomersAction(body) {
     );
   }
 
+  logMergeHistory(keepId, keeperUsername, loseId, loserUsername, ordersRepointed);
+
   return jsonResponse({
     result: 'merged',
     keep_id: keepId,
     merge_id: loseId,
     orders_repointed: ordersRepointed,
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MERGE HISTORY + UNDO
+//
+// Add a new tab to the Customers spreadsheet named exactly "Merge History"
+// with these headers, in this order:
+//   Merge ID | Kept Customer ID | Kept Username | Merged Customer ID |
+//   Merged Username | Orders Repointed | Status | Merged Date | Undone Date
+//
+// ADD THIS BLOCK anywhere in apps-script.gs.
+// ALSO add to the dispatchers:
+//   doGet:  if (action === 'merge_history') return getMergeHistory(e);
+//   doPost: if (action === 'undo_merge') return undoMergeAction(body);
+//
+// ALSO: mergeCustomersAction() needs one addition -- see the marked spot
+// below to log each merge as it happens.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getMergeHistorySheet() {
+  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Merge History');
+}
+
+function getMergeHistory(e) {
+  const records = sheetToObjects(getMergeHistorySheet());
+  return jsonResponse({ records: records });
+}
+
+// Call this from inside mergeCustomersAction(), right before its final
+// `return jsonResponse(...)` line, passing the same values it already has:
+//   logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepointed);
+function logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepointed) {
+  const sheet = getMergeHistorySheet();
+  sheet.appendRow([
+    'MERGE-' + Utilities.getUuid().slice(0, 8),
+    keepId,
+    keptUsername,
+    loseId,
+    loserUsername,
+    ordersRepointed,
+    'Activo',
+    nowISO(),
+    '',
+  ]);
+}
+
+// Reverses a merge: restores the loser's original Primary Username, removes
+// it from the winner's Aliases, and repoints any orders that were moved
+// back to the loser's Customer ID. Marks the history row as undone rather
+// than deleting it.
+function undoMergeAction(body) {
+  const mergeId = body.merge_id;
+  if (!mergeId) return jsonResponse({ error: 'merge_id is required' });
+
+  const historySheet = getMergeHistorySheet();
+  const hData = historySheet.getDataRange().getValues();
+  const hHeaders = hData[0];
+  const iMergeId = hHeaders.indexOf('Merge ID');
+  const iKeepId = hHeaders.indexOf('Kept Customer ID');
+  const iLoseId = hHeaders.indexOf('Merged Customer ID');
+  const iLoseUsername = hHeaders.indexOf('Merged Username');
+  const iStatus = hHeaders.indexOf('Status');
+  const iUndoneDate = hHeaders.indexOf('Undone Date');
+
+  let historyRow = -1;
+  let record = null;
+  for (let i = 1; i < hData.length; i++) {
+    if (String(hData[i][iMergeId]) === String(mergeId)) {
+      historyRow = i;
+      record = hData[i];
+      break;
+    }
+  }
+  if (historyRow === -1) return jsonResponse({ error: 'Merge record not found' });
+  if (record[iStatus] === 'Deshecho') return jsonResponse({ error: 'This merge was already undone' });
+
+  const keepId = record[iKeepId];
+  const loseId = record[iLoseId];
+  const originalLoserUsername = record[iLoseUsername];
+
+  const custSheet = getCustomersSheet();
+  const cData = custSheet.getDataRange().getValues();
+  const cHeaders = cData[0];
+  const cIdCol = cHeaders.indexOf('Customer ID');
+  const cUsernameCol = cHeaders.indexOf('Primary Username');
+  const cAliasesCol = cHeaders.indexOf('Aliases');
+  const cNotesCol = cHeaders.indexOf('Notes');
+
+  let keepRow = -1, loseRow = -1;
+  for (let i = 1; i < cData.length; i++) {
+    if (String(cData[i][cIdCol]) === String(keepId)) keepRow = i;
+    if (String(cData[i][cIdCol]) === String(loseId)) loseRow = i;
+  }
+
+  if (loseRow >= 0) {
+    custSheet.getRange(loseRow + 1, cUsernameCol + 1).setValue(originalLoserUsername);
+    if (cNotesCol >= 0) {
+      const existing = String(cData[loseRow][cNotesCol] || '');
+      custSheet.getRange(loseRow + 1, cNotesCol + 1).setValue(
+        existing.replace(new RegExp('\\s*\\|?\\s*Merged into ' + keepId + '.*'), '')
+      );
+    }
+  }
+
+  if (keepRow >= 0 && cAliasesCol >= 0) {
+    const currentAliases = String(cData[keepRow][cAliasesCol] || '')
+      .split(',').map(s => s.trim()).filter(Boolean)
+      .filter(a => a !== originalLoserUsername);
+    custSheet.getRange(keepRow + 1, cAliasesCol + 1).setValue(currentAliases.join(', '));
+  }
+
+  const ordersSheet = getOrdersSheet();
+  const oLastRow = ordersSheet.getLastRow();
+  const oLastCol = ordersSheet.getLastColumn();
+  const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
+  const oCustCol = oh.indexOf('Customer ID');
+  const oUsernameCol = oh.indexOf('Primary Username');
+  let ordersReverted = 0;
+
+  // NOTE: this is a best-effort revert -- it cannot distinguish orders that
+  // legitimately belonged to the winner already vs. ones moved during this
+  // specific merge, if the winner had other orders before. Given Vel's
+  // current workflow (cleaning customers BEFORE the historical import, with
+  // zero active orders in the system at merge time), this ambiguity does
+  // not arise in practice today.
+  if (oLastRow > 1) {
+    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
+    oData.forEach(row => {
+      if (String(row[oCustCol]) === String(keepId) && row[oUsernameCol] === originalLoserUsername) {
+        row[oCustCol] = loseId;
+        ordersReverted++;
+      }
+    });
+    if (ordersReverted > 0) {
+      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    }
+  }
+
+  historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
+  if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
+
+  return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
+}
+
+// Permanently deletes a merged-away customer's row from the Customers sheet.
+// Only allowed when the Merge History record is still 'Activo' -- i.e. the
+// merge was never undone. This is a one-way cleanup step for after a merge
+// has been confirmed correct; it does not touch orders or the winning
+// customer's data, since those were already migrated at merge time.
+function deleteMergedCustomerAction(body) {
+  const mergeId = body.merge_id;
+  if (!mergeId) return jsonResponse({ error: 'merge_id is required' });
+
+  const historySheet = getMergeHistorySheet();
+  const hData = historySheet.getDataRange().getValues();
+  const hHeaders = hData[0];
+  const iMergeId = hHeaders.indexOf('Merge ID');
+  const iLoseId = hHeaders.indexOf('Merged Customer ID');
+  const iStatus = hHeaders.indexOf('Status');
+
+  let record = null;
+  for (let i = 1; i < hData.length; i++) {
+    if (String(hData[i][iMergeId]) === String(mergeId)) { record = hData[i]; break; }
+  }
+  if (!record) return jsonResponse({ error: 'Merge record not found' });
+  if (record[iStatus] !== 'Activo') {
+    return jsonResponse({ error: 'Only an active (non-undone) merge can be cleaned up' });
+  }
+
+  const loseId = record[iLoseId];
+  const custSheet = getCustomersSheet();
+  const cData = custSheet.getDataRange().getValues();
+  const cIdCol = cData[0].indexOf('Customer ID');
+  const cUsernameCol = cData[0].indexOf('Primary Username');
+
+  let loseRow = -1;
+  for (let i = 1; i < cData.length; i++) {
+    if (String(cData[i][cIdCol]) === String(loseId)) { loseRow = i; break; }
+  }
+  if (loseRow === -1) return jsonResponse({ error: 'Merged customer row not found (already deleted?)' });
+
+  const deletedUsername = String(cData[loseRow][cUsernameCol] || '');
+  custSheet.deleteRow(loseRow + 1);
+
+  return jsonResponse({ result: 'deleted', merge_id: mergeId, customer_id: loseId, username: deletedUsername });
 }
