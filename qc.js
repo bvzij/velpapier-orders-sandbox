@@ -126,60 +126,27 @@ async function pushNotesAndOrders() {
 
 // ── Init ─────────────────────────────────────────────────────────────────
 
-// Known packer names (persisted, editable via the modal's "+" field)
-let knownPackers = JSON.parse(localStorage.getItem('vp_known_packers') || '["Bob","Mariana","Mau"]');
-// Which of them are actively packing right now (persisted per device)
-let checkedPackers = JSON.parse(localStorage.getItem('vp_checked_packers') || '[]');
+// ── Packer tracking (UI disabled, backend kept intact) ─────────────────
+// The packer picker UI (button + checklist modal) was removed since packing
+// is currently done by one person. The underlying Session Participants /
+// QC-row Packer plumbing is left fully working underneath, just fed by a
+// hardcoded single-packer default instead of a checklist, so re-enabling
+// multi-packer selection later only requires restoring the UI, not rebuilding
+// this logic. Update DEFAULT_PACKER (or restore the checklist UI) when
+// there's more than one packer again.
+const DEFAULT_PACKER = 'Vel';
+let knownPackers = [DEFAULT_PACKER];
+let checkedPackers = [DEFAULT_PACKER];
 
-function saveKnownPackers() { localStorage.setItem('vp_known_packers', JSON.stringify(knownPackers)); }
-function saveCheckedPackers() { localStorage.setItem('vp_checked_packers', JSON.stringify(checkedPackers)); }
+function saveKnownPackers() { /* no-op while the picker UI is disabled */ }
+function saveCheckedPackers() { /* no-op while the picker UI is disabled */ }
 
 function currentPacker() {
   // Used for the single "Packer" column on each QC row — first checked name, or blank
   return checkedPackers[0] || '';
 }
 
-function updatePackersBtnLabel() {
-  const label = document.getElementById('packers-btn-label');
-  label.textContent = checkedPackers.length ? checkedPackers.join(', ') : '—';
-}
-updatePackersBtnLabel();
-
-function openPackersModal() {
-  renderPackersChecklist();
-  document.getElementById('packers-modal').style.display = 'flex';
-}
-function closePackersModal() {
-  document.getElementById('packers-modal').style.display = 'none';
-  updatePackersBtnLabel();
-}
-function renderPackersChecklist() {
-  const box = document.getElementById('packers-checklist');
-  box.innerHTML = knownPackers.map(name => `
-    <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer">
-      <input type="checkbox" value="${escapeAttr(name)}" ${checkedPackers.includes(name) ? 'checked' : ''} onchange="togglePacker('${escapeAttr(name)}')">
-      ${escapeHtml(name)}
-    </label>
-  `).join('');
-}
-function togglePacker(name) {
-  const idx = checkedPackers.indexOf(name);
-  if (idx >= 0) checkedPackers.splice(idx, 1);
-  else checkedPackers.push(name);
-  saveCheckedPackers();
-  pushParticipants();
-}
-function addManualPacker() {
-  const input = document.getElementById('packer-manual-input');
-  const name = input.value.trim();
-  if (!name) return;
-  if (!knownPackers.includes(name)) { knownPackers.push(name); saveKnownPackers(); }
-  if (!checkedPackers.includes(name)) { checkedPackers.push(name); saveCheckedPackers(); }
-  input.value = '';
-  renderPackersChecklist();
-  pushParticipants();
-}
-
+function updatePackersBtnLabel() { /* no-op: packer button removed from the UI */ }
 // Push the checked-packer list to the session row so every device sees the
 // same "who's packing" state, instead of each device only knowing its own.
 async function pushParticipants() {
@@ -310,27 +277,14 @@ async function checkSessionAndRoute() {
     activeSession = null;
   }
 
-  if (activeSession) {
+    if (activeSession) {
     document.getElementById('session-banner').style.display = 'flex';
     document.getElementById('header-end-session-btn').style.display = 'block';
-    // Adopt whoever is already marked as packing on this session (server is
-    // the source of truth) instead of trusting only this device's local list.
-    const liveParticipants = String(activeSession['Participants'] || '')
-      .split(',').map(s => s.trim()).filter(Boolean);
-    if (liveParticipants.length) {
-      checkedPackers = liveParticipants;
-      saveCheckedPackers();
-      liveParticipants.forEach(name => { if (!knownPackers.includes(name)) knownPackers.push(name); });
-      saveKnownPackers();
-    }
-    updatePackersBtnLabel();
+    // Packer picker UI is disabled (see DEFAULT_PACKER) -- no longer adopting
+    // server-side Participants here, since checkedPackers is fixed.
     switchTab('pending');
     await loadPending();
   } else {
-    document.getElementById('view-session-gate').style.display = 'block';
-    renderHistoryList('history-list-gate');
-  }
-}
 
 let startingSession = false;
 
@@ -860,17 +814,10 @@ async function refreshQcBadges() {
       return;
     }
 
-    if (sessionData.session) {
+        if (sessionData.session) {
       activeSession = sessionData.session;
-      const liveParticipants = String(activeSession['Participants'] || '')
-        .split(',').map(s => s.trim()).filter(Boolean);
-      // Only adopt if it actually differs, to avoid clobbering a checkbox
-      // the user is mid-click on this exact device
-      if (liveParticipants.join(',') !== checkedPackers.join(',')) {
-        checkedPackers = liveParticipants;
-        saveCheckedPackers();
-        updatePackersBtnLabel();
-      }
+      // Packer picker UI is disabled (see DEFAULT_PACKER) -- checkedPackers
+      // stays fixed, so no need to reconcile against live Participants here.
     }
     updateSessionBanner();
     if (currentTab === 'packed') renderPackedList();
