@@ -105,7 +105,7 @@ window.VP = (function () {
     { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes' },
   ];
 
-  // Injects the persistent top bar. `active` is one of the NAV ids.
+    // Injects the persistent top bar. `active` is one of the NAV ids.
   function mountNav(active) {
     const el = document.createElement('nav');
     el.className = 'vp-nav';
@@ -118,8 +118,25 @@ window.VP = (function () {
         ${NAV.map(n => `
           <a href="${n.href}" class="vp-nav-link${n.id === active ? ' is-active' : ''}">${n.label}</a>
         `).join('')}
-      </div>`;
+      </div>
+      <button class="vp-nav-theme-toggle" id="vp-nav-theme-toggle" type="button" aria-label="Cambiar tema">
+        <svg class="vp-theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+        </svg>
+        <svg class="vp-theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/>
+        </svg>
+      </button>`;
     document.body.insertBefore(el, document.body.firstChild);
+
+    const toggleBtn = document.getElementById('vp-nav-theme-toggle');
+    const reflectToggle = () => toggleBtn.classList.toggle('is-dark', getTheme() === 'dark');
+    toggleBtn.addEventListener('click', () => {
+      setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+      reflectToggle();
+    });
+    reflectToggle();
   }
 
   /* ── Formatting ─────────────────────────────────────────────────────── */
