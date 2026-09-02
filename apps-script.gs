@@ -2474,6 +2474,43 @@ function logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepo
   ]);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SHEET FORMATTING — center-align all data
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Re-centers every populated cell (header row included) across every main
+// sheet. Run manually any time from the Apps Script editor's function
+// dropdown, or set up a time-based trigger (Triggers > Add Trigger >
+// centerAlignAllSheets > Time-driven) to run this automatically, e.g. once
+// a night, so new imports/writes never sit left-aligned for long.
+function centerAlignAllSheets() {
+  const sheets = [
+    getOrdersSheet(),
+    getCustomersSheet(),
+    getQCSheet(),
+    getShopifyMatchesSheet(),
+    getSessionsSheet(),
+    getProductParentsSheet(),
+    getProductVariantsSheet(),
+    getCatalogSuggestionsSheet(),
+    getTikTokImportHistorySheet(),
+    getDismissedDuplicatesSheet(),
+    getMergeHistorySheet(),
+  ];
+
+  let centered = 0;
+  sheets.forEach(sheet => {
+    if (!sheet) return;
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow < 1 || lastCol < 1) return;
+    sheet.getRange(1, 1, lastRow, lastCol).setHorizontalAlignment('center');
+    centered++;
+  });
+
+  Logger.log('Center-aligned ' + centered + ' sheets.');
+}
+
 // Reverses a merge: restores the loser's original Primary Username, restores
 // the keeper's pre-merge Aliases/Shipment Count/backfilled fields from the
 // logged snapshot, and repoints any orders that were moved back to the
