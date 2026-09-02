@@ -89,18 +89,31 @@ function customerDetailHtml(c) {
   return lines.map(l => VP.esc(l)).join('<br>');
 }
 
-function customerFullDetailHtml(c) {
-  const lines = [
-    c['Customer ID'] ? `ID: ${c['Customer ID']}` : '',
-    [c['First Name'], c['Surname']].filter(Boolean).join(' '),
-    c['Initials (TT Format)'] ? `Iniciales: ${c['Initials (TT Format)']}` : '',
-    c['Email'] || '',
-    c['Phone Full'] ? `Tel. completo: ${c['Phone Full']}` : '',
-    c['Phone Partial'] ? `Tel. parcial: ${c['Phone Partial']}` : '',
-    c['Shipment Count'] !== undefined ? `Envíos: ${c['Shipment Count']}` : '',
-    c['Notes'] ? `Notas: ${c['Notes']}` : '',
-  ].filter(Boolean);
-  return lines.map(l => VP.esc(l)).join('<br>');
+// Fields already visible in the collapsed card (username, phone summary,
+// street/city/state/zip, aliases) are intentionally excluded here -- this
+// table is only for the *extra* fields, shown as aligned rows so a value
+// present on one side but not the other still lines up correctly.
+const AJ_DUP_EXTRA_FIELDS = [
+  ['Customer ID',            'ID'],
+  ['First Name',             'Nombre'],
+  ['Surname',                'Apellido'],
+  ['Initials (TT Format)',   'Iniciales'],
+  ['Email',                  'Email'],
+  ['Phone Full',             'Tel. completo'],
+  ['Shipment Count',         'Envíos'],
+  ['Notes',                  'Notas'],
+];
+
+function customerExtraFieldsTableHtml(a, b) {
+  return AJ_DUP_EXTRA_FIELDS.map(([key, label]) => {
+    const valA = a[key] !== undefined && a[key] !== '' ? VP.esc(String(a[key])) : '—';
+    const valB = b[key] !== undefined && b[key] !== '' ? VP.esc(String(b[key])) : '—';
+    return `<div class="aj-dup-field-row">
+      <div class="aj-dup-field-label">${VP.esc(label)}</div>
+      <div class="aj-dup-field-val">${valA}</div>
+      <div class="aj-dup-field-val">${valB}</div>
+    </div>`;
+  }).join('');
 }
 
 function pairHtml(pair) {
@@ -120,14 +133,9 @@ function pairHtml(pair) {
         <div class="aj-dup-detail">${customerDetailHtml(b)}</div>
       </div>
     </div>
-    <button class="aj-dup-expand-btn" type="button" aria-expanded="false">Ver más ▾</button>
-    <div class="aj-dup-compare aj-dup-expanded" style="display:none">
-      <div class="aj-dup-side">
-        <div class="aj-dup-detail">${customerFullDetailHtml(a)}</div>
-      </div>
-      <div class="aj-dup-side">
-        <div class="aj-dup-detail">${customerFullDetailHtml(b)}</div>
-      </div>
+        <button class="aj-dup-expand-btn" type="button" aria-expanded="false">Ver más ▾</button>
+    <div class="aj-dup-expanded" style="display:none">
+      ${customerExtraFieldsTableHtml(a, b)}
     </div>
     <div class="aj-dup-actions">
       <button class="refresh-btn aj-dup-dismiss-btn">No son iguales</button>
