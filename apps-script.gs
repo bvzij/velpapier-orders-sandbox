@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-08-30.2';
+const SCRIPT_VERSION = '2026-09-01.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -691,10 +691,13 @@ function importTikTokOrders(body) {
   // all incoming shipments; resolving a few extra SKUs for a duplicate
   // shipment that gets skipped below is harmless and still cheap.)
   const allLineItems = [];
+  const allImportHistory = [];
   (body.shipments || []).forEach(s => {
     (s.line_items || []).forEach(li => allLineItems.push(li));
+    (s.import_history || []).forEach(h => allImportHistory.push(h));
   });
   const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
+  appendTikTokImportHistory(allImportHistory);
 
   // ─── Locate the 30 product slot column pairs ──────────────────────
   const PRODUCT_SLOTS = 30;
@@ -2038,4 +2041,83 @@ function getShopifyMatches(e) {
     ? matches
     : matches.filter(m => m['Decision'] === statusFilter);
   return jsonResponse({ records: filtered });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIKTOK IMPORT HISTORY — accessor + writer.
+// ADD THIS BLOCK anywhere in apps-script.gs (e.g. near the other sheet
+// accessors like getProductParentsSheet()).
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getTikTokImportHistorySheet() {
+  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheetByName('TikTok Import History');
+}
+
+// Column order matches the sheet's header row exactly. Writing by explicit
+// header lookup (not fixed array position) so this stays correct even if
+// columns get reordered later.
+const TIKTOK_HISTORY_FIELD_MAP = {
+  'Order ID':                       'order_id',
+  'SKU ID':                         'sku_id',
+  'Seller SKU':                     'seller_sku',
+  'Product Name':                   'product_name',
+  'Variation':                      'variation',
+  'Quantity':                       'quantity',
+  'Order Status':                   'order_status',
+  'Order Substatus':                'order_substatus',
+  'Cancelation/Return Type':        'cancel_return_type',
+  'SKU Unit Price':                 'sku_unit_price',
+  'SKU Subtotal Before Discount':   'sku_subtotal_before',
+  'SKU Platform Discount':          'sku_platform_discount',
+  'SKU Seller Discount':            'sku_seller_discount',
+  'SKU Subtotal After Discount':    'sku_subtotal_after',
+  'Shipping Fee After Discount':    'shipping_fee_after',
+  'Original Shipping Fee':          'shipping_fee_original',
+  'Shipping Fee Seller Discount':   'shipping_fee_seller_disc',
+  'Shipping Fee Platform Discount': 'shipping_fee_platform_disc',
+  'Payment Platform Discount':      'payment_platform_discount',
+  'Retail Delivery Fee':            'retail_delivery_fee',
+  'Order Amount':                   'order_amount',
+  'Order Refund Amount':            'order_refund_amount',
+  'Created Time':                   'created_time',
+  'Paid Time':                      'paid_time',
+  'RTS Time':                       'rts_time',
+  'Shipped Time':                   'shipped_time',
+  'Delivered Time':                 'delivered_time',
+  'Cancelled Time':                 'cancelled_time',
+  'Cancel By':                      'cancel_by',
+  'Cancel Reason':                  'cancel_reason',
+  'Fulfillment Type':               'fulfillment_type',
+  'Warehouse Name':                 'warehouse_name',
+  'Tracking ID':                    'tracking_id',
+  'Delivery Option Type':           'delivery_option_type',
+  'Delivery Option':                'delivery_option',
+  'Shipping Provider':              'shipping_provider',
+  'Buyer Username':                 'buyer_username',
+  'Payment Method':                 'payment_method',
+  'Weight (kg)':                    'weight_kg',
+  'Product Category':               'product_category',
+  'Order Channel':                  'order_channel',
+  'Creator Handle':                 'creator_handle',
+};
+
+// Appends one row per history record (already one-per-line-item from the
+// Python side) to the TikTok Import History sheet, in ONE batched write.
+// Call once per import batch with every shipment's import_history combined,
+// same performance pattern as resolveLineItemsBatch.
+function appendTikTokImportHistory(allHistoryRecords) {
+  if (!allHistoryRecords || !allHistoryRecords.length) return;
+
+  const sheet = getTikTokImportHistorySheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  const rows = allHistoryRecords.map(rec => {
+    return headers.map(h => {
+      if (h === 'Imported Date') return nowISO();
+      const key = TIKTOK_HISTORY_FIELD_MAP[h];
+      return key ? (rec[key] !== undefined ? rec[key] : '') : '';
+    });
+  });
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
