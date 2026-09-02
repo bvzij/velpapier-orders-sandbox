@@ -2,7 +2,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.5';
+const SCRIPT_VERSION = '2026-09-01.6';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -2466,9 +2466,10 @@ function deleteMergedCustomerAction(body) {
   const iLoseId = hHeaders.indexOf('Merged Customer ID');
   const iStatus = hHeaders.indexOf('Status');
 
+  let historyRow = -1;
   let record = null;
   for (let i = 1; i < hData.length; i++) {
-    if (String(hData[i][iMergeId]) === String(mergeId)) { record = hData[i]; break; }
+    if (String(hData[i][iMergeId]) === String(mergeId)) { historyRow = i; record = hData[i]; break; }
   }
   if (!record) return jsonResponse({ error: 'Merge record not found' });
   if (record[iStatus] !== 'Activo') {
@@ -2489,6 +2490,8 @@ function deleteMergedCustomerAction(body) {
 
   const deletedUsername = String(cData[loseRow][cUsernameCol] || '');
   custSheet.deleteRow(loseRow + 1);
+
+  historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Limpiado');
 
   return jsonResponse({ result: 'deleted', merge_id: mergeId, customer_id: loseId, username: deletedUsername });
 }
