@@ -1542,6 +1542,28 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .aj-dup-expanded {
   border-top: 0.5px solid var(--border);
   background: var(--surface2);
+  padding: 4px 0;
+}
+
+.aj-dup-field-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr;
+  gap: 0;
+  padding: 5px 12px;
+  font-size: 12px;
+  border-bottom: 0.5px solid var(--border);
+}
+.aj-dup-field-row:last-child { border-bottom: none; }
+
+.aj-dup-field-label {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.aj-dup-field-val {
+  color: var(--text-muted);
+  padding: 0 6px;
+  overflow-wrap: break-word;
 }
 
 .aj-dup-actions {
