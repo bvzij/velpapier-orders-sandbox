@@ -27,6 +27,33 @@
   --radius-lg: 14px;
 }
 
+/* Dark theme — same warm, slightly-cream character as the light palette,
+   just inverted, rather than a stark pure-black scheme. Toggled by setting
+   data-theme="dark" on <html> (see VP.setTheme in common.js). */
+html[data-theme="dark"] {
+  --bg: #171614;
+  --surface: #211f1c;
+  --surface2: #2a2825;
+  --border: rgba(255,255,255,0.09);
+  --border-strong: rgba(255,255,255,0.18);
+  --text: #f0eee9;
+  --text-muted: #ada99f;
+  --text-faint: #7c7870;
+  --green-bg: #1e2a15;
+  --green-text: #9bd66b;
+  --green-border: #3b5527;
+  --amber-bg: #332310;
+  --amber-text: #eab765;
+  --amber-border: #5c4620;
+  --red-bg: #331b1b;
+  --red-text: #ef8f8f;
+  --red-border: #5c2f2f;
+  --blue-bg: #16232f;
+  --blue-text: #7fb8e8;
+  --purple-bg: #211f38;
+  --purple-text: #a79ce8;
+}
+
 body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 15px; }
 
 .app-layout { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; max-width: 1400px; margin: 0 auto; }
@@ -1398,4 +1425,85 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   object-fit: cover;
   border-radius: var(--radius-sm);
   cursor: zoom-in;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   AJUSTES — settings page sections, cards, and the duplicate-customer tool
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.aj-section { margin-bottom: 1.75rem; }
+
+.aj-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+
+.aj-card {
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.1rem 1.25rem;
+}
+
+.aj-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.aj-row-label { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.aj-row-hint { font-size: 12px; color: var(--text-muted); }
+
+/* Duplicate-pair review cards */
+
+.aj-dup-pair {
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.aj-dup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 12px;
+  background: var(--surface2);
+  font-size: 12px;
+}
+
+.aj-dup-score {
+  font-weight: 700;
+  color: var(--amber-text);
+}
+
+.aj-dup-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+
+.aj-dup-side {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-right: 0.5px solid var(--border);
+}
+.aj-dup-side:last-child { border-right: none; }
+
+.aj-dup-username { font-weight: 600; margin-bottom: 4px; }
+.aj-dup-detail { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+.aj-dup-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 0.5px solid var(--border);
+  justify-content: flex-end;
 }
