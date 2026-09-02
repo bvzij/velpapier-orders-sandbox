@@ -1507,3 +1507,36 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   border-top: 0.5px solid var(--border);
   justify-content: flex-end;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   AJUSTES — merge modal (wider than standard, for side-by-side comparison)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.aj-merge-modal {
+  width: 760px;
+  max-width: 94vw;
+  height: 620px;
+  max-height: 88vh;
+}
+
+.aj-merge-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-bottom: 14px;
+}
+
+.aj-history-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px;
+  border-bottom: 0.5px solid var(--border);
+  font-size: 13px;
+}
+.aj-history-row:last-child { border-bottom: none; }
+
+.aj-history-main { display: flex; flex-direction: column; gap: 2px; }
+.aj-history-arrow { font-weight: 500; }
+.aj-history-date { font-size: 11px; color: var(--text-faint); }
