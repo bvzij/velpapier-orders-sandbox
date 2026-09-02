@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.7';
+const SCRIPT_VERSION = '2026-09-01.8';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -330,27 +330,32 @@ function createCustomer(body) {
   }
 
   const customerID = generateCustomerID(sheet);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-  const row = [
-    customerID,
-    body.primary_username || '',
-    body.aliases || '',
-    body.first_name || '',
-    body.surname || '',
-    body.initials || '',
-    body.street || '',
-    body.city || '',
-    body.state || '',
-    body.zip || '',
-    body.phone_partial || '',
-    body.phone_full || '',
-    body.email || '',
-    nowISO(),
-    0,
-    body.notes || '',
-    false
-  ];
+  // Built by header name, not fixed position -- this survives future column
+  // additions/reorders (e.g. Shopify Customer ID being inserted after
+  // Aliases previously broke every fixed-position row-build in this file).
+  const fieldValues = {
+    'Customer ID': customerID,
+    'Primary Username': body.primary_username || '',
+    'Aliases': body.aliases || '',
+    'First Name': body.first_name || '',
+    'Surname': body.surname || '',
+    'Initials (TT Format)': body.initials || '',
+    'Street + Number': body.street || '',
+    'City': body.city || '',
+    'State': body.state || '',
+    'ZIP': body.zip || '',
+    'Phone Partial': body.phone_partial || '',
+    'Phone Full': body.phone_full || '',
+    'Email': body.email || '',
+    'First Order Date': nowISO(),
+    'Shipment Count': 0,
+    'Notes': body.notes || '',
+    'Merge Flag': false,
+  };
 
+  const row = headers.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
   sheet.appendRow(row);
 
   return jsonResponse({
@@ -852,6 +857,7 @@ function createCustomersBulk(body) {
   const sheet = getCustomersSheet();
   const existing = sheetToObjects(sheet);
   const custLastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, custLastCol).getValues()[0];
 
   let maxNum = 0;
   existing.forEach(c => {
@@ -875,25 +881,30 @@ function createCustomersBulk(body) {
     }
     maxNum++;
     const customerID = 'CUST-' + String(maxNum).padStart(3, '0');
-    rows.push([
-      customerID,
-      cust.primary_username || '',
-      cust.aliases || '',
-      cust.first_name || '',
-      cust.surname || '',
-      cust.initials || '',
-      cust.street || '',
-      cust.city || '',
-      cust.state || '',
-      cust.zip || '',
-      cust.phone_partial || '',
-      cust.phone_full || '',
-      cust.email || '',
-      nowISO(),
-      0,
-      cust.notes || '',
-      false
-    ]);
+
+    // Built by header name, not fixed position -- see the matching note in
+    // createCustomer() for why this matters.
+    const fieldValues = {
+      'Customer ID': customerID,
+      'Primary Username': cust.primary_username || '',
+      'Aliases': cust.aliases || '',
+      'First Name': cust.first_name || '',
+      'Surname': cust.surname || '',
+      'Initials (TT Format)': cust.initials || '',
+      'Street + Number': cust.street || '',
+      'City': cust.city || '',
+      'State': cust.state || '',
+      'ZIP': cust.zip || '',
+      'Phone Partial': cust.phone_partial || '',
+      'Phone Full': cust.phone_full || '',
+      'Email': cust.email || '',
+      'First Order Date': nowISO(),
+      'Shipment Count': 0,
+      'Notes': cust.notes || '',
+      'Merge Flag': false,
+    };
+
+    rows.push(headers.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : '')));
     created.push({ username: cust.primary_username, customer_id: customerID, existed: false });
   });
 
