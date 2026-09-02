@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.8';
+const SCRIPT_VERSION = '2026-09-02.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -231,6 +231,7 @@ function doPost(e) {
     if (action === 'update_session_participants') return updateSessionParticipants(body);
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     if (action === 'merge_customers') return mergeCustomersAction(body);
+    if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
     if (action === 'undo_merge') return undoMergeAction(body);
     if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
     
@@ -2208,9 +2209,23 @@ function scoreCustomerPair(a, b) {
 // essentially never the same person, so this avoids a full O(n²)
 // comparison across everyone (~850 customers = ~360,000 pairs unbucketed;
 // bucketing cuts this to a low-thousands worst case).
+function getDismissedDuplicatesSheet() {
+  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Dismissed Duplicates');
+}
+
+// Order-independent key so A|B and B|A always match the same dismissal.
+function dismissedPairKey(idA, idB) {
+  return [String(idA), String(idB)].sort().join('|');
+}
+
 function findDuplicateCustomers(e) {
   const customers = sheetToObjects(getCustomersSheet())
     .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+
+  const dismissed = new Set(
+    sheetToObjects(getDismissedDuplicatesSheet())
+      .map(d => dismissedPairKey(d['Customer ID A'], d['Customer ID B']))
+  );
 
   const buckets = {};
   customers.forEach(c => {
@@ -2229,6 +2244,8 @@ function findDuplicateCustomers(e) {
         const pairKey = [a['Customer ID'], b['Customer ID']].sort().join('|');
         if (seenPairs.has(pairKey)) continue;
         seenPairs.add(pairKey);
+
+                if (dismissed.has(pairKey)) continue;
 
         const score = scoreCustomerPair(a, b);
         if (score >= DUPLICATE_SCORE_THRESHOLD) {
@@ -2379,6 +2396,19 @@ function mergeCustomersAction(body) {
     merge_id: loseId,
     orders_repointed: ordersRepointed,
   });
+}
+
+// Persists a "not a duplicate" decision so this pair stops being suggested
+// on future scans. Order-independent: dismissing A/B also covers B/A.
+function dismissDuplicatePairAction(body) {
+  const idA = body.customer_id_a;
+  const idB = body.customer_id_b;
+  if (!idA || !idB) return jsonResponse({ error: 'customer_id_a and customer_id_b are required' });
+
+  const sheet = getDismissedDuplicatesSheet();
+  sheet.appendRow([idA, idB, nowISO()]);
+
+  return jsonResponse({ result: 'dismissed' });
 }
 
 function getMergeHistorySheet() {
