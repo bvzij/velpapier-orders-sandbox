@@ -17,24 +17,36 @@
   reflect();
 })();
 
-document.getElementById('aj-scan-duplicates').addEventListener('click', scanDuplicates);
+document.getElementById('aj-scan-duplicates').addEventListener('click', openDuplicatesModal);
 
-async function scanDuplicates() {
-  const btn = document.getElementById('aj-scan-duplicates');
-  const content = document.getElementById('aj-duplicates-content');
-  btn.disabled = true;
-  btn.textContent = 'Buscando…';
-  content.innerHTML = '<div class="vp-loading">Comparando clientes, puede tardar un momento…</div>';
+async function openDuplicatesModal() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Clientes duplicados</div>
+      <div class="aj-merge-scroll" id="aj-duplicates-content">
+        <div class="vp-loading">Comparando clientes, puede tardar un momento…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-merge-history-btn">Ver historial</button>
+        <button class="btn" id="aj-merge-close-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-merge-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+  document.getElementById('aj-merge-history-btn').addEventListener('click', openMergeHistoryModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target.id === 'modal-overlay') modalRoot.innerHTML = '';
+  });
 
   try {
     await VP.ensureToken();
     const data = await VP.get('action=find_duplicate_customers');
     renderDuplicates(data.pairs || []);
   } catch (e) {
-    content.innerHTML = `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Buscar duplicados';
+    document.getElementById('aj-duplicates-content').innerHTML =
+      `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
   }
 }
 
@@ -109,6 +121,78 @@ async function handleMerge(btn) {
     pairEl.innerHTML = `<div style="padding:12px;font-size:13px;color:var(--green-text)">✓ Fusionado correctamente</div>`;
   } catch (e) {
     pairEl.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    btn.textContent = 'Error, intenta de nuevo';
+  }
+}
+
+/* ── Merge history + undo ──────────────────────────────────────────── */
+
+async function openMergeHistoryModal() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay-history">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Historial de fusiones</div>
+      <div class="aj-merge-scroll" id="aj-history-content">
+        <div class="vp-loading">Cargando historial…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-history-close-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-history-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+  document.getElementById('modal-overlay-history').addEventListener('click', e => {
+    if (e.target.id === 'modal-overlay-history') modalRoot.innerHTML = '';
+  });
+
+  try {
+    const data = await VP.get('action=merge_history');
+    renderMergeHistory(data.records || []);
+  } catch (e) {
+    document.getElementById('aj-history-content').innerHTML =
+      `<div class="vp-empty-sm">Error al cargar historial: ${VP.esc(e.message)}</div>`;
+  }
+}
+
+function renderMergeHistory(records) {
+  const el = document.getElementById('aj-history-content');
+  if (!records.length) {
+    el.innerHTML = '<div class="vp-empty-sm">Todavía no se ha fusionado ningún cliente.</div>';
+    return;
+  }
+
+  // Most recent first
+  records.sort((a, b) => String(b['Merged Date'] || '').localeCompare(String(a['Merged Date'] || '')));
+
+  el.innerHTML = records.map(r => {
+    const undone = r['Status'] === 'Deshecho';
+    return `<div class="aj-history-row" data-merge-id="${VP.esc(r['Merge ID'])}">
+      <div class="aj-history-main">
+        <span class="aj-history-arrow">${VP.esc(r['Merged Username'] || r['Merged Customer ID'])} → ${VP.esc(r['Kept Username'] || r['Kept Customer ID'])}</span>
+        <span class="aj-history-date">${VP.esc(VP.fmtDateTime ? VP.fmtDateTime(r['Merged Date']) : r['Merged Date'])}</span>
+      </div>
+      ${undone
+        ? `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Deshecho</span>`
+        : `<button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>`}
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('.aj-undo-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleUndo(btn));
+  });
+}
+
+async function handleUndo(btn) {
+  const mergeId = btn.dataset.mergeId;
+  btn.disabled = true;
+  btn.textContent = 'Deshaciendo…';
+  try {
+    await VP.post({ action: 'undo_merge', merge_id: mergeId });
+    btn.closest('.aj-history-row').outerHTML =
+      `<div class="aj-history-row" style="color:var(--green-text);font-size:13px">✓ Fusión deshecha</div>`;
+  } catch (e) {
+    btn.disabled = false;
     btn.textContent = 'Error, intenta de nuevo';
   }
 }
