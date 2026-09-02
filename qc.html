@@ -181,11 +181,7 @@
       <div class="qc-title">Empacar <span>· control de calidad</span></div>
       <button id="header-end-session-btn" onclick="handleEndSession()" style="display:none;background:none;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:7px 10px;font-size:11px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer;white-space:nowrap;flex-shrink:0">Finalizar</button>
     </div>
-    <div class="packer-row" style="gap:8px">
-      <button id="packers-btn" onclick="openPackersModal()" style="flex:1;min-width:0;background:var(--bg);border:0.5px solid var(--border-strong);border-radius:var(--radius-md);padding:7px 10px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer;display:flex;align-items:center;gap:5px;overflow:hidden">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-        <span id="packers-btn-label" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</span>
-      </button>
+        <div class="packer-row" style="gap:8px">
       <div style="flex:1;min-width:0;position:relative">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text-faint);pointer-events:none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <input type="text" id="search-input" placeholder="Buscar…" oninput="renderCurrentTab()" style="width:100%;padding:7px 8px 7px 28px;font-size:12px;border:0.5px solid var(--border-strong);border-radius:var(--radius-md);font-family:inherit;background:var(--bg);color:var(--text)">
@@ -303,18 +299,6 @@
 
   </div>
 
-</div>
-
-<div class="modal-overlay" id="packers-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:600;align-items:center;justify-content:center;padding:20px">
-  <div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:340px">
-    <div style="font-size:15px;font-weight:700;margin-bottom:12px">¿Quién está empacando?</div>
-    <div id="packers-checklist" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px"></div>
-    <div style="display:flex;gap:6px;margin-bottom:14px">
-      <input type="text" id="packer-manual-input" placeholder="Agregar nombre…" style="flex:1;padding:8px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit">
-      <button onclick="addManualPacker()" style="padding:8px 12px;font-size:13px;font-weight:600;font-family:inherit;background:var(--bg);border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);cursor:pointer">+</button>
-    </div>
-    <button class="qc-submit" onclick="closePackersModal()">Listo</button>
-  </div>
 </div>
 
 <div class="toast" id="toast"></div>
