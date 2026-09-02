@@ -89,17 +89,25 @@ function customerDetailHtml(c) {
   return lines.map(l => VP.esc(l)).join('<br>');
 }
 
-// Fields already visible in the collapsed card (username, phone summary,
-// street/city/state/zip, aliases) are intentionally excluded here -- this
-// table is only for the *extra* fields, shown as aligned rows so a value
-// present on one side but not the other still lines up correctly.
+// Every field the expanded view shows, top to bottom, as aligned rows so a
+// value present on one side but not the other still lines up correctly.
+// Deliberately includes fields already visible in the collapsed card above
+// (phone, address, aliases) -- repeating them here means everything about
+// both customers is visible in one place without scrolling back up.
 const AJ_DUP_EXTRA_FIELDS = [
   ['Customer ID',            'ID'],
+  ['Primary Username',       'Usuario'],
   ['First Name',             'Nombre'],
   ['Surname',                'Apellido'],
   ['Initials (TT Format)',   'Iniciales'],
   ['Email',                  'Email'],
+  ['Phone Partial',          'Tel. parcial'],
   ['Phone Full',             'Tel. completo'],
+  ['Street + Number',        'Calle y número'],
+  ['City',                   'Ciudad'],
+  ['State',                  'Estado'],
+  ['ZIP',                    'CP'],
+  ['Aliases',                'Alias'],
   ['Shipment Count',         'Envíos'],
   ['Notes',                  'Notas'],
 ];
