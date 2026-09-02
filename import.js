@@ -90,6 +90,42 @@ zone.addEventListener('drop', e => {
 
 // ── Main import ───────────────────────────────────────────────────────────────
 
+// Best-effort unwrap of an error response body into a short, human-readable
+// message. The raw body may be plain text, JSON from our FastAPI service
+// ({"detail": {"error_message": "...", ...}}), or JSON reshaped by N8N's
+// HTTP Request node error passthrough ({"errorMessage": "...", ...}). Falls
+// back to the raw text (truncated) if none of these shapes match, so a
+// future/unknown format still shows *something* useful rather than silently
+// failing again.
+function extractErrorMessage(rawText) {
+  if (!rawText) return '(sin detalles del servidor)';
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (e) {
+    return rawText.slice(0, 300);
+  }
+
+  // FastAPI HTTPException(detail={...}) shape from service.py
+  if (parsed.detail && typeof parsed.detail === 'object') {
+    const d = parsed.detail;
+    return `${d.error_type || 'Error'}: ${d.error_message || JSON.stringify(d)}`;
+  }
+  if (typeof parsed.detail === 'string') return parsed.detail;
+
+  // N8N HTTP Request node error passthrough shape
+  if (parsed.errorMessage) {
+    const raw = parsed.errorDetails && parsed.errorDetails.rawErrorMessage;
+    return raw ? `${parsed.errorMessage} (${[].concat(raw).join('; ')})` : parsed.errorMessage;
+  }
+
+  // Plain {"error": "..."} shape
+  if (parsed.error) return typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error);
+
+  return JSON.stringify(parsed).slice(0, 300);
+}
+
 async function runImport() {
   await ensureAuth();
   hideError();
@@ -116,8 +152,8 @@ async function runImport() {
     setProgress(true, 'Recibiendo resultados…', 85);
 
     if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error(`Error ${resp.status}: ${txt}`);
+     const txt = await resp.text();
+     throw new Error(`Error ${resp.status}: ${extractErrorMessage(txt)}`);
     }
 
     const data = await resp.json();
