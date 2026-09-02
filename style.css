@@ -1578,6 +1578,43 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
    AJUSTES — merge modal (wider than standard, for side-by-side comparison)
    ═══════════════════════════════════════════════════════════════════════ */
 
+.aj-dup-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 4px;
+  border-bottom: 0.5px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.aj-dup-threshold-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.aj-dup-threshold-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.aj-dup-threshold-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 34px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.aj-dup-refresh-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 15px;
+  line-height: 1;
+}
+
 .aj-merge-modal {
   width: 760px;
   max-width: 94vw;
