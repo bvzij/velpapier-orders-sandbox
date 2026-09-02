@@ -771,6 +771,7 @@ function importTikTokOrders(body) {
           ['street', cCol.street], ['city', cCol.city], ['state', cCol.state],
           ['zip', cCol.zip], ['phone', cCol.phone]
         ];
+                const existingNotes = (custData[idx][cCol.notes] || '').toString();
         const noteAdd = [];
         pairs.forEach(([k, colIdx]) => {
           const incoming = (addr[k] || '').toString().trim();
@@ -780,12 +781,19 @@ function importTikTokOrders(body) {
             custData[idx][colIdx] = incoming;
             customersDirty = true;
           } else if (current.toLowerCase() !== incoming.toLowerCase()) {
-            noteAdd.push(`${k} alt: ${incoming}`);
+            // Only flag this alternate value if it hasn't already been
+            // logged for this customer -- without this check, every future
+            // import from the same customer re-appends an identical note,
+            // since the mismatch against Phone Partial/City/etc. never
+            // resolves itself on its own.
+            const noteText = `${k} alt: ${incoming}`;
+            if (!existingNotes.includes(noteText)) {
+              noteAdd.push(noteText);
+            }
           }
         });
         if (noteAdd.length && cCol.notes >= 0) {
-          const existing = (custData[idx][cCol.notes] || '').toString();
-          custData[idx][cCol.notes] = (existing ? existing + ' | ' : '') + noteAdd.join('; ');
+          custData[idx][cCol.notes] = (existingNotes ? existingNotes + ' | ' : '') + noteAdd.join('; ');
           customersDirty = true;
         }
       }
