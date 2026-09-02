@@ -65,8 +65,8 @@ function renderDuplicates(pairs) {
     content.querySelectorAll('.aj-dup-merge-btn').forEach(el => {
     el.addEventListener('click', () => handleMerge(el));
   });
-  content.querySelectorAll('.aj-dup-dismiss-btn').forEach(el => {
-    el.addEventListener('click', () => el.closest('.aj-dup-pair').remove());
+    content.querySelectorAll('.aj-dup-dismiss-btn').forEach(el => {
+    el.addEventListener('click', () => handleDismiss(el));
   });
   content.querySelectorAll('.aj-dup-expand-btn').forEach(el => {
     el.addEventListener('click', () => {
@@ -151,6 +151,22 @@ function pairHtml(pair) {
       <button class="refresh-btn aj-dup-merge-btn" data-keep="b">Usar «${VP.esc(b['Primary Username'] || b['Customer ID'])}» como principal</button>
     </div>
   </div>`;
+}
+
+async function handleDismiss(btn) {
+  const pairEl = btn.closest('.aj-dup-pair');
+  const idA = pairEl.dataset.a;
+  const idB = pairEl.dataset.b;
+  btn.disabled = true;
+  btn.textContent = 'Descartando…';
+  try {
+    await VP.post({ action: 'dismiss_duplicate_pair', customer_id_a: idA, customer_id_b: idB });
+    pairEl.remove();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'No son iguales';
+        VP.toast('Error al descartar: ' + e.message, true);
+  }
 }
 
 async function handleMerge(btn) {
