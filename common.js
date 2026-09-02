@@ -8,8 +8,27 @@ window.VP = (function () {
 
   const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
   const TOKEN_KEY = 'vp_token';
+  const THEME_KEY = 'vp_theme';
 
   let token = localStorage.getItem(TOKEN_KEY) || '';
+
+  /* ── Theme ──────────────────────────────────────────────────────────── */
+  // Applied immediately (synchronously, at script-load time, before the
+  // page has finished rendering) so there's no flash of the wrong theme
+  // between when the page first paints and when JS would otherwise run.
+
+  function getTheme() {
+    return localStorage.getItem(THEME_KEY) || 'light';
+  }
+
+  function setTheme(theme) {
+    const t = theme === 'dark' ? 'dark' : 'light';
+    localStorage.setItem(THEME_KEY, t);
+    document.documentElement.setAttribute('data-theme', t);
+  }
+
+  // Apply immediately on load, using whatever was last saved.
+  document.documentElement.setAttribute('data-theme', getTheme());
 
   /* ── API ────────────────────────────────────────────────────────────── */
 
@@ -83,6 +102,7 @@ window.VP = (function () {
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
     { id: 'analisis',  href: 'analytics.html', label: 'Análisis' },
+    { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes' },
   ];
 
   // Injects the persistent top bar. `active` is one of the NAV ids.
@@ -510,7 +530,7 @@ window.VP = (function () {
   /* ── Public surface ─────────────────────────────────────────────────── */
 
   return {
-    API, get, getCached, post, ensureToken, mountNav, NAV,
+    API, get, getCached, post, ensureToken, mountNav, NAV, getTheme, setTheme,
     mxn, mxnExact, num, esc, asDate, daysBetween, fmtDate, fmtDateTime,
     fmtDuration, initials, parseProducts, itemCount, baseProductName,
     toast, lightbox,
