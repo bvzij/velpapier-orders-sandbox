@@ -1,10 +1,18 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════════════════════
+
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-01.6';
+const SCRIPT_VERSION = '2026-09-01.7';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED HELPERS — sheet accessors, utilities, ID generation
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ─── Sheet accessors ───────────────────────────────────────────────────────────
 
@@ -120,6 +128,10 @@ function findCustomerByUsername(customers, rawUsername) {
   return null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// API ROUTER — GET / POST entry points
+// ═══════════════════════════════════════════════════════════════════════════
+
 // ─── GET handler ───────────────────────────────────────────────────────────────
 
 function doGet(e) {
@@ -229,6 +241,10 @@ function doPost(e) {
     return jsonResponse({ error: err.message });
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ORDERS + CUSTOMERS — core CRUD, status changes, shipment counts
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ─── Create order ──────────────────────────────────────────────────────────────
 
@@ -618,6 +634,10 @@ function recalculateAllShipmentCounts() {
   Logger.log('Recalculated counts for ' + out.length + ' customers.');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MAINTENANCE — nightly backups, auth
+// ═══════════════════════════════════════════════════════════════════════════
+
 // ─── Nightly Backups ───────────────────────────────────────────────────────────
 
 function nightlyBackup() {
@@ -646,12 +666,8 @@ function authOk(t) {
   const want = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
   return !!want && t === want;
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
-// REPLACE the entire existing importTikTokOrders() function with this one.
-// Find it by searching for:  function importTikTokOrders(body) {
-// and replace all the way down to its closing brace (the one right before
-// the "// ─── Bulk customer creation" comment that follows it).
+// TIKTOK IMPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
 function importTikTokOrders(body) {
@@ -1299,11 +1315,8 @@ function endSession(body) {
     start_time: rowVals[h.indexOf('Start Time')],
   });
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
 // PRODUCT CATALOG — accessors + resolution logic
-// ADD THIS ENTIRE BLOCK ANYWHERE IN apps-script.gs (e.g. right after the
-// existing getQCSheet() function, near the other sheet accessors).
 // ═══════════════════════════════════════════════════════════════════════════
 
 const PRODUCT_CATALOG_SHEET_ID = '1XZY9Azw-YizHC6D3l54IMCMKIAFT9qqcVkg4FGf2vSA';
@@ -1548,20 +1561,15 @@ function resolveLineItemsBatch(allLineItems) {
 
   return resultMap; // { sku_id: catalogId, ... }
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
 // SHOPIFY CUSTOMER RESOLUTION
-// ADD THIS ENTIRE BLOCK anywhere in apps-script.gs (e.g. right after
-// findCustomerByUsername(), since it's conceptually the Shopify sibling
-// of that TikTok resolution function).
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SHOPIFY_SCORE_THRESHOLD = 30; // below this, treat as "no reasonable guess" -> straight to new_customer
 
-// Simple Levenshtein-based similarity, 0-1. Reused from the Product Catalog
-// fuzzy-matching (same function name/shape as stringSimilarity() there —
-// if that function already exists in this file, DELETE this duplicate
-// definition and just call the existing one instead.)
+// Simple Levenshtein-based similarity, 0-1. Same shape as the Product
+// Catalog's stringSimilarity() above, kept as a separate copy so this
+// section stays self-contained.
 function shopifyStringSimilarity(a, b) {
   a = (a || '').toLowerCase().trim();
   b = (b || '').toLowerCase().trim();
@@ -1875,13 +1883,8 @@ function importShopifyOrder(body) {
     lock.releaseLock();
   }
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
-// RESOLVE SHOPIFY MATCH — the endpoint the merge UI/modal will call.
-// ADD THIS BLOCK anywhere in apps-script.gs.
-//
-// ALSO add this line inside doPost()'s dispatcher:
-//     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
+// RESOLVE SHOPIFY MATCH — endpoint the merge/review UI calls
 // ═══════════════════════════════════════════════════════════════════════════
 
 // body = {
@@ -2037,13 +2040,8 @@ function findOrderIdByShopifyId(ordersSheet, headers, shopifyOrderId) {
   }
   return null;
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
-// GET SHOPIFY MATCHES — for the review UI / pending-count badge.
-// ADD THIS FUNCTION anywhere in apps-script.gs.
-//
-// ALSO add this line inside doGet()'s dispatcher, alongside the others:
-//     if (action === 'shopify_matches') return getShopifyMatches(e);
+// GET SHOPIFY MATCHES — review UI / pending-count badge
 // ═══════════════════════════════════════════════════════════════════════════
 
 function getShopifyMatches(e) {
@@ -2054,11 +2052,8 @@ function getShopifyMatches(e) {
     : matches.filter(m => m['Decision'] === statusFilter);
   return jsonResponse({ records: filtered });
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
-// TIKTOK IMPORT HISTORY — accessor + writer.
-// ADD THIS BLOCK anywhere in apps-script.gs (e.g. near the other sheet
-// accessors like getProductParentsSheet()).
+// TIKTOK IMPORT HISTORY — accessor + writer
 // ═══════════════════════════════════════════════════════════════════════════
 
 function getTikTokImportHistorySheet() {
@@ -2133,6 +2128,9 @@ function appendTikTokImportHistory(allHistoryRecords) {
 
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// DUPLICATE CUSTOMER DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
 
 const DUPLICATE_SCORE_THRESHOLD = 55;
 
@@ -2226,9 +2224,29 @@ function findDuplicateCustomers(e) {
   return jsonResponse({ pairs: pairs });
 }
 
-// Merges loseId into keepId: appends the loser's username+aliases into the
-// winner's Aliases, repoints every order pointing at the loser's Customer ID
-// over to the winner, and marks (does not delete) the loser's row.
+// ═══════════════════════════════════════════════════════════════════════════
+// CUSTOMER MERGE + UNDO + CLEANUP
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Fields backfilled from the loser into the keeper only when the keeper's
+// own value is blank -- the keeper's existing data always wins if both
+// sides have it. Shared between merge (to know what to snapshot/backfill)
+// and undo (to know what to restore).
+const MERGE_BACKFILL_FIELDS = [
+  'First Name', 'Surname', 'Initials (TT Format)',
+  'Street + Number', 'City', 'State', 'ZIP',
+  'Phone Partial', 'Phone Full', 'Email',
+];
+
+// Merges loseId into keepId: backfills any of the keeper's blank fields from
+// the loser (so information is never lost just because the loser happens to
+// be the one getting retired), sums Shipment Count across both, unions
+// Aliases (also stripping the keeper's own username out of that list, in
+// case it was already recorded as an alias of the loser), repoints every
+// order pointing at the loser's Customer ID over to the winner, and marks
+// (does not delete) the loser's row. A snapshot of the keeper's pre-merge
+// state is logged to Merge History so undoMergeAction can fully reverse
+// the backfill/shipment-count changes, not just the alias/username ones.
 function mergeCustomersAction(body) {
   const keepId = body.keep_id;
   const loseId = body.merge_id;
@@ -2244,6 +2262,7 @@ function mergeCustomersAction(body) {
   const aliasesCol = headers.indexOf('Aliases');
   const shopifyIdCol = headers.indexOf('Shopify Customer ID');
   const notesCol = headers.indexOf('Notes');
+  const shipmentCountCol = headers.indexOf('Shipment Count');
 
   let keepRow = -1, loseRow = -1;
   for (let i = 1; i < data.length; i++) {
@@ -2256,11 +2275,46 @@ function mergeCustomersAction(body) {
 
   const loserUsername = String(data[loseRow][usernameCol] || '').trim();
   const keeperUsername = String(data[keepRow][usernameCol] || '').trim();
+  const keeperUsernameNorm = normalizeUsername(keeperUsername);
+
+  // ─── Snapshot the keeper's pre-merge state, for undo ───────────────
+  const keeperSnapshot = {
+    aliases: String(data[keepRow][aliasesCol] || ''),
+    shipmentCount: shipmentCountCol >= 0 ? (parseInt(data[keepRow][shipmentCountCol], 10) || 0) : null,
+    fields: {},
+  };
+  MERGE_BACKFILL_FIELDS.forEach(field => {
+    const col = headers.indexOf(field);
+    if (col >= 0) keeperSnapshot.fields[field] = String(data[keepRow][col] || '');
+  });
+
+  // ─── Backfill blank keeper fields from the loser ───────────────────
+  MERGE_BACKFILL_FIELDS.forEach(field => {
+    const col = headers.indexOf(field);
+    if (col < 0) return;
+    const keeperVal = String(data[keepRow][col] || '').trim();
+    const loserVal = String(data[loseRow][col] || '').trim();
+    if (!keeperVal && loserVal) {
+      sheet.getRange(keepRow + 1, col + 1).setValue(loserVal);
+    }
+  });
+
+  // ─── Sum Shipment Count across both customers ──────────────────────
+  if (shipmentCountCol >= 0) {
+    const keeperCount = parseInt(data[keepRow][shipmentCountCol], 10) || 0;
+    const loserCount = parseInt(data[loseRow][shipmentCountCol], 10) || 0;
+    sheet.getRange(keepRow + 1, shipmentCountCol + 1).setValue(keeperCount + loserCount);
+  }
+
+  // ─── Union aliases (loser's username + loser's own aliases) into the
+  //     keeper's Aliases, deduped, with the keeper's own username scrubbed
+  //     out in case it was already an alias of the loser. ───────────────
   const loserAliases = String(data[loseRow][aliasesCol] || '').split(',').map(s => s.trim()).filter(Boolean);
   const newAliasCandidates = [loserUsername, ...loserAliases].filter(Boolean);
 
   const currentAliases = String(data[keepRow][aliasesCol] || '').split(',').map(s => s.trim()).filter(Boolean);
-  const mergedAliases = [...new Set([...currentAliases, ...newAliasCandidates])];
+  const mergedAliases = [...new Set([...currentAliases, ...newAliasCandidates])]
+    .filter(a => normalizeUsername(a) !== keeperUsernameNorm);
   if (aliasesCol >= 0) sheet.getRange(keepRow + 1, aliasesCol + 1).setValue(mergedAliases.join(', '));
 
   const loserShopifyIds = String(data[loseRow][shopifyIdCol] || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -2298,7 +2352,7 @@ function mergeCustomersAction(body) {
     );
   }
 
-  logMergeHistory(keepId, keeperUsername, loseId, loserUsername, ordersRepointed);
+  logMergeHistory(keepId, keeperUsername, loseId, loserUsername, ordersRepointed, keeperSnapshot);
 
   return jsonResponse({
     result: 'merged',
@@ -2307,23 +2361,6 @@ function mergeCustomersAction(body) {
     orders_repointed: ordersRepointed,
   });
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MERGE HISTORY + UNDO
-//
-// Add a new tab to the Customers spreadsheet named exactly "Merge History"
-// with these headers, in this order:
-//   Merge ID | Kept Customer ID | Kept Username | Merged Customer ID |
-//   Merged Username | Orders Repointed | Status | Merged Date | Undone Date
-//
-// ADD THIS BLOCK anywhere in apps-script.gs.
-// ALSO add to the dispatchers:
-//   doGet:  if (action === 'merge_history') return getMergeHistory(e);
-//   doPost: if (action === 'undo_merge') return undoMergeAction(body);
-//
-// ALSO: mergeCustomersAction() needs one addition -- see the marked spot
-// below to log each merge as it happens.
-// ═══════════════════════════════════════════════════════════════════════════
 
 function getMergeHistorySheet() {
   return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Merge History');
@@ -2334,10 +2371,15 @@ function getMergeHistory(e) {
   return jsonResponse({ records: records });
 }
 
-// Call this from inside mergeCustomersAction(), right before its final
-// `return jsonResponse(...)` line, passing the same values it already has:
-//   logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepointed);
-function logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepointed) {
+// Logs one merge event. keeperSnapshot captures the keeper's pre-merge
+// Aliases, Shipment Count, and any backfillable fields, serialized to JSON,
+// so undoMergeAction can restore the keeper to its exact pre-merge state
+// rather than guessing.
+//
+// Sheet columns expected, in order: Merge ID | Kept Customer ID |
+// Kept Username | Merged Customer ID | Merged Username | Orders Repointed |
+// Status | Merged Date | Undone Date | Keeper Snapshot
+function logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepointed, keeperSnapshot) {
   const sheet = getMergeHistorySheet();
   sheet.appendRow([
     'MERGE-' + Utilities.getUuid().slice(0, 8),
@@ -2349,13 +2391,16 @@ function logMergeHistory(keepId, keptUsername, loseId, loserUsername, ordersRepo
     'Activo',
     nowISO(),
     '',
+    JSON.stringify(keeperSnapshot || {}),
   ]);
 }
 
-// Reverses a merge: restores the loser's original Primary Username, removes
-// it from the winner's Aliases, and repoints any orders that were moved
-// back to the loser's Customer ID. Marks the history row as undone rather
-// than deleting it.
+// Reverses a merge: restores the loser's original Primary Username, restores
+// the keeper's pre-merge Aliases/Shipment Count/backfilled fields from the
+// logged snapshot, and repoints any orders that were moved back to the
+// loser's Customer ID. Marks the history row as undone rather than deleting
+// it. Refuses if the merge was already undone, or if the merged customer's
+// row was already permanently deleted via deleteMergedCustomerAction.
 function undoMergeAction(body) {
   const mergeId = body.merge_id;
   if (!mergeId) return jsonResponse({ error: 'merge_id is required' });
@@ -2369,6 +2414,7 @@ function undoMergeAction(body) {
   const iLoseUsername = hHeaders.indexOf('Merged Username');
   const iStatus = hHeaders.indexOf('Status');
   const iUndoneDate = hHeaders.indexOf('Undone Date');
+  const iSnapshot = hHeaders.indexOf('Keeper Snapshot');
 
   let historyRow = -1;
   let record = null;
@@ -2381,10 +2427,16 @@ function undoMergeAction(body) {
   }
   if (historyRow === -1) return jsonResponse({ error: 'Merge record not found' });
   if (record[iStatus] === 'Deshecho') return jsonResponse({ error: 'This merge was already undone' });
+  if (record[iStatus] === 'Limpiado') return jsonResponse({ error: 'The merged customer was already permanently deleted; this merge can no longer be undone' });
 
   const keepId = record[iKeepId];
   const loseId = record[iLoseId];
   const originalLoserUsername = record[iLoseUsername];
+
+  let snapshot = null;
+  if (iSnapshot >= 0 && record[iSnapshot]) {
+    try { snapshot = JSON.parse(record[iSnapshot]); } catch (e) { snapshot = null; }
+  }
 
   const custSheet = getCustomersSheet();
   const cData = custSheet.getDataRange().getValues();
@@ -2393,6 +2445,7 @@ function undoMergeAction(body) {
   const cUsernameCol = cHeaders.indexOf('Primary Username');
   const cAliasesCol = cHeaders.indexOf('Aliases');
   const cNotesCol = cHeaders.indexOf('Notes');
+  const cShipmentCountCol = cHeaders.indexOf('Shipment Count');
 
   let keepRow = -1, loseRow = -1;
   for (let i = 1; i < cData.length; i++) {
@@ -2410,7 +2463,26 @@ function undoMergeAction(body) {
     }
   }
 
-  if (keepRow >= 0 && cAliasesCol >= 0) {
+  if (keepRow >= 0 && snapshot) {
+    // Snapshot-based restore: puts every backfilled field, Shipment Count,
+    // and Aliases back exactly as they were before the merge.
+    if (cAliasesCol >= 0 && snapshot.aliases !== undefined) {
+      custSheet.getRange(keepRow + 1, cAliasesCol + 1).setValue(snapshot.aliases);
+    }
+    if (cShipmentCountCol >= 0 && snapshot.shipmentCount !== null && snapshot.shipmentCount !== undefined) {
+      custSheet.getRange(keepRow + 1, cShipmentCountCol + 1).setValue(snapshot.shipmentCount);
+    }
+    if (snapshot.fields) {
+      MERGE_BACKFILL_FIELDS.forEach(field => {
+        const col = cHeaders.indexOf(field);
+        if (col >= 0 && snapshot.fields[field] !== undefined) {
+          custSheet.getRange(keepRow + 1, col + 1).setValue(snapshot.fields[field]);
+        }
+      });
+    }
+  } else if (keepRow >= 0 && cAliasesCol >= 0) {
+    // Fallback for merges logged before the snapshot existed: best-effort
+    // alias-only revert, same as the original behavior.
     const currentAliases = String(cData[keepRow][cAliasesCol] || '')
       .split(',').map(s => s.trim()).filter(Boolean)
       .filter(a => a !== originalLoserUsername);
