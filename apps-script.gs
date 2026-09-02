@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-02.2';
+const SCRIPT_VERSION = '2026-09-02.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1717,7 +1717,7 @@ function resolveShopifyCustomer(incoming) {
   // ─── Tier 1: Shopify Customer ID exact match ──────────────────────
   if (incoming.shopifyCustomerId) {
     const found = customers.find(c => {
-      const ids = String(c['Shopify Customer ID'] || '').split(',').map(s => s.trim()).filter(Boolean);
+      const ids = String(c['Shopify Customer ID'] || '').split('/').map(s => s.trim()).filter(Boolean);
       return ids.includes(String(incoming.shopifyCustomerId));
     });
     if (found) {
@@ -2007,10 +2007,10 @@ function appendShopifyIdToCustomer(customerId, newShopifyId) {
 
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][idCol]) === String(customerId)) {
-      const current = String(data[i][shopCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+      const current = String(data[i][shopCol] || '').split('/').map(s => s.trim()).filter(Boolean);
       if (!current.includes(String(newShopifyId))) {
         current.push(String(newShopifyId));
-        sheet.getRange(i + 1, shopCol + 1).setValue(current.join(', '));
+        sheet.getRange(i + 1, shopCol + 1).setValue(current.join('/'));
       }
       return;
     }
@@ -2332,6 +2332,7 @@ function mergeCustomersAction(body) {
   // ─── Snapshot the keeper's pre-merge state, for undo ───────────────
   const keeperSnapshot = {
     aliases: String(data[keepRow][aliasesCol] || ''),
+    shopifyCustomerId: shopifyIdCol >= 0 ? String(data[keepRow][shopifyIdCol] || '') : null,
     shipmentCount: shipmentCountCol >= 0 ? (parseInt(data[keepRow][shipmentCountCol], 10) || 0) : null,
     fields: {},
   };
@@ -2369,7 +2370,7 @@ function mergeCustomersAction(body) {
     .filter(a => normalizeUsername(a) !== keeperUsernameNorm);
   if (aliasesCol >= 0) sheet.getRange(keepRow + 1, aliasesCol + 1).setValue(mergedAliases.join(', '));
 
-  const loserShopifyIds = String(data[loseRow][shopifyIdCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const loserShopifyIds = String(data[loseRow][shopifyIdCol] || '').split('/').map(s => s.trim()).filter(Boolean);
   if (loserShopifyIds.length && shopifyIdCol >= 0) {
     loserShopifyIds.forEach(sid => appendShopifyIdToCustomer(keepId, sid));
   }
@@ -2543,9 +2544,14 @@ function undoMergeAction(body) {
 
   if (keepRow >= 0 && snapshot) {
     // Snapshot-based restore: puts every backfilled field, Shipment Count,
-    // and Aliases back exactly as they were before the merge.
+    // Aliases, and Shopify Customer ID back exactly as they were before
+    // the merge.
     if (cAliasesCol >= 0 && snapshot.aliases !== undefined) {
       custSheet.getRange(keepRow + 1, cAliasesCol + 1).setValue(snapshot.aliases);
+    }
+    const cShopifyIdCol = cHeaders.indexOf('Shopify Customer ID');
+    if (cShopifyIdCol >= 0 && snapshot.shopifyCustomerId !== null && snapshot.shopifyCustomerId !== undefined) {
+      custSheet.getRange(keepRow + 1, cShopifyIdCol + 1).setValue(snapshot.shopifyCustomerId);
     }
     if (cShipmentCountCol >= 0 && snapshot.shipmentCount !== null && snapshot.shipmentCount !== undefined) {
       custSheet.getRange(keepRow + 1, cShipmentCountCol + 1).setValue(snapshot.shipmentCount);
