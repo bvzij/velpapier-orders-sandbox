@@ -172,15 +172,36 @@ function renderMergeHistory(records) {
         <span class="aj-history-arrow">${VP.esc(r['Merged Username'] || r['Merged Customer ID'])} → ${VP.esc(r['Kept Username'] || r['Kept Customer ID'])}</span>
         <span class="aj-history-date">${VP.esc(VP.fmtDateTime ? VP.fmtDateTime(r['Merged Date']) : r['Merged Date'])}</span>
       </div>
-      ${undone
+            ${undone
         ? `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Deshecho</span>`
-        : `<button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>`}
+        : `<div style="display:flex;gap:6px">
+            <button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>
+            <button class="refresh-btn aj-cleanup-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Limpiar</button>
+          </div>`}
     </div>`;
   }).join('');
 
   el.querySelectorAll('.aj-undo-btn').forEach(btn => {
     btn.addEventListener('click', () => handleUndo(btn));
   });
+  el.querySelectorAll('.aj-cleanup-btn').forEach(btn => {
+    btn.addEventListener('click', () => handleCleanup(btn));
+  });
+}
+
+async function handleCleanup(btn) {
+  const mergeId = btn.dataset.mergeId;
+  if (!confirm('Esto borra permanentemente el registro del cliente fusionado. No se puede deshacer después. ¿Continuar?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Borrando…';
+  try {
+    await VP.post({ action: 'delete_merged_customer', merge_id: mergeId });
+    btn.closest('.aj-history-row').outerHTML =
+      `<div class="aj-history-row" style="color:var(--green-text);font-size:13px">✓ Cliente fusionado eliminado permanentemente</div>`;
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Error, intenta de nuevo';
+  }
 }
 
 async function handleUndo(btn) {
