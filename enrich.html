@@ -65,13 +65,23 @@
 
   let lastResults = [];
 
+    let previewInFlight = false;
+
   document.getElementById('preview-btn').addEventListener('click', async () => {
+    if (previewInFlight) return; // guards against double-clicks firing a second identical request
+
     const csvFile = document.getElementById('csv-input').files[0];
     const pdfFiles = document.getElementById('pdf-input').files;
     const statusEl = document.getElementById('status-msg');
+    const btn = document.getElementById('preview-btn');
 
     if (!csvFile) { statusEl.textContent = 'Selecciona el CSV histórico primero.'; return; }
     if (!pdfFiles.length) { statusEl.textContent = 'Selecciona al menos un PDF.'; return; }
+
+    previewInFlight = true;
+    btn.disabled = true;
+    const startTime = Date.now();
+    let timerHandle = null;
 
     statusEl.textContent = `Comprimiendo ${pdfFiles.length} PDF(s)...`;
     document.getElementById('summary-box').style.display = 'none';
@@ -82,11 +92,14 @@
     }
     const zipBlob = await zip.generateAsync({ type: 'blob' });
 
-    statusEl.textContent = `Procesando ${pdfFiles.length} PDF(s)... esto puede tardar un momento.`;
-
     const fd = new FormData();
     fd.append('csv', csvFile);
     fd.append('pdf_zip', zipBlob, 'labels.zip');
+
+    timerHandle = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      statusEl.textContent = `Procesando ${pdfFiles.length} PDF(s)... (${elapsed}s transcurridos, puede tardar varios minutos con archivos grandes)`;
+    }, 1000);
 
     try {
       const resp = await fetch(PREVIEW_URL, {
@@ -98,11 +111,16 @@
         const txt = await resp.text();
         throw new Error(`Error ${resp.status}: ${txt.slice(0, 300)}`);
       }
-      const data = await resp.json();
+            const data = await resp.json();
       statusEl.textContent = '';
       renderResults(data);
     } catch (e) {
-      statusEl.textContent = 'Error: ' + e.message;
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      statusEl.textContent = `Error tras ${elapsed}s: ${e.message}. Si el servidor tardó mucho, puede que igual haya terminado en segundo plano -- intenta la vista previa de nuevo en unos minutos para confirmar.`;
+    } finally {
+      clearInterval(timerHandle);
+      previewInFlight = false;
+      btn.disabled = false;
     }
   });
 
