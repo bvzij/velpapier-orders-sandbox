@@ -696,7 +696,7 @@ async function handleProductDismiss(btn) {
 
 // ── Merge screen: pick keeper, then pair variants ──────────────────────
 
-function openProductMergeScreen(pair) {
+function openProductMergeScreen(pair, onBack) {
   const modalRoot = document.getElementById('modal-container');
   // Default keeper = parent_a until the user clicks a card.
   const state = { keeper: 'a', pair: pair };
@@ -712,7 +712,7 @@ function openProductMergeScreen(pair) {
     </div>
   </div>`;
 
-  document.getElementById('aj-prod-back-btn').addEventListener('click', () => openProductDuplicatesModal());
+  document.getElementById('aj-prod-back-btn').addEventListener('click', () => (onBack || openProductDuplicatesModal)());
   document.getElementById('aj-prod-confirm-btn').addEventListener('click', () => submitProductMerge(state));
 
   renderProductMergeScreen(state);
@@ -837,4 +837,134 @@ async function submitProductMerge(state) {
     confirmBtn.textContent = 'Confirmar fusión';
     VP.toast('Error al fusionar: ' + e.message, true);
   }
+}
+
+/* ── Manual search-and-pick (alternative to the automatic scan) ────────
+   Two autocomplete inputs (same interaction pattern as the customer
+   autocomplete on the Pedidos page: input filters a client-side list,
+   mousedown selects). Product list (with total units sold) is fetched
+   once when the modal opens, then filtered entirely client-side as the
+   user types -- no repeated server calls per keystroke. Once both sides
+   are picked, fetches the pair's variant data and hands off to the same
+   openProductMergeScreen() the automatic scan already uses. ─────────── */
+
+document.getElementById('aj-manual-product-merge').addEventListener('click', openManualProductSearchModal);
+
+async function openManualProductSearchModal() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="aj-manual-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Buscar productos manualmente</div>
+      <div class="aj-merge-scroll" id="aj-manual-content">
+        <div class="vp-loading">Cargando productos…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-manual-close-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+  document.getElementById('aj-manual-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+
+  const content = document.getElementById('aj-manual-content');
+  try {
+    await VP.ensureToken();
+    const data = await VP.get('action=search_products_for_merge');
+    renderManualSearchForm(data.products || []);
+  } catch (e) {
+    content.innerHTML = `<div class="vp-empty-sm">Error al cargar productos: ${VP.esc(e.message)}</div>`;
+  }
+}
+
+function renderManualSearchForm(products) {
+  const content = document.getElementById('aj-manual-content');
+  const state = { productA: null, productB: null };
+
+  content.innerHTML = `
+    <div class="aj-prod-keeper-row">
+      <div style="position:relative">
+        <input type="text" class="aj-prod-variant-select" id="aj-manual-input-a" placeholder="Buscar producto A…" autocomplete="off" style="width:100%">
+        <div class="autocomplete-list" id="aj-manual-list-a" style="display:none"></div>
+      </div>
+      <div style="position:relative">
+        <input type="text" class="aj-prod-variant-select" id="aj-manual-input-b" placeholder="Buscar producto B…" autocomplete="off" style="width:100%">
+        <div class="autocomplete-list" id="aj-manual-list-b" style="display:none"></div>
+      </div>
+    </div>
+    <div id="aj-manual-selection-summary" style="font-size:12.5px;color:var(--text-muted);min-height:20px;margin-bottom:10px"></div>
+    <div style="display:flex;justify-content:flex-end">
+      <button class="refresh-btn" id="aj-manual-continue-btn" disabled>Continuar</button>
+    </div>
+  `;
+
+  function renderList(side, inputEl, listEl) {
+    const val = inputEl.value.trim().toLowerCase();
+    const otherSide = side === 'a' ? state.productB : state.productA;
+    if (!val) { listEl.style.display = 'none'; return; }
+
+    const matches = products.filter(p => {
+      if (otherSide && p.parent['Parent ID'] === otherSide.parent['Parent ID']) return false; // mutual exclusion
+      return String(p.parent['Parent Name'] || '').toLowerCase().includes(val);
+    }).slice(0, 10);
+
+    if (!matches.length) { listEl.style.display = 'none'; return; }
+    listEl.innerHTML = '';
+    matches.forEach(p => {
+      const item = document.createElement('div');
+      item.className = 'autocomplete-item';
+      item.innerHTML = `<span>${VP.esc(p.parent['Parent Name'])}</span><span style="color:var(--text-faint);font-size:11.5px">${VP.num(p.total_units_sold)} vendidos</span>`;
+      item.addEventListener('mousedown', e => {
+        e.preventDefault();
+        if (side === 'a') state.productA = p; else state.productB = p;
+        inputEl.value = p.parent['Parent Name'];
+        listEl.style.display = 'none';
+        updateManualState();
+      });
+      listEl.appendChild(item);
+    });
+    listEl.style.display = 'block';
+  }
+
+  function updateManualState() {
+    const summary = document.getElementById('aj-manual-selection-summary');
+    const continueBtn = document.getElementById('aj-manual-continue-btn');
+    if (state.productA && state.productB) {
+      summary.textContent = `${state.productA.parent['Parent Name']} (${VP.num(state.productA.total_units_sold)} vendidos) ↔ ${state.productB.parent['Parent Name']} (${VP.num(state.productB.total_units_sold)} vendidos)`;
+      continueBtn.disabled = false;
+    } else {
+      summary.textContent = '';
+      continueBtn.disabled = true;
+    }
+  }
+
+  const inputA = document.getElementById('aj-manual-input-a');
+  const listA = document.getElementById('aj-manual-list-a');
+  const inputB = document.getElementById('aj-manual-input-b');
+  const listB = document.getElementById('aj-manual-list-b');
+
+  inputA.addEventListener('input', () => {
+    if (state.productA && inputA.value !== state.productA.parent['Parent Name']) { state.productA = null; updateManualState(); }
+    renderList('a', inputA, listA);
+  });
+  inputB.addEventListener('input', () => {
+    if (state.productB && inputB.value !== state.productB.parent['Parent Name']) { state.productB = null; updateManualState(); }
+    renderList('b', inputB, listB);
+  });
+  inputA.addEventListener('blur', () => setTimeout(() => { listA.style.display = 'none'; }, 150));
+  inputB.addEventListener('blur', () => setTimeout(() => { listB.style.display = 'none'; }, 150));
+
+  document.getElementById('aj-manual-continue-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('aj-manual-continue-btn');
+    btn.disabled = true;
+    btn.textContent = 'Cargando…';
+    try {
+      const data = await VP.get('action=manual_product_pair&parent_id_a=' + encodeURIComponent(state.productA.parent['Parent ID']) +
+        '&parent_id_b=' + encodeURIComponent(state.productB.parent['Parent ID']));
+      if (data.error) throw new Error(data.error);
+      openProductMergeScreen(data.pair, openManualProductSearchModal);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Continuar';
+      VP.toast('Error: ' + e.message, true);
+    }
+  });
 }
