@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-03.1';
+const SCRIPT_VERSION = '2026-09-03.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -234,6 +234,8 @@ function doPost(e) {
     if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
     if (action === 'undo_merge') return undoMergeAction(body);
     if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
+    if (action === 'backfill_tiktok_preview') return backfillTikTokHistoryPreview(body);
+    if (action === 'backfill_tiktok_commit') return backfillTikTokHistoryCommit(body);
     
 
     return jsonResponse({ error: 'Unknown action' });
@@ -2146,7 +2148,138 @@ function appendTikTokImportHistory(allHistoryRecords) {
     });
   });
 
-  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+// ─── HISTORICAL / BACKFILL CSV IMPORT ──────────────────────────────────────
+//
+// Standalone tool (Ajustes page). Enriches TikTok Import History ONLY --
+// never touches Orders or QC, by design (see To-Do list for full scoping).
+//
+// Match key: Order ID + SKU ID (trimmed -- TikTok's export pads these with
+// a stray trailing tab character, same whitespace-trim convention used
+// everywhere else in this file).
+//
+// Per matched row:
+//   - 'Order Status' / 'Order Substatus' are ALWAYS overwritten with the
+//     incoming CSV value (these are live lifecycle fields expected to
+//     change run over run).
+//   - Shipped Time / Delivered Time / Cancelled Time / Cancel By /
+//     Cancel Reason are filled ONLY IF CURRENTLY BLANK (one-time facts,
+//     never overwritten once set -- protects against a stale re-upload).
+// Unmatched rows are inserted fresh with whatever fields are present.
+//
+// Records with substatus 'Awaiting shipment' or 'Unpaid' should already be
+// filtered out client-side before this is ever called (no Tracking ID yet,
+// not useful), but this function silently skips them too as a safety net
+// in case the frontend filter is ever bypassed.
+
+const BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
+const BACKFILL_FILL_ONLY_FIELDS = [
+  'Shipped Time', 'Delivered Time', 'Cancelled Time', 'Cancel By', 'Cancel Reason'
+];
+
+function backfillKey(orderId, skuId) {
+  return String(orderId || '').trim() + '||' + String(skuId || '').trim();
+}
+
+// Shared by both preview and commit so the two can never drift apart.
+// dryRun = true -> compute counts only, no writes.
+function runTikTokBackfill(records, dryRun) {
+  const sheet = getTikTokImportHistorySheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iOrderId = headers.indexOf('Order ID');
+  const iSkuId = headers.indexOf('SKU ID');
+
+  const lastRow = sheet.getLastRow();
+  const existingData = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, headers.length).getValues() : [];
+
+  // Build a lookup: "orderId||skuId" -> row index into existingData
+  const rowIndexByKey = {};
+  existingData.forEach((row, i) => {
+    rowIndexByKey[backfillKey(row[iOrderId], row[iSkuId])] = i;
+  });
+
+  let updatedCount = 0, insertedCount = 0, skippedCount = 0;
+  const newRows = [];
+  const touchedRowIndexes = {};  // dedupe -- only meaningful for the summary
+
+  records.forEach(rec => {
+    const substatus = String(rec.order_substatus || '').trim();
+    if (BACKFILL_SKIP_SUBSTATUSES.indexOf(substatus) !== -1) {
+      skippedCount++;
+      return;
+    }
+
+    const orderId = String(rec.order_id || '').trim();
+    const skuId = String(rec.sku_id || '').trim();
+    if (!orderId || !skuId) { skippedCount++; return; }
+
+    const key = backfillKey(orderId, skuId);
+    const rowIdx = rowIndexByKey[key];
+
+    if (rowIdx !== undefined) {
+      // ─── Found: overwrite status fields, fill-only the lifecycle fields ──
+      if (!touchedRowIndexes[rowIdx]) { updatedCount++; touchedRowIndexes[rowIdx] = true; }
+      if (dryRun) return;
+
+      headers.forEach((h, colIdx) => {
+        if (h === 'Order Status' || h === 'Order Substatus') {
+          const mapKey = TIKTOK_HISTORY_FIELD_MAP[h];
+          const incoming = rec[mapKey];
+          if (incoming !== undefined && incoming !== '') {
+            existingData[rowIdx][colIdx] = incoming;
+          }
+        } else if (BACKFILL_FILL_ONLY_FIELDS.indexOf(h) !== -1) {
+          const mapKey = TIKTOK_HISTORY_FIELD_MAP[h];
+          const incoming = rec[mapKey];
+          const current = String(existingData[rowIdx][colIdx] || '').trim();
+          if (!current && incoming !== undefined && incoming !== '') {
+            existingData[rowIdx][colIdx] = incoming;
+          }
+        }
+      });
+    } else {
+      // ─── Not found: insert fresh row, all available fields ────────────
+      insertedCount++;
+      if (dryRun) return;
+
+      const newRow = headers.map(h => {
+        if (h === 'Imported Date') return nowISO();
+        const mapKey = TIKTOK_HISTORY_FIELD_MAP[h];
+        return mapKey ? (rec[mapKey] !== undefined ? rec[mapKey] : '') : '';
+      });
+      newRows.push(newRow);
+    }
+  });
+
+  if (!dryRun) {
+    // Write back only the rows that changed (existingData was mutated in place),
+    // then append any brand-new rows -- both in single batched calls.
+    if (existingData.length) {
+      sheet.getRange(2, 1, existingData.length, headers.length).setValues(existingData);
+    }
+    if (newRows.length) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, headers.length).setValues(newRows);
+    }
+  }
+
+  return {
+    updated: updatedCount,
+    inserted: insertedCount,
+    skipped: skippedCount,
+    total: records.length,
+  };
+}
+
+function backfillTikTokHistoryPreview(body) {
+  const result = runTikTokBackfill(body.records || [], true);
+  return jsonResponse(result);
+}
+
+function backfillTikTokHistoryCommit(body) {
+  const result = runTikTokBackfill(body.records || [], false);
+  return jsonResponse(result);
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // DUPLICATE CUSTOMER DETECTION
