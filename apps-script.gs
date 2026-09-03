@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-03.4';
+const SCRIPT_VERSION = '2026-09-03.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -147,6 +147,8 @@ function doGet(e) {
     if (action === 'active_session') return getActiveSession(e);
     if (action === 'sessions') return getSessions(e);
     if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
+    if (action === 'find_duplicate_products') return findDuplicateProducts(e);
+    if (action === 'product_merge_history') return getProductMergeHistory(e);
     if (action === 'merge_history') return getMergeHistory(e);
 
     if (action === 'orders') {
@@ -234,6 +236,9 @@ function doPost(e) {
     if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
     if (action === 'undo_merge') return undoMergeAction(body);
     if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
+    if (action === 'dismiss_product_pair') return dismissProductPairAction(body);
+    if (action === 'merge_products') return mergeProductsAction(body);
+    if (action === 'undo_product_merge') return undoProductMergeAction(body);
     if (action === 'backfill_tiktok_preview') return backfillTikTokHistoryPreview(body);
     if (action === 'backfill_tiktok_commit') return backfillTikTokHistoryCommit(body);
     
@@ -2323,6 +2328,468 @@ function backfillTikTokHistoryCommit(body) {
   const result = runTikTokBackfill(body.records || [], false);
   return jsonResponse(result);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRODUCT CATALOG DUPLICATE DETECTION + MERGE + UNDO
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mirrors the Customer duplicate-finder/merge tool's shape (threshold scan,
+// dismiss, merge, undo) but is a two-level merge: Parents match by fuzzy
+// name similarity, then each of the losing Parent's Variants must be
+// individually paired against a Variant on the keeper Parent (or left
+// unmapped as genuinely unique) before anything is written. This is
+// necessary because Orders references Catalog IDs (Variant-level), not
+// Parent IDs -- a Parent-only merge with no variant reconciliation would
+// leave Orders pointing at orphaned or duplicate Catalog IDs.
+//
+// New sheet tabs required (same workbook as Product Parents/Variants,
+// i.e. PRODUCT_CATALOG_SHEET_ID):
+//   "Dismissed Product Pairs" -- columns: Parent ID A | Parent ID B | Dismissed Date
+//   "Product Merge History" -- columns: Merge ID | Kept Parent ID |
+//     Kept Parent Name | Merged Parent ID | Merged Parent Name |
+//     Variant Pairs (JSON) | Orders Repointed | Status | Merged Date |
+//     Undone Date | Keeper Snapshot (JSON)
+// Vel: please create both tabs with these exact header rows before this
+// code is used.
+
+function getDismissedProductPairsSheet() {
+  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Dismissed Product Pairs');
+}
+
+function getProductMergeHistorySheet() {
+  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Merge History');
+}
+
+function dismissedProductPairKey(idA, idB) {
+  return [String(idA), String(idB)].sort().join('|');
+}
+
+const PRODUCT_DUPLICATE_SCORE_THRESHOLD = 55; // same default as customer duplicates
+
+// ─── Scan: find likely-duplicate PARENTS ───────────────────────────────────
+// Fuzzy-matches every non-merged Parent Name against every other, using the
+// same stringSimilarity() already used for SKU->Parent resolution. Returns
+// each pair already bundled with both Parents' Variants AND a suggested
+// variant-to-variant pairing (see suggestVariantPairs below), so the
+// frontend can render the whole merge screen from one call.
+function findDuplicateProducts(e) {
+  const threshold = e.parameter.threshold
+    ? Math.max(0, Math.min(100, parseInt(e.parameter.threshold, 10) || PRODUCT_DUPLICATE_SCORE_THRESHOLD))
+    : PRODUCT_DUPLICATE_SCORE_THRESHOLD;
+
+  const parents = sheetToObjects(getProductParentsSheet())
+    .filter(p => !String(p['Parent Name'] || '').includes('(merged→'));
+
+  const allVariants = sheetToObjects(getProductVariantsSheet())
+    .filter(v => !String(v['Variant Name'] || '').includes('(merged→'));
+
+  const variantsByParent = {};
+  allVariants.forEach(v => {
+    const pid = String(v['Parent ID'] || '');
+    if (!variantsByParent[pid]) variantsByParent[pid] = [];
+    variantsByParent[pid].push(v);
+  });
+
+  const dismissed = new Set(
+    sheetToObjects(getDismissedProductPairsSheet())
+      .map(d => dismissedProductPairKey(d['Parent ID A'], d['Parent ID B']))
+  );
+
+  const pairs = [];
+  for (let i = 0; i < parents.length; i++) {
+    for (let j = i + 1; j < parents.length; j++) {
+      const a = parents[i], b = parents[j];
+      const pairKey = dismissedProductPairKey(a['Parent ID'], b['Parent ID']);
+      if (dismissed.has(pairKey)) continue;
+
+      const score = stringSimilarity(a['Parent Name'], b['Parent Name']);
+      const scorePct = Math.round(score * 100);
+      if (scorePct < threshold) continue;
+
+      const variantsA = variantsByParent[a['Parent ID']] || [];
+      const variantsB = variantsByParent[b['Parent ID']] || [];
+
+      pairs.push({
+        parent_a: a,
+        parent_b: b,
+        score: scorePct,
+        variants_a: variantsA,
+        variants_b: variantsB,
+        suggested_variant_pairs: suggestVariantPairs(variantsA, variantsB),
+      });
+    }
+  }
+
+  pairs.sort((x, y) => y.score - x.score);
+  return jsonResponse({ pairs: pairs });
+}
+
+// For each Variant in list B, finds its best fuzzy match (by Variant Name)
+// in list A above a modest threshold, greedily and without letting two B
+// variants claim the same A variant. Returns an array parallel to
+// variants_b: { b_catalog_id, suggested_a_catalog_id | null }. The frontend
+// pre-fills each B row's dropdown with this suggestion but the human always
+// confirms/changes it before anything is written -- this is a starting
+// point, not an auto-merge.
+const VARIANT_SUGGEST_THRESHOLD = 0.5;
+
+function suggestVariantPairs(variantsA, variantsB) {
+  const claimedA = new Set();
+  return variantsB.map(vb => {
+    let best = null, bestScore = 0;
+    variantsA.forEach(va => {
+      if (claimedA.has(va['Catalog ID'])) return;
+      const score = stringSimilarity(vb['Variant Name'], va['Variant Name']);
+      if (score > bestScore) { bestScore = score; best = va; }
+    });
+    if (best && bestScore >= VARIANT_SUGGEST_THRESHOLD) {
+      claimedA.add(best['Catalog ID']);
+      return { b_catalog_id: vb['Catalog ID'], suggested_a_catalog_id: best['Catalog ID'] };
+    }
+    return { b_catalog_id: vb['Catalog ID'], suggested_a_catalog_id: null };
+  });
+}
+
+function dismissProductPairAction(body) {
+  const idA = body.parent_id_a;
+  const idB = body.parent_id_b;
+  if (!idA || !idB) return jsonResponse({ error: 'parent_id_a and parent_id_b are required' });
+
+  getDismissedProductPairsSheet().appendRow([idA, idB, nowISO()]);
+  return jsonResponse({ result: 'dismissed' });
+}
+
+// ─── Merge ──────────────────────────────────────────────────────────────
+//
+// body shape:
+// {
+//   keep_parent_id, lose_parent_id,
+//   variant_pairs: [ { keep_catalog_id, lose_catalog_id } , ... ]
+//     -- one entry per PAIRED variant (both sides confirmed as the same).
+//        Any variant NOT listed here (on either side) is treated as
+//        genuinely unique and is simply re-pointed to the surviving
+//        Parent ID without being touched otherwise.
+// }
+//
+// For each paired entry: unions TikTok SKU IDs onto the keeper variant,
+// backfills blank Your SKU/Notes from the loser, repoints every Orders row
+// across all 30 Product N Catalog ID slots from the loser's Catalog ID to
+// the keeper's, and marks the loser variant with a (merged→...) sentinel.
+// Every OTHER variant belonging to the losing Parent (paired or not) has
+// its Parent ID updated to the surviving Parent ID. Finally the losing
+// Parent itself is marked (merged→...), never deleted, mirroring the
+// customer-merge convention.
+function mergeProductsAction(body) {
+  const keepParentId = body.keep_parent_id;
+  const loseParentId = body.lose_parent_id;
+  const variantPairs = body.variant_pairs || [];
+  if (!keepParentId || !loseParentId || keepParentId === loseParentId) {
+    return jsonResponse({ error: 'keep_parent_id and lose_parent_id (different) are required' });
+  }
+
+  // ─── Load Parents ────────────────────────────────────────────────────
+  const parentsSheet = getProductParentsSheet();
+  const pData = parentsSheet.getDataRange().getValues();
+  const pHeaders = pData[0];
+  const pIdCol = pHeaders.indexOf('Parent ID');
+  const pNameCol = pHeaders.indexOf('Parent Name');
+
+  let keepParentRow = -1, loseParentRow = -1;
+  for (let i = 1; i < pData.length; i++) {
+    if (String(pData[i][pIdCol]) === String(keepParentId)) keepParentRow = i;
+    if (String(pData[i][pIdCol]) === String(loseParentId)) loseParentRow = i;
+  }
+  if (keepParentRow === -1 || loseParentRow === -1) {
+    return jsonResponse({ error: 'One or both parents not found' });
+  }
+  const keepParentName = String(pData[keepParentRow][pNameCol] || '');
+  const loseParentName = String(pData[loseParentRow][pNameCol] || '');
+
+  // ─── Load Variants ───────────────────────────────────────────────────
+  const variantsSheet = getProductVariantsSheet();
+  const vData = variantsSheet.getDataRange().getValues();
+  const vHeaders = vData[0];
+  const vCatalogCol = vHeaders.indexOf('Catalog ID');
+  const vParentCol = vHeaders.indexOf('Parent ID');
+  const vNameCol = vHeaders.indexOf('Variant Name');
+  const vYourSkuCol = vHeaders.indexOf('Your SKU');
+  const vTiktokSkusCol = vHeaders.indexOf('TikTok SKU IDs');
+  const vNotesCol = vHeaders.indexOf('Notes');
+
+  const variantRowByCatalogId = {};
+  for (let i = 1; i < vData.length; i++) {
+    variantRowByCatalogId[String(vData[i][vCatalogCol])] = i;
+  }
+
+  // Snapshot every variant belonging to the LOSING parent, before any
+  // mutation, so undo can fully restore Parent ID / SKU unions / names.
+  const loserVariantCatalogIds = [];
+  for (let i = 1; i < vData.length; i++) {
+    if (String(vData[i][vParentCol]) === String(loseParentId)) {
+      loserVariantCatalogIds.push(String(vData[i][vCatalogCol]));
+    }
+  }
+  const variantSnapshot = {};
+  loserVariantCatalogIds.forEach(cid => {
+    const row = variantRowByCatalogId[cid];
+    variantSnapshot[cid] = {
+      parentId: String(vData[row][vParentCol] || ''),
+      variantName: String(vData[row][vNameCol] || ''),
+    };
+  });
+  const keeperVariantSnapshot = {}; // for paired keeper variants: pre-merge field values
+
+  // ─── Apply each confirmed variant pair ────────────────────────────────
+  const catalogIdRepointMap = {}; // loser Catalog ID -> keeper Catalog ID (only for paired variants)
+
+  variantPairs.forEach(pair => {
+    const keepRow = variantRowByCatalogId[pair.keep_catalog_id];
+    const loseRow = variantRowByCatalogId[pair.lose_catalog_id];
+    if (keepRow === undefined || loseRow === undefined) return;
+
+    keeperVariantSnapshot[pair.keep_catalog_id] = {
+      yourSku: String(vData[keepRow][vYourSkuCol] || ''),
+      tiktokSkus: String(vData[keepRow][vTiktokSkusCol] || ''),
+      notes: String(vData[keepRow][vNotesCol] || ''),
+    };
+
+    // Union TikTok SKU IDs
+    const keepSkus = String(vData[keepRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+    const loseSkus = String(vData[loseRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+    const mergedSkus = [...new Set([...keepSkus, ...loseSkus])];
+    vData[keepRow][vTiktokSkusCol] = mergedSkus.join(', ');
+
+    // Backfill blank fields from loser
+    if (!String(vData[keepRow][vYourSkuCol] || '').trim() && vData[loseRow][vYourSkuCol]) {
+      vData[keepRow][vYourSkuCol] = vData[loseRow][vYourSkuCol];
+    }
+    const keeperNotes = String(vData[keepRow][vNotesCol] || '');
+    const loserNotes = String(vData[loseRow][vNotesCol] || '');
+    if (loserNotes && !keeperNotes.includes(loserNotes)) {
+      vData[keepRow][vNotesCol] = keeperNotes ? keeperNotes + ' | ' + loserNotes : loserNotes;
+    }
+
+    // Mark the losing variant as merged (kept, not deleted)
+    vData[loseRow][vNameCol] = String(vData[loseRow][vNameCol] || '') + ` (merged→${pair.keep_catalog_id})`;
+
+    catalogIdRepointMap[pair.lose_catalog_id] = pair.keep_catalog_id;
+  });
+
+  // ─── Every OTHER variant of the losing Parent (unpaired, genuinely
+  //     unique) simply moves under the surviving Parent ID ───────────────
+  const pairedLoserCatalogIds = new Set(variantPairs.map(p => p.lose_catalog_id));
+  loserVariantCatalogIds.forEach(cid => {
+    if (pairedLoserCatalogIds.has(cid)) return; // already handled above
+    const row = variantRowByCatalogId[cid];
+    vData[row][vParentCol] = keepParentId;
+  });
+
+  variantsSheet.getRange(2, 1, vData.length - 1, vHeaders.length).setValues(vData.slice(1));
+
+  // ─── Repoint every Orders row across all 30 Product N Catalog ID slots ─
+  const ordersSheet = getOrdersSheet();
+  const oLastRow = ordersSheet.getLastRow();
+  const oLastCol = ordersSheet.getLastColumn();
+  let ordersRepointed = 0;
+
+  if (oLastRow > 1 && Object.keys(catalogIdRepointMap).length) {
+    const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
+    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
+    const PRODUCT_SLOTS = 30;
+    const catalogCols = [];
+    for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+      const col = oh.indexOf('Product ' + n + ' Catalog ID');
+      if (col >= 0) catalogCols.push(col);
+    }
+
+    let touchedAnyRow = false;
+    oData.forEach(row => {
+      let touchedThisRow = false;
+      catalogCols.forEach(col => {
+        const current = String(row[col] || '');
+        if (catalogIdRepointMap[current]) {
+          row[col] = catalogIdRepointMap[current];
+          touchedThisRow = true;
+        }
+      });
+      if (touchedThisRow) { ordersRepointed++; touchedAnyRow = true; }
+    });
+
+    if (touchedAnyRow) {
+      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    }
+  }
+
+  // ─── Mark the losing Parent (kept, not deleted) ────────────────────────
+  pData[loseParentRow][pNameCol] = loseParentName + ` (merged→${keepParentId})`;
+  parentsSheet.getRange(loseParentRow + 1, pNameCol + 1).setValue(pData[loseParentRow][pNameCol]);
+
+  logProductMergeHistory(
+    keepParentId, keepParentName, loseParentId, loseParentName,
+    variantPairs, ordersRepointed,
+    { keeperVariantSnapshot: keeperVariantSnapshot, loserVariantSnapshot: variantSnapshot }
+  );
+
+  return jsonResponse({
+    result: 'merged',
+    kept_parent_id: keepParentId,
+    merged_parent_id: loseParentId,
+    variants_merged: variantPairs.length,
+    variants_reassigned: loserVariantCatalogIds.length - variantPairs.length,
+    orders_repointed: ordersRepointed,
+  });
+}
+
+function logProductMergeHistory(keepId, keptName, loseId, loserName, variantPairs, ordersRepointed, snapshot) {
+  getProductMergeHistorySheet().appendRow([
+    'PMERGE-' + Utilities.getUuid().slice(0, 8),
+    keepId,
+    keptName,
+    loseId,
+    loserName,
+    JSON.stringify(variantPairs),
+    ordersRepointed,
+    'Activo',
+    nowISO(),
+    '',
+    JSON.stringify(snapshot),
+  ]);
+}
+
+function getProductMergeHistory(e) {
+  return jsonResponse({ records: sheetToObjects(getProductMergeHistorySheet()) });
+}
+
+// ─── Undo ──────────────────────────────────────────────────────────────
+// Reverses a product merge: restores the loser Parent's original name,
+// restores every loser Variant's original Parent ID and Variant Name
+// (undoing the (merged→...) sentinel), restores the keeper Variants'
+// pre-merge Your SKU/TikTok SKU IDs/Notes from the snapshot, and repoints
+// Orders rows back to the original (loser) Catalog IDs. Refuses if already
+// undone.
+function undoProductMergeAction(body) {
+  const mergeId = body.merge_id;
+  if (!mergeId) return jsonResponse({ error: 'merge_id is required' });
+
+  const historySheet = getProductMergeHistorySheet();
+  const hData = historySheet.getDataRange().getValues();
+  const hHeaders = hData[0];
+  const iMergeId = hHeaders.indexOf('Merge ID');
+  const iKeepId = hHeaders.indexOf('Kept Parent ID');
+  const iLoseId = hHeaders.indexOf('Merged Parent ID');
+  const iVariantPairs = hHeaders.indexOf('Variant Pairs (JSON)');
+  const iStatus = hHeaders.indexOf('Status');
+  const iUndoneDate = hHeaders.indexOf('Undone Date');
+  const iSnapshot = hHeaders.indexOf('Keeper Snapshot (JSON)');
+
+  let historyRow = -1, record = null;
+  for (let i = 1; i < hData.length; i++) {
+    if (String(hData[i][iMergeId]) === String(mergeId)) { historyRow = i; record = hData[i]; break; }
+  }
+  if (historyRow === -1) return jsonResponse({ error: 'Merge record not found' });
+  if (record[iStatus] === 'Deshecho') return jsonResponse({ error: 'This merge was already undone' });
+
+  const keepId = record[iKeepId];
+  const loseId = record[iLoseId];
+  const variantPairs = JSON.parse(record[iVariantPairs] || '[]');
+  const snapshot = JSON.parse(record[iSnapshot] || '{}');
+  const keeperVariantSnapshot = snapshot.keeperVariantSnapshot || {};
+  const loserVariantSnapshot = snapshot.loserVariantSnapshot || {};
+
+  // ─── Restore Parent ────────────────────────────────────────────────
+  const parentsSheet = getProductParentsSheet();
+  const pData = parentsSheet.getDataRange().getValues();
+  const pIdCol = pData[0].indexOf('Parent ID');
+  const pNameCol = pData[0].indexOf('Parent Name');
+  for (let i = 1; i < pData.length; i++) {
+    if (String(pData[i][pIdCol]) === String(loseId)) {
+      const original = String(pData[i][pNameCol] || '').replace(` (merged→${keepId})`, '');
+      parentsSheet.getRange(i + 1, pNameCol + 1).setValue(original);
+      break;
+    }
+  }
+
+  // ─── Restore Variants ────────────────────────────────────────────────
+  const variantsSheet = getProductVariantsSheet();
+  const vData = variantsSheet.getDataRange().getValues();
+  const vHeaders = vData[0];
+  const vCatalogCol = vHeaders.indexOf('Catalog ID');
+  const vParentCol = vHeaders.indexOf('Parent ID');
+  const vNameCol = vHeaders.indexOf('Variant Name');
+  const vYourSkuCol = vHeaders.indexOf('Your SKU');
+  const vTiktokSkusCol = vHeaders.indexOf('TikTok SKU IDs');
+  const vNotesCol = vHeaders.indexOf('Notes');
+
+  const rowByCatalogId = {};
+  for (let i = 1; i < vData.length; i++) rowByCatalogId[String(vData[i][vCatalogCol])] = i;
+
+  // Restore every loser variant's Parent ID + Variant Name
+  Object.keys(loserVariantSnapshot).forEach(cid => {
+    const row = rowByCatalogId[cid];
+    if (row === undefined) return;
+    vData[row][vParentCol] = loserVariantSnapshot[cid].parentId;
+    vData[row][vNameCol] = loserVariantSnapshot[cid].variantName;
+  });
+
+  // Restore keeper variants' pre-merge field values (undoes the SKU union)
+  Object.keys(keeperVariantSnapshot).forEach(cid => {
+    const row = rowByCatalogId[cid];
+    if (row === undefined) return;
+    vData[row][vYourSkuCol] = keeperVariantSnapshot[cid].yourSku;
+    vData[row][vTiktokSkusCol] = keeperVariantSnapshot[cid].tiktokSkus;
+    vData[row][vNotesCol] = keeperVariantSnapshot[cid].notes;
+  });
+
+  variantsSheet.getRange(2, 1, vData.length - 1, vHeaders.length).setValues(vData.slice(1));
+
+  // ─── Repoint Orders back to the loser's Catalog IDs ───────────────────
+  const ordersSheet = getOrdersSheet();
+  const oLastRow = ordersSheet.getLastRow();
+  const oLastCol = ordersSheet.getLastColumn();
+  let ordersReverted = 0;
+
+  if (oLastRow > 1 && variantPairs.length) {
+    const reverseMap = {}; // keeper Catalog ID -> loser Catalog ID
+    variantPairs.forEach(p => { reverseMap[p.keep_catalog_id] = p.lose_catalog_id; });
+
+    const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
+    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
+    const PRODUCT_SLOTS = 30;
+    const catalogCols = [];
+    for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+      const col = oh.indexOf('Product ' + n + ' Catalog ID');
+      if (col >= 0) catalogCols.push(col);
+    }
+
+    // NOTE: this reverts EVERY row currently pointing at a keeper Catalog ID
+    // that was involved in this merge back to the loser's ID. If the keeper
+    // variant received genuinely new orders (unrelated to this merge) after
+    // the merge happened, those get reverted too -- undo is intended to run
+    // soon after a mistaken merge, not long after, for this reason.
+    let touchedAnyRow = false;
+    oData.forEach(row => {
+      let touchedThisRow = false;
+      catalogCols.forEach(col => {
+        const current = String(row[col] || '');
+        if (reverseMap[current]) {
+          row[col] = reverseMap[current];
+          touchedThisRow = true;
+        }
+      });
+      if (touchedThisRow) { ordersReverted++; touchedAnyRow = true; }
+    });
+
+    if (touchedAnyRow) {
+      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    }
+  }
+
+  historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
+  if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
+
+  return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // DUPLICATE CUSTOMER DETECTION
 // ═══════════════════════════════════════════════════════════════════════════
