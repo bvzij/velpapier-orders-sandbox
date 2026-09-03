@@ -2219,15 +2219,6 @@ function dismissedPairKey(idA, idB) {
   return [String(idA), String(idB)].sort().join('|');
 }
 
-function getDismissedDuplicatesSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Dismissed Duplicates');
-}
-
-// Order-independent key so A|B and B|A always match the same dismissal.
-function dismissedPairKey(idA, idB) {
-  return [String(idA), String(idB)].sort().join('|');
-}
-
 function findDuplicateCustomers(e) {
   const threshold = e.parameter.threshold
     ? Math.max(0, Math.min(100, parseInt(e.parameter.threshold, 10) || DUPLICATE_SCORE_THRESHOLD))
