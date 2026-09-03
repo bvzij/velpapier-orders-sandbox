@@ -1,464 +1,663 @@
 /* ============================================================================
-   ajustes.js — Settings page: theme preference + duplicate-customer tool.
+   analytics.js — the whole picture, computed client-side from four sheets.
+   All is attributed by Created Date unless a block says otherwise,
+   so "September revenue" means orders placed in September.
    ==========================================================================*/
 
-(function initTheme() {
-  const buttons = document.querySelectorAll('#aj-theme-toggle .vp-period-btn');
-  function reflect() {
-    const current = VP.getTheme();
-    buttons.forEach(b => b.classList.toggle('is-active', b.dataset.theme === current));
+VP.mountNav('analisis');
+
+const PAID = ['Pagado', 'Enviado', 'Archivado'];
+const SHIPPED = ['Enviado', 'Archivado'];
+
+const isPaid    = r => PAID.includes(r['Status']);
+const isShipped = r => SHIPPED.includes(r['Status']);
+const price     = r => Number(r['Price']) || 0;
+const created   = r => VP.asDate(r['Created Date']);
+
+const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {} };
+let periodDays = 90;
+
+function rebuildById() {
+  DATA.byId = {};
+  DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
+}
+
+/* ── Boot ───────────────────────────────────────────────────────────── */
+
+(async function init() {
+  wirePeriod();
+  try {
+    await VP.ensureToken();
+
+    // Show cached data instantly if we have it, while a fresh fetch runs
+    // quietly in the background and re-renders once it lands. Makes
+    // switching back to this page from another one feel instant instead
+    // of showing a blank loading state every time.
+    let gotCache = false;
+    const cachedOrders    = VP.getCached('action=orders',    fresh => { DATA.orders = fresh.records || []; render(); });
+    const cachedCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
+    const cachedQc        = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
+    const cachedSessions  = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
+
+    if (cachedOrders)    { DATA.orders = cachedOrders.records || []; gotCache = true; }
+    if (cachedCustomers) { DATA.customers = cachedCustomers.records || []; gotCache = true; }
+    if (cachedQc)        { DATA.qc = cachedQc.records || []; gotCache = true; }
+    if (cachedSessions)  { DATA.sessions = cachedSessions.records || []; gotCache = true; }
+
+    if (gotCache) {
+      rebuildById();
+      render();
+    } else {
+      // No cache at all yet (first visit this session) -- fall back to a
+      // normal blocking fetch, same as before.
+      const [o, c, q, s] = await Promise.all([
+        VP.get('action=orders'),
+        VP.get('action=customers'),
+        VP.get('action=qc').catch(() => ({ records: [] })),
+        VP.get('action=sessions').catch(() => ({ records: [] })),
+      ]);
+      DATA.orders    = o.records || [];
+      DATA.customers = c.records || [];
+      DATA.qc        = q.records || [];
+      DATA.sessions  = s.records || [];
+      rebuildById();
+      render();
+    }
+  } catch (e) {
+    console.error('[analytics]', e);
+    document.getElementById('an-content').innerHTML =
+      `<div class="vp-empty-sm">No se pudieron cargar los datos.
+       <a href="#" onclick="location.reload();return false">Reintentar</a></div>`;
   }
-  buttons.forEach(b => {
-    b.addEventListener('click', () => {
-      VP.setTheme(b.dataset.theme);
-      reflect();
-    });
-  });
-  reflect();
 })();
 
-document.getElementById('aj-scan-duplicates').addEventListener('click', openDuplicatesModal);
+function wirePeriod() {
+  document.getElementById('an-period').addEventListener('click', e => {
+    const btn = e.target.closest('.vp-period-btn');
+    if (!btn) return;
+    periodDays = parseInt(btn.dataset.days, 10);
+    document.querySelectorAll('.vp-period-btn').forEach(b => b.classList.toggle('is-active', b === btn));
+    render();
+  });
+}
 
-const AJ_DUP_DEFAULT_THRESHOLD = 55;
+/* ── Scope helpers ──────────────────────────────────────────────────── */
 
-async function openDuplicatesModal() {
-  const modalRoot = document.getElementById('modal-container');
-  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
-    <div class="modal aj-merge-modal">
-      <div class="modal-title">Clientes duplicados</div>
-      <div class="aj-dup-threshold-row">
-        <span class="aj-dup-threshold-label">Umbral</span>
-        <input type="range" id="aj-dup-threshold-slider" min="0" max="100" step="1" value="${AJ_DUP_DEFAULT_THRESHOLD}">
-        <span class="aj-dup-threshold-value" id="aj-dup-threshold-value">${AJ_DUP_DEFAULT_THRESHOLD}%</span>
-        <button class="btn aj-dup-refresh-btn" id="aj-dup-refresh-btn" title="Buscar de nuevo con este umbral" aria-label="Actualizar">↻</button>
+function scope() {
+  if (!periodDays) {
+    const dates = DATA.orders.map(created).filter(Boolean);
+    const from = dates.length ? new Date(Math.min(...dates)) : new Date(0);
+    return { from, to: new Date(), prevFrom: null, prevTo: null, days: 0 };
+  }
+  return VP.window_(periodDays);
+}
+
+function inScope(records, sc) {
+  if (!sc.days) return records.slice();
+  return records.filter(r => {
+    const d = created(r);
+    return d && d > sc.from && d <= sc.to;
+  });
+}
+
+function inPrev(records, sc) {
+  if (!sc.days) return [];
+  return records.filter(r => {
+    const d = created(r);
+    return d && d > sc.prevFrom && d <= sc.prevTo;
+  });
+}
+
+/* ── Render ─────────────────────────────────────────────────────────── */
+
+// TEMPORARY: packing sessions are disabled while the team gets used to the
+// general workflow first. Flip back to true to bring back the Empaque
+// section here. Mirrors the same flag in qc.js.
+const SESSIONS_ENABLED = false;
+
+function render() {
+  const sc   = scope();
+  const now  = inScope(DATA.orders, sc);
+  const prev = inPrev(DATA.orders, sc);
+
+  document.getElementById('an-range').textContent = sc.days
+    ? `${VP.fmtDate(sc.from)} — ${VP.fmtDate(sc.to)}`
+    : `Historial completo · desde ${VP.fmtDate(sc.from)}`;
+  document.getElementById('an-count').textContent =
+    `${VP.num(now.length)} pedido${now.length !== 1 ? 's' : ''} en el periodo`;
+
+  VP.resetCharts();
+  document.getElementById('an-content').innerHTML = [
+    blockHeadline(now, prev),
+    blockRevenueOverTime(sc),
+    blockChannelAndFunnel(now),
+    blockProducts(now),
+    blockCustomers(now, sc),
+    blockGeography(now),
+    blockFulfillment(now),
+    SESSIONS_ENABLED ? blockPacking(sc) : '',
+  ].join('');
+
+  VP.paintCharts();
+}
+
+/* ── 1 · Headline ───────────────────────────────────────────────────── */
+
+function blockHeadline(now, prev) {
+  const rev      = now.filter(isPaid).reduce((s, r) => s + price(r), 0);
+  const revPrev  = prev.filter(isPaid).reduce((s, r) => s + price(r), 0);
+  const cnt      = now.length, cntPrev = prev.length;
+  const paidNow  = now.filter(isPaid);
+  const aov      = paidNow.length ? rev / paidNow.length : 0;
+  const paidPrev = prev.filter(isPaid);
+  const aovPrev  = paidPrev.length ? revPrev / paidPrev.length : 0;
+  const items    = now.reduce((s, r) => s + VP.itemCount(r['Products']), 0);
+  const itemsPrev= prev.reduce((s, r) => s + VP.itemCount(r['Products']), 0);
+
+  const stat = (label, val, prevVal, fmt) => {
+    const d = VP.pctChange(val, prevVal);
+    let delta;
+    if (d === null) delta = `<span class="vp-stat-delta flat">sin base previa</span>`;
+    else if (Math.abs(d) < 0.5) delta = `<span class="vp-stat-delta flat">sin cambio</span>`;
+    else delta = `<span class="vp-stat-delta ${d > 0 ? 'up' : 'down'}">${d > 0 ? '↑' : '↓'} ${Math.abs(d).toFixed(0)}%</span>`;
+    return `<div class="vp-stat">
+      <div class="vp-stat-label">${VP.esc(label)}</div>
+      <div class="vp-stat-value">${fmt(val)}</div>
+      <div class="vp-stat-foot">${delta}</div>
+    </div>`;
+  };
+
+  return `<section class="vp-section" style="margin-top:0">
+    <div class="vp-stats">
+      ${stat('Ingresos',        rev,   revPrev,  VP.mxn)}
+      ${stat('Pedidos',         cnt,   cntPrev,  VP.num)}
+      ${stat('Ticket promedio', aov,   aovPrev,  VP.mxn)}
+      ${stat('Artículos',       items, itemsPrev, VP.num)}
+    </div>
+  </section>`;
+}
+
+/* ── 2 · Revenue over time ──────────────────────────────────────────── */
+
+function blockRevenueOverTime(sc) {
+  // Bucket width adapts so the chart always shows ~12–16 points
+  let buckets, per, note;
+  if (!sc.days || sc.days > 365)      { buckets = 12; per = 30; note = 'por mes'; }
+  else if (sc.days > 120)             { buckets = 13; per = 7;  note = 'por semana'; }
+  else if (sc.days > 45)              { buckets = 13; per = 7;  note = 'por semana'; }
+  else                                { buckets = 15; per = 2;  note = 'cada 2 días'; }
+
+  const paid = DATA.orders.filter(isPaid);
+  const revB = VP.bucketBy(paid, 'Created Date', buckets, per, rs => rs.reduce((s, r) => s + price(r), 0));
+  const cntB = VP.bucketBy(DATA.orders, 'Created Date', buckets, per, rs => rs.length);
+
+  const revPoints = revB.map(b => ({ label: VP.shortDate(b.end), value: Math.round(b.value) }));
+  const cntLabels = cntB.map(b => VP.shortDate(b.end));
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Ingresos en el tiempo</h2>
+      <span class="vp-section-note">${VP.esc(note)}</span>
+    </div>
+    <div class="vp-panel" style="margin-bottom:14px">
+      ${VP.chartSlot(w => VP.chart.area(revPoints, { width: w, height: 230, fmt: VP.mxn, accent: '#3b6d11' }), 230)}
+    </div>
+    <div class="vp-panel">
+      <div class="vp-panel-head">
+        <span class="vp-panel-title">Pedidos por periodo</span>
       </div>
-      <div class="aj-merge-scroll" id="aj-duplicates-content">
-        <div class="vp-loading">Comparando clientes, puede tardar un momento…</div>
+      ${VP.chartSlot(w => VP.chart.bars(cntLabels, [{ name: 'Pedidos', color: '#185fa5', values: cntB.map(b => b.value) }], { width: w, height: 170 }), 170)}
+    </div>
+  </section>`;
+}
+
+/* ── 3 · Channel + status funnel ────────────────────────────────────── */
+
+function blockChannelAndFunnel(now) {
+  const channels = ['TikTok', 'Shopify', 'Manual'];
+  const colors   = { TikTok: '#185fa5', Shopify: '#3b6d11', Manual: '#854f0b' };
+
+  const rows = channels.map(ch => {
+    const rs = now.filter(r => r['Channel'] === ch);
+    return {
+      label: ch,
+      value: rs.filter(isPaid).reduce((s, r) => s + price(r), 0),
+      count: rs.length,
+      color: colors[ch],
+    };
+  }).filter(r => r.count > 0);
+
+  const totalRev = rows.reduce((s, r) => s + r.value, 0);
+
+  const legend = rows.map(r => `
+    <div class="vp-legend-row">
+      <span class="vp-legend-dot" style="background:${r.color}"></span>
+      <span class="vp-legend-name">${VP.esc(r.label)} · ${VP.num(r.count)} pedidos</span>
+      <span class="vp-legend-val">${VP.mxn(r.value)}</span>
+    </div>`).join('');
+
+  const stages = [
+    { label: 'No pagado', value: now.filter(r => r['Status'] === 'No Pagado').length, color: '#854f0b' },
+    { label: 'Pagado',    value: now.filter(r => r['Status'] === 'Pagado').length,    color: '#185fa5' },
+    { label: 'Enviado',   value: now.filter(r => r['Status'] === 'Enviado').length,   color: '#3b6d11' },
+    { label: 'Archivado', value: now.filter(r => r['Status'] === 'Archivado').length, color: '#6b6860' },
+  ];
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Canales y estados</h2>
+    </div>
+    <div class="vp-grid-2">
+      <div class="vp-panel">
+        <div class="vp-panel-head"><span class="vp-panel-title">Ingresos por canal</span></div>
+        ${rows.length
+          ? VP.chart.donut(rows, { centerTop: VP.mxn(totalRev), centerSub: 'total' }) + `<div class="vp-legend">${legend}</div>`
+          : '<div class="vp-empty-sm">Sin pedidos en el periodo</div>'}
       </div>
-      <div class="modal-actions">
-        <button class="btn" id="aj-merge-history-btn">Ver historial</button>
-        <button class="btn" id="aj-merge-close-btn">Cerrar</button>
+      <div class="vp-panel">
+        <div class="vp-panel-head">
+          <span class="vp-panel-title">Estado de los pedidos</span>
+          <span class="vp-panel-note">dónde está cada pedido hoy</span>
+        </div>
+        ${VP.chart.funnel(stages, { showShare: true })}
       </div>
     </div>
-  </div>`;
-
-  document.getElementById('aj-merge-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
-  document.getElementById('aj-merge-history-btn').addEventListener('click', openMergeHistoryModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => {
-    if (e.target.id === 'modal-overlay') modalRoot.innerHTML = '';
-  });
-
-  const slider = document.getElementById('aj-dup-threshold-slider');
-  const valueLabel = document.getElementById('aj-dup-threshold-value');
-  slider.addEventListener('input', () => { valueLabel.textContent = slider.value + '%'; });
-  document.getElementById('aj-dup-refresh-btn').addEventListener('click', () => {
-    loadDuplicates(parseInt(slider.value, 10));
-  });
-
-  await loadDuplicates(AJ_DUP_DEFAULT_THRESHOLD);
+  </section>`;
 }
 
-async function loadDuplicates(threshold) {
-  const content = document.getElementById('aj-duplicates-content');
-  content.innerHTML = '<div class="vp-loading">Comparando clientes, puede tardar un momento…</div>';
-  try {
-    await VP.ensureToken();
-    const data = await VP.get('action=find_duplicate_customers&threshold=' + threshold);
-    renderDuplicates(data.pairs || []);
-  } catch (e) {
-    content.innerHTML = `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
-  }
-}
+/* ── 4 · Products ───────────────────────────────────────────────────── */
 
-function renderDuplicates(pairs) {
-  const content = document.getElementById('aj-duplicates-content');
+function blockProducts(now) {
+  const byName = {};      // grouped by base product (variants merged)
+  const byVariant = {};   // full string, variant included
 
-  if (!pairs.length) {
-    content.innerHTML = '<div class="vp-empty-sm">No se encontraron duplicados probables.</div>';
-    return;
-  }
-
-  content.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
-    ${VP.num(pairs.length)} par${pairs.length !== 1 ? 'es' : ''} probable${pairs.length !== 1 ? 's' : ''} encontrado${pairs.length !== 1 ? 's' : ''}
-  </div>` + pairs.map(pairHtml).join('');
-
-    content.querySelectorAll('.aj-dup-merge-btn').forEach(el => {
-    el.addEventListener('click', () => handleMerge(el));
-  });
-    content.querySelectorAll('.aj-dup-dismiss-btn').forEach(el => {
-    el.addEventListener('click', () => handleDismiss(el));
-  });
-  content.querySelectorAll('.aj-dup-expand-btn').forEach(el => {
-    el.addEventListener('click', () => {
-      const expanded = el.nextElementSibling;
-      const isOpen = expanded.style.display === 'block';
-      expanded.style.display = isOpen ? 'none' : 'block';
-      el.setAttribute('aria-expanded', String(!isOpen));
-      el.textContent = isOpen ? 'Ver más ▾' : 'Ver menos ▴';
+  now.forEach(r => {
+    VP.parseProducts(r['Products']).forEach(p => {
+      const base = VP.baseProductName(p.name);
+      byName[base]   = (byName[base]   || 0) + p.qty;
+      byVariant[p.name] = (byVariant[p.name] || 0) + p.qty;
     });
   });
-}
 
-function customerDetailHtml(c) {
-  const lines = [
-    c['Phone Full'] || c['Phone Partial'] || '',
-    [c['Street + Number'], c['City'], c['State']].filter(Boolean).join(', '),
-    c['ZIP'] || '',
-    c['Aliases'] ? `Alias: ${c['Aliases']}` : '',
-  ].filter(Boolean);
-  return lines.map(l => VP.esc(l)).join('<br>');
-}
+  const topBase = Object.entries(byName)
+    .sort((a, b) => b[1] - a[1]).slice(0, 12)
+    .map(([label, value]) => ({ label, value }));
 
-// Every field the expanded view shows, top to bottom, as aligned rows so a
-// value present on one side but not the other still lines up correctly.
-// Deliberately includes fields already visible in the collapsed card above
-// (phone, address, aliases) -- repeating them here means everything about
-// both customers is visible in one place without scrolling back up.
-const AJ_DUP_EXTRA_FIELDS = [
-  ['Customer ID',            'ID'],
-  ['Primary Username',       'Usuario'],
-  ['First Name',             'Nombre'],
-  ['Surname',                'Apellido'],
-  ['Initials (TT Format)',   'Iniciales'],
-  ['Email',                  'Email'],
-  ['Phone Partial',          'Tel. parcial'],
-  ['Phone Full',             'Tel. completo'],
-  ['Street + Number',        'Calle y número'],
-  ['City',                   'Ciudad'],
-  ['State',                  'Estado'],
-  ['ZIP',                    'CP'],
-  ['Aliases',                'Alias'],
-  ['Shipment Count',         'Envíos'],
-  ['Notes',                  'Notas'],
-];
+  const topVariant = Object.entries(byVariant)
+    .sort((a, b) => b[1] - a[1]).slice(0, 12)
+    .map(([label, value]) => ({ label, value }));
 
-function customerExtraFieldsTableHtml(a, b) {
-  return AJ_DUP_EXTRA_FIELDS.map(([key, label]) => {
-    const valA = a[key] !== undefined && a[key] !== '' ? VP.esc(String(a[key])) : '—';
-    const valB = b[key] !== undefined && b[key] !== '' ? VP.esc(String(b[key])) : '—';
-    return `<div class="aj-dup-field-row">
-      <div class="aj-dup-field-label">${VP.esc(label)}</div>
-      <div class="aj-dup-field-val">${valA}</div>
-      <div class="aj-dup-field-val">${valB}</div>
-    </div>`;
-  }).join('');
-}
+  const totalItems = Object.values(byName).reduce((s, v) => s + v, 0);
 
-function pairHtml(pair) {
-  const a = pair.customer_a, b = pair.customer_b;
-  return `<div class="aj-dup-pair" data-a="${VP.esc(a['Customer ID'])}" data-b="${VP.esc(b['Customer ID'])}">
-    <div class="aj-dup-header">
-      <span>Coincidencia probable</span>
-      <span class="aj-dup-score">${pair.score}%</span>
-    </div>
-    <div class="aj-dup-compare">
-      <div class="aj-dup-side">
-        <div class="aj-dup-username">${VP.esc(a['Primary Username'] || a['Customer ID'])}</div>
-        <div class="aj-dup-detail">${customerDetailHtml(a)}</div>
-      </div>
-      <div class="aj-dup-side">
-        <div class="aj-dup-username">${VP.esc(b['Primary Username'] || b['Customer ID'])}</div>
-        <div class="aj-dup-detail">${customerDetailHtml(b)}</div>
-      </div>
-    </div>
-        <button class="aj-dup-expand-btn" type="button" aria-expanded="false">Ver más ▾</button>
-    <div class="aj-dup-expanded" style="display:none">
-      ${customerExtraFieldsTableHtml(a, b)}
-    </div>
-    <div class="aj-dup-actions">
-      <button class="refresh-btn aj-dup-dismiss-btn">No son iguales</button>
-      <button class="refresh-btn aj-dup-merge-btn" data-keep="a">Usar «${VP.esc(a['Primary Username'] || a['Customer ID'])}» como principal</button>
-      <button class="refresh-btn aj-dup-merge-btn" data-keep="b">Usar «${VP.esc(b['Primary Username'] || b['Customer ID'])}» como principal</button>
-    </div>
-  </div>`;
-}
-
-async function handleDismiss(btn) {
-  const pairEl = btn.closest('.aj-dup-pair');
-  const idA = pairEl.dataset.a;
-  const idB = pairEl.dataset.b;
-  btn.disabled = true;
-  btn.textContent = 'Descartando…';
-  try {
-    await VP.post({ action: 'dismiss_duplicate_pair', customer_id_a: idA, customer_id_b: idB });
-    pairEl.remove();
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = 'No son iguales';
-        VP.toast('Error al descartar: ' + e.message, true);
-  }
-}
-
-async function handleMerge(btn) {
-  const pairEl = btn.closest('.aj-dup-pair');
-  const idA = pairEl.dataset.a;
-  const idB = pairEl.dataset.b;
-  const keepId = btn.dataset.keep === 'a' ? idA : idB;
-  const loseId = btn.dataset.keep === 'a' ? idB : idA;
-
-  pairEl.querySelectorAll('button').forEach(b => { b.disabled = true; });
-  btn.textContent = 'Fusionando…';
-
-  try {
-    await VP.post({ action: 'merge_customers', keep_id: keepId, merge_id: loseId });
-    pairEl.style.opacity = '0.5';
-    pairEl.innerHTML = `<div style="padding:12px;font-size:13px;color:var(--green-text)">✓ Fusionado correctamente</div>`;
-  } catch (e) {
-    pairEl.querySelectorAll('button').forEach(b => { b.disabled = false; });
-    btn.textContent = 'Error, intenta de nuevo';
-  }
-}
-
-/* ── Merge history + undo ──────────────────────────────────────────── */
-
-async function openMergeHistoryModal() {
-  const modalRoot = document.getElementById('modal-container');
-  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay-history">
-    <div class="modal aj-merge-modal">
-      <div class="modal-title">Historial de fusiones</div>
-      <div class="aj-merge-scroll" id="aj-history-content">
-        <div class="vp-loading">Cargando historial…</div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn" id="aj-history-back-btn">← Volver a duplicados</button>
-        <button class="btn" id="aj-history-close-btn">Cerrar</button>
-      </div>
-    </div>
-  </div>`;
-
-  document.getElementById('aj-history-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
-  document.getElementById('aj-history-back-btn').addEventListener('click', () => { openDuplicatesModal(); });
-  document.getElementById('modal-overlay-history').addEventListener('click', e => {
-    if (e.target.id === 'modal-overlay-history') modalRoot.innerHTML = '';
+  // Items-per-order distribution
+  const dist = {};
+  now.forEach(r => {
+    const n = VP.itemCount(r['Products']);
+    const bucket = n >= 10 ? '10+' : String(n);
+    dist[bucket] = (dist[bucket] || 0) + 1;
+  });
+  const distKeys = Object.keys(dist).sort((a, b) => {
+    if (a === '10+') return 1;
+    if (b === '10+') return -1;
+    return Number(a) - Number(b);
   });
 
-  try {
-    const data = await VP.get('action=merge_history');
-    renderMergeHistory(data.records || []);
-  } catch (e) {
-    document.getElementById('aj-history-content').innerHTML =
-      `<div class="vp-empty-sm">Error al cargar historial: ${VP.esc(e.message)}</div>`;
-  }
-}
-
-function renderMergeHistory(records) {
-  const el = document.getElementById('aj-history-content');
-  if (!records.length) {
-    el.innerHTML = '<div class="vp-empty-sm">Todavía no se ha fusionado ningún cliente.</div>';
-    return;
-  }
-
-  // Most recent first
-  records.sort((a, b) => String(b['Merged Date'] || '').localeCompare(String(a['Merged Date'] || '')));
-
-    el.innerHTML = records.map(r => {
-    const status = r['Status'];
-    let rightSide;
-    if (status === 'Deshecho') {
-      rightSide = `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Deshecho</span>`;
-    } else if (status === 'Limpiado') {
-      rightSide = `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">Eliminado permanentemente</span>`;
-    } else {
-      rightSide = `<div style="display:flex;gap:6px">
-            <button class="refresh-btn aj-undo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>
-            <button class="refresh-btn aj-cleanup-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Limpiar</button>
-          </div>`;
-    }
-    return `<div class="aj-history-row" data-merge-id="${VP.esc(r['Merge ID'])}">
-      <div class="aj-history-main">
-        <span class="aj-history-arrow">${VP.esc(r['Merged Username'] || r['Merged Customer ID'])} → ${VP.esc(r['Kept Username'] || r['Kept Customer ID'])}</span>
-        <span class="aj-history-date">${VP.esc(VP.fmtDateTime ? VP.fmtDateTime(r['Merged Date']) : r['Merged Date'])}</span>
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Productos</h2>
+      <span class="vp-section-note">${VP.num(totalItems)} artículos en el periodo</span>
+    </div>
+    <div class="vp-grid-2">
+      <div class="vp-panel">
+        <div class="vp-panel-head">
+          <span class="vp-panel-title">Más vendidos</span>
+          <span class="vp-panel-note">variantes agrupadas</span>
+        </div>
+        ${VP.chart.rank(topBase, { accent: '#3b6d11' })}
       </div>
-      ${rightSide}
-    </div>`;
-  }).join('');
-
-  el.querySelectorAll('.aj-undo-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleUndo(btn));
-  });
-  el.querySelectorAll('.aj-cleanup-btn').forEach(btn => {
-    btn.addEventListener('click', () => handleCleanup(btn));
-  });
-}
-
-async function handleCleanup(btn) {
-  const mergeId = btn.dataset.mergeId;
-  if (!confirm('Esto borra permanentemente el registro del cliente fusionado. No se puede deshacer después. ¿Continuar?')) return;
-  btn.disabled = true;
-  btn.textContent = 'Borrando…';
-  try {
-    await VP.post({ action: 'delete_merged_customer', merge_id: mergeId });
-    btn.closest('.aj-history-row').outerHTML =
-      `<div class="aj-history-row" style="color:var(--green-text);font-size:13px">✓ Cliente fusionado eliminado permanentemente</div>`;
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = 'Error, intenta de nuevo';
-  }
-}
-
-async function handleUndo(btn) {
-  const mergeId = btn.dataset.mergeId;
-  btn.disabled = true;
-  btn.textContent = 'Deshaciendo…';
-  try {
-    await VP.post({ action: 'undo_merge', merge_id: mergeId });
-    btn.closest('.aj-history-row').outerHTML =
-      `<div class="aj-history-row" style="color:var(--green-text);font-size:13px">✓ Fusión deshecha</div>`;
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = 'Error, intenta de nuevo';
-  }
-}
-
-/* ── Historical / backfill TikTok CSV import ──────────────────────────
-   Enriches "TikTok Import History" ONLY -- never touches Orders or QC.
-   CSV is parsed entirely client-side (PapaParse); Apps Script only ever
-   receives clean structured records, same shape as the daily import uses
-   (TIKTOK_HISTORY_FIELD_MAP keys in apps-script.gs).
-   Flow: pick file -> parse+map -> preview (dry run, no writes) -> confirm
-   -> commit (real write) -> show result. ───────────────────────────── */
-
-// Maps this CSV's exact header names to the same record keys the backend's
-// TIKTOK_HISTORY_FIELD_MAP already expects (order_id, sku_id, etc.) -- only
-// the fields this tool actually reads/writes need to be listed here.
-const AJ_BACKFILL_COLUMN_MAP = {
-  'Order ID':          'order_id',
-  'SKU ID':            'sku_id',
-  'Order Status':      'order_status',
-  'Order Substatus':   'order_substatus',
-  'Shipped Time':      'shipped_time',
-  'Delivered Time':    'delivered_time',
-  'Cancelled Time':    'cancelled_time',
-  'Cancel By':         'cancel_by',
-  'Cancel Reason':     'cancel_reason',
-};
-
-const AJ_BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
-
-document.getElementById('aj-open-backfill').addEventListener('click', openBackfillModal);
-
-function openBackfillModal() {
-  const modalRoot = document.getElementById('modal-container');
-  modalRoot.innerHTML = `<div class="modal-overlay" id="aj-backfill-overlay">
-    <div class="modal aj-merge-modal">
-      <div class="modal-title">Importación histórica de TikTok</div>
-      <div class="aj-merge-scroll" id="aj-backfill-content">
-        <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px">
-          Sube el CSV completo de pedidos de TikTok (todos los estados). Esta
-          herramienta solo actualiza la pestaña <strong>TikTok Import History</strong>
-          — nunca crea ni modifica pedidos en "Orders", y nunca toca la lista
-          de control de calidad.
-        </p>
-        <input type="file" id="aj-backfill-file" accept=".csv" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn" id="aj-backfill-close-btn">Cerrar</button>
+      <div class="vp-panel">
+        <div class="vp-panel-head">
+          <span class="vp-panel-title">Por variante</span>
+          <span class="vp-panel-note">modelo exacto</span>
+        </div>
+        ${VP.chart.rank(topVariant, { accent: '#534ab7' })}
       </div>
     </div>
-  </div>`;
-
-  document.getElementById('aj-backfill-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
-  document.getElementById('aj-backfill-overlay').addEventListener('click', e => {
-    if (e.target.id === 'aj-backfill-overlay') modalRoot.innerHTML = '';
-  });
-  document.getElementById('aj-backfill-file').addEventListener('change', handleBackfillFileSelected);
-}
-
-function handleBackfillFileSelected(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  const content = document.getElementById('aj-backfill-content');
-  content.innerHTML = '<div class="vp-loading">Leyendo el archivo…</div>';
-
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    complete: results => {
-      try {
-        const records = mapBackfillRows(results.data);
-        runBackfillPreview(records);
-      } catch (err) {
-        content.innerHTML = `<div class="vp-empty-sm">Error al leer el CSV: ${VP.esc(err.message)}</div>`;
-      }
-    },
-    error: err => {
-      content.innerHTML = `<div class="vp-empty-sm">Error al leer el CSV: ${VP.esc(err.message)}</div>`;
-    },
-  });
-}
-
-// Trims every value (TikTok pads Order ID / SKU ID / dates with a stray
-// trailing tab character) and maps CSV headers to the backend's expected
-// record keys. Rows with substatus Awaiting shipment / Unpaid are dropped
-// here already -- no Tracking ID yet, not useful to either preview or
-// commit, and no point sending them over the wire at all.
-function mapBackfillRows(rows) {
-  const mapped = [];
-  rows.forEach(row => {
-    const rec = {};
-    Object.keys(AJ_BACKFILL_COLUMN_MAP).forEach(header => {
-      const key = AJ_BACKFILL_COLUMN_MAP[header];
-      rec[key] = String(row[header] || '').trim();
-    });
-    if (!rec.order_id || !rec.sku_id) return;
-    if (AJ_BACKFILL_SKIP_SUBSTATUSES.includes(rec.order_substatus)) return;
-    mapped.push(rec);
-  });
-  return mapped;
-}
-
-async function runBackfillPreview(records) {
-  const content = document.getElementById('aj-backfill-content');
-
-  if (!records.length) {
-    content.innerHTML = '<div class="vp-empty-sm">No se encontraron filas útiles en este archivo (después de omitir "Awaiting shipment" y "Unpaid").</div>';
-    return;
-  }
-
-  content.innerHTML = `<div class="vp-loading">Comparando ${VP.num(records.length)} filas contra el historial existente…</div>`;
-
-  try {
-    await VP.ensureToken();
-    const result = await VP.post({ action: 'backfill_tiktok_preview', records });
-    renderBackfillPreview(records, result);
-  } catch (e) {
-    content.innerHTML = `<div class="vp-empty-sm">Error al comparar: ${VP.esc(e.message)}</div>`;
-  }
-}
-
-function renderBackfillPreview(records, result) {
-  const content = document.getElementById('aj-backfill-content');
-  content.innerHTML = `
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas leídas del archivo</div><div>${VP.num(result.total)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se actualizarán (ya existían)</div><div>${VP.num(result.updated)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se crearán (no existían)</div><div>${VP.num(result.inserted)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
-    <p style="font-size:12.5px;color:var(--text-faint);margin:14px 0 0">
-      Solo se sobrescriben "Order Status" y "Order Substatus". Las fechas de
-      envío/entrega/cancelación solo se rellenan si estaban vacías — nunca
-      se sobrescribe un valor ya existente.
-    </p>
-    <div style="margin-top:16px;display:flex;justify-content:flex-end">
-      <button class="refresh-btn" id="aj-backfill-confirm-btn">Confirmar e importar</button>
+    <div class="vp-panel" style="margin-top:14px">
+      <div class="vp-panel-head">
+        <span class="vp-panel-title">Artículos por pedido</span>
+        <span class="vp-panel-note">cuántos pedidos llevan N artículos</span>
+      </div>
+      ${VP.chartSlot(w => VP.chart.bars(distKeys, [{ name: 'Pedidos', color: '#854f0b', values: distKeys.map(k => dist[k]) }], { width: w, height: 160 }), 160)}
     </div>
-  `;
-  document.getElementById('aj-backfill-confirm-btn').addEventListener('click', () => runBackfillCommit(records));
+  </section>`;
 }
 
-async function runBackfillCommit(records) {
-  const content = document.getElementById('aj-backfill-content');
-  content.innerHTML = '<div class="vp-loading">Escribiendo cambios…</div>';
+/* ── 5 · Customers ──────────────────────────────────────────────────── */
 
-  try {
-    const result = await VP.post({ action: 'backfill_tiktok_commit', records });
-    content.innerHTML = `
-      <div style="padding:12px 0;font-size:13px;color:var(--green-text)">✓ Importación completada</div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas actualizadas</div><div>${VP.num(result.updated)}</div></div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas nuevas creadas</div><div>${VP.num(result.inserted)}</div></div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
-    `;
-  } catch (e) {
-    content.innerHTML = `<div class="vp-empty-sm">Error al importar: ${VP.esc(e.message)}</div>`;
-  }
+function blockCustomers(now, sc) {
+  // Spend and order count per customer, in scope
+  const agg = {};
+  now.forEach(r => {
+    const id = r['Customer ID'] || ('__' + (r['Primary Username'] || 'sin-nombre'));
+    if (!agg[id]) agg[id] = { id, name: r['Primary Username'] || '—', spend: 0, orders: 0, items: 0 };
+    if (isPaid(r)) agg[id].spend += price(r);
+    agg[id].orders += 1;
+    agg[id].items  += VP.itemCount(r['Products']);
+  });
+  const list = Object.values(agg);
+
+  const topSpend = list.slice().sort((a, b) => b.spend - a.spend).slice(0, 10);
+  const topFreq  = list.slice().sort((a, b) => b.orders - a.orders).slice(0, 10);
+
+  // New vs returning, judged on the customer's own history (not just scope)
+  const firstOrderById = {};
+  DATA.orders.forEach(r => {
+    const id = r['Customer ID'];
+    if (!id) return;
+    const d = created(r);
+    if (!d) return;
+    if (!firstOrderById[id] || d < firstOrderById[id]) firstOrderById[id] = d;
+  });
+
+  let newCust = 0, returning = 0;
+  const seen = new Set();
+  now.forEach(r => {
+    const id = r['Customer ID'];
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const first = firstOrderById[id];
+    if (first && sc.days && first > sc.from) newCust++;
+    else if (first) returning++;
+  });
+
+  // Lifetime repeat distribution across the whole customer base
+  const ordersPerCustomer = {};
+  DATA.orders.forEach(r => {
+    const id = r['Customer ID'];
+    if (!id) return;
+    ordersPerCustomer[id] = (ordersPerCustomer[id] || 0) + 1;
+  });
+  const counts = Object.values(ordersPerCustomer);
+  const oneTime  = counts.filter(c => c === 1).length;
+  const two      = counts.filter(c => c === 2).length;
+  const threeFive= counts.filter(c => c >= 3 && c <= 5).length;
+  const sixPlus  = counts.filter(c => c >= 6).length;
+  const repeatRate = counts.length ? ((counts.length - oneTime) / counts.length) * 100 : 0;
+
+  const loyalty = [
+    { label: '1 pedido',    value: oneTime,   color: '#9e9b94' },
+    { label: '2 pedidos',   value: two,       color: '#185fa5' },
+    { label: '3–5 pedidos', value: threeFive, color: '#3b6d11' },
+    { label: '6 o más',     value: sixPlus,   color: '#534ab7' },
+  ].filter(s => s.value > 0);
+
+  const table = rows => `<table class="vp-table"><thead><tr>
+      <th>Cliente</th><th class="num">Pedidos</th><th class="num">Artículos</th><th class="num">Total</th>
+    </tr></thead><tbody>
+    ${rows.map(c => `<tr>
+      <td class="vp-table-name">${VP.esc(c.name)}</td>
+      <td class="num">${VP.num(c.orders)}</td>
+      <td class="num">${VP.num(c.items)}</td>
+      <td class="num">${VP.mxn(c.spend)}</td>
+    </tr>`).join('')}
+  </tbody></table>`;
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Clientes</h2>
+      <span class="vp-section-note">${VP.num(seen.size)} clientes distintos en el periodo</span>
+    </div>
+
+    <div class="vp-grid-3" style="margin-bottom:14px">
+      <div class="vp-stat">
+        <div class="vp-stat-label">Clientes nuevos</div>
+        <div class="vp-stat-value">${VP.num(newCust)}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">primera compra en el periodo</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Clientes que volvieron</div>
+        <div class="vp-stat-value">${VP.num(returning)}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">ya habían comprado antes</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Tasa de recompra</div>
+        <div class="vp-stat-value">${repeatRate.toFixed(0)}%</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">histórico, toda la base</span></div>
+      </div>
+    </div>
+
+    <div class="vp-grid-2">
+      <div class="vp-panel">
+        <div class="vp-panel-head"><span class="vp-panel-title">Top clientes por valor</span></div>
+        ${topSpend.length ? table(topSpend) : '<div class="vp-empty-sm">Sin datos</div>'}
+      </div>
+      <div class="vp-panel">
+        <div class="vp-panel-head"><span class="vp-panel-title">Top clientes por frecuencia</span></div>
+        ${topFreq.length ? table(topFreq) : '<div class="vp-empty-sm">Sin datos</div>'}
+      </div>
+    </div>
+
+    <div class="vp-panel" style="margin-top:14px">
+      <div class="vp-panel-head">
+        <span class="vp-panel-title">Lealtad — pedidos por cliente</span>
+        <span class="vp-panel-note">histórico completo</span>
+      </div>
+      ${VP.chart.funnel(loyalty, { fmt: v => VP.num(v) + ' clientes', showShare: true })}
+    </div>
+  </section>`;
+}
+
+/* ── 6 · Geography ──────────────────────────────────────────────────── */
+
+function blockGeography(now) {
+  const states = {}, cities = {};
+  now.forEach(r => {
+    const c = DATA.byId[r['Customer ID']];
+    if (!c) return;
+    const st = String(c['State'] || '').trim();
+    const ci = String(c['City'] || '').trim();
+    if (st) states[st] = (states[st] || 0) + 1;
+    if (ci) cities[ci] = (cities[ci] || 0) + 1;
+  });
+
+  const topStates = Object.entries(states).sort((a, b) => b[1] - a[1]).slice(0, 12)
+    .map(([label, value]) => ({ label, value }));
+  const topCities = Object.entries(cities).sort((a, b) => b[1] - a[1]).slice(0, 12)
+    .map(([label, value]) => ({ label, value }));
+
+  const known = Object.values(states).reduce((s, v) => s + v, 0);
+  const coverage = now.length ? (known / now.length) * 100 : 0;
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">A dónde enviamos</h2>
+      <span class="vp-section-note">${coverage.toFixed(0)}% de los pedidos tienen dirección registrada</span>
+    </div>
+    <div class="vp-grid-2">
+      <div class="vp-panel">
+        <div class="vp-panel-head"><span class="vp-panel-title">Estados</span></div>
+        ${VP.chart.rank(topStates, { accent: '#185fa5', fmt: v => VP.num(v) + ' pedidos' })}
+      </div>
+      <div class="vp-panel">
+        <div class="vp-panel-head"><span class="vp-panel-title">Ciudades</span></div>
+        ${VP.chart.rank(topCities, { accent: '#534ab7', fmt: v => VP.num(v) + ' pedidos' })}
+      </div>
+    </div>
+  </section>`;
+}
+
+/* ── 7 · Fulfillment speed ──────────────────────────────────────────── */
+
+function blockFulfillment(now) {
+  const packLags = [], shipLags = [];
+  now.forEach(r => {
+    const c = created(r);
+    const p = VP.asDate(r['Packed Date']);
+    const s = VP.asDate(r['Shipped Date']);
+    if (c && p && p >= c) packLags.push(VP.daysBetween(c, p));
+    if (p && s && s >= p) shipLags.push(VP.daysBetween(p, s));
+  });
+
+  const median = arr => {
+    if (!arr.length) return null;
+    const a = arr.slice().sort((x, y) => x - y);
+    const mid = Math.floor(a.length / 2);
+    return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+  };
+  const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+
+  const fmtDays = d => d === null ? '—' : (d < 1 ? `${Math.round(d * 24)} h` : `${d.toFixed(1)} d`);
+
+  // How fast, bucketed
+  const buckets = { 'Mismo día': 0, '1 día': 0, '2–3 días': 0, '4–7 días': 0, 'Más de 7': 0 };
+  packLags.forEach(d => {
+    if (d < 1) buckets['Mismo día']++;
+    else if (d < 2) buckets['1 día']++;
+    else if (d < 4) buckets['2–3 días']++;
+    else if (d <= 7) buckets['4–7 días']++;
+    else buckets['Más de 7']++;
+  });
+  const bKeys = Object.keys(buckets).filter(k => buckets[k] > 0);
+
+  // QC photo coverage on shipped orders
+  const shippedNow = now.filter(isShipped);
+  const qcTrackings = new Set(DATA.qc.map(q => q['Tracking ID']).filter(Boolean));
+  const withQC = shippedNow.filter(r => qcTrackings.has(r['Tracking ID'])).length;
+  const qcPct = shippedNow.length ? (withQC / shippedNow.length) * 100 : 0;
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Ritmo de cumplimiento</h2>
+      <span class="vp-section-note">de pedido a empaque, y de empaque a envío</span>
+    </div>
+
+    <div class="vp-grid-3" style="margin-bottom:14px">
+      <div class="vp-stat">
+        <div class="vp-stat-label">Pedido → empacado</div>
+        <div class="vp-stat-value">${fmtDays(median(packLags))}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">mediana · promedio ${fmtDays(avg(packLags))}</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Empacado → enviado</div>
+        <div class="vp-stat-value">${fmtDays(median(shipLags))}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">mediana · ${VP.num(shipLags.length)} envíos</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Con foto de calidad</div>
+        <div class="vp-stat-value">${qcPct.toFixed(0)}%</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">${VP.num(withQC)} de ${VP.num(shippedNow.length)} enviados</span></div>
+      </div>
+    </div>
+
+    <div class="vp-panel">
+      <div class="vp-panel-head">
+        <span class="vp-panel-title">Qué tan rápido se empaca</span>
+        <span class="vp-panel-note">${VP.num(packLags.length)} pedidos con fecha de empaque</span>
+      </div>
+      ${bKeys.length
+        ? VP.chartSlot(w => VP.chart.bars(bKeys, [{ name: 'Pedidos', color: '#3b6d11', values: bKeys.map(k => buckets[k]) }], { width: w, height: 160 }), 160)
+        : '<div class="vp-empty-sm">Todavía no hay pedidos empacados con fecha registrada</div>'}
+    </div>
+  </section>`;
+}
+
+/* ── 8 · Packing sessions & packers ─────────────────────────────────── */
+
+function blockPacking(sc) {
+  const sessions = DATA.sessions
+    .filter(s => s['Status'] === 'Finalizada')
+    .filter(s => {
+      if (!sc.days) return true;
+      const d = VP.asDate(s['Start Time']);
+      return d && d > sc.from && d <= sc.to;
+    })
+    .sort((a, b) => String(b['Start Time']).localeCompare(String(a['Start Time'])));
+
+  const rows = sessions.map(s => {
+    const start = VP.asDate(s['Start Time']);
+    const end   = VP.asDate(s['End Time']);
+    const mins  = start && end ? (end - start) / 60000 : null;
+    const pkgs  = Number(s['Total Packages']) || 0;
+    const items = Number(s['Total Items']) || 0;
+    return {
+      id: s['Session ID'], start, mins, pkgs, items,
+      people: s['Participants'] || '—',
+      perHour: mins && mins > 0 ? (pkgs / (mins / 60)) : null,
+    };
+  });
+
+  const totalPkgs  = rows.reduce((s, r) => s + r.pkgs, 0);
+  const totalItems = rows.reduce((s, r) => s + r.items, 0);
+  const totalMins  = rows.reduce((s, r) => s + (r.mins || 0), 0);
+  const avgPerHour = totalMins > 0 ? totalPkgs / (totalMins / 60) : null;
+
+  // Packer leaderboard from QC rows (independent of who closed the session)
+  const packerCount = {};
+  DATA.qc.forEach(q => {
+    if (q['Status'] !== 'Enviado') return;
+    const t = VP.asDate(q['Timestamp']);
+    if (sc.days && (!t || t <= sc.from || t > sc.to)) return;
+    const p = String(q['Packer'] || '').trim();
+    if (!p) return;
+    packerCount[p] = (packerCount[p] || 0) + 1;
+  });
+  const packers = Object.entries(packerCount).sort((a, b) => b[1] - a[1])
+    .map(([label, value]) => ({ label, value }));
+
+  const sessionRows = rows.slice(0, 15).map(r => `<tr>
+    <td class="vp-table-name">${VP.esc(r.id)}</td>
+    <td>${VP.esc(r.start ? VP.fmtDate(r.start) : '—')}</td>
+    <td>${VP.esc(r.people)}</td>
+    <td class="num">${VP.num(r.pkgs)}</td>
+    <td class="num">${VP.num(r.items)}</td>
+    <td class="num">${r.mins !== null ? VP.fmtDuration(r.mins * 60) : '—'}</td>
+    <td class="num">${r.perHour !== null ? r.perHour.toFixed(1) : '—'}</td>
+  </tr>`).join('');
+
+  return `<section class="vp-section">
+    <div class="vp-section-head">
+      <h2 class="vp-section-title">Empaque</h2>
+      <span class="vp-section-note">${VP.num(sessions.length)} sesión${sessions.length !== 1 ? 'es' : ''} finalizada${sessions.length !== 1 ? 's' : ''}</span>
+    </div>
+
+    <div class="vp-grid-3" style="margin-bottom:14px">
+      <div class="vp-stat">
+        <div class="vp-stat-label">Paquetes empacados</div>
+        <div class="vp-stat-value">${VP.num(totalPkgs)}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">${VP.num(totalItems)} artículos en total</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Ritmo promedio</div>
+        <div class="vp-stat-value">${avgPerHour !== null ? avgPerHour.toFixed(1) : '—'}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">paquetes por hora</span></div>
+      </div>
+      <div class="vp-stat">
+        <div class="vp-stat-label">Tiempo empacando</div>
+        <div class="vp-stat-value">${totalMins ? VP.fmtDuration(totalMins * 60) : '—'}</div>
+        <div class="vp-stat-foot"><span class="vp-stat-sub">suma de todas las sesiones</span></div>
+      </div>
+    </div>
+
+    <div class="vp-grid-2">
+      <div class="vp-panel">
+        <div class="vp-panel-head">
+          <span class="vp-panel-title">Sesiones recientes</span>
+          <span class="vp-panel-note">últimas 15</span>
+        </div>
+        ${rows.length ? `<div style="overflow-x:auto"><table class="vp-table"><thead><tr>
+          <th>Sesión</th><th>Fecha</th><th>Participantes</th>
+          <th class="num">Paq.</th><th class="num">Art.</th><th class="num">Duración</th><th class="num">Paq/h</th>
+        </tr></thead><tbody>${sessionRows}</tbody></table></div>`
+        : '<div class="vp-empty-sm">Sin sesiones finalizadas en el periodo</div>'}
+      </div>
+      <div class="vp-panel">
+        <div class="vp-panel-head">
+          <span class="vp-panel-title">Paquetes por empacador</span>
+          <span class="vp-panel-note">quien registró cada envío</span>
+        </div>
+        ${VP.chart.rank(packers, { accent: '#854f0b', fmt: v => VP.num(v) + ' paquetes' })}
+      </div>
+    </div>
+  </section>`;
 }
