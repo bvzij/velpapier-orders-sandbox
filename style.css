@@ -1672,6 +1672,7 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 }
 
 .aj-backfill-dropzone {
+  display: block;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-md);
   padding: 28px 16px;
@@ -1679,6 +1680,7 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   cursor: pointer;
   transition: all 0.15s;
   position: relative;
+  overflow: hidden;
 }
 .aj-backfill-dropzone:hover,
 .aj-backfill-dropzone.is-dragover {
@@ -1687,7 +1689,10 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 }
 .aj-backfill-dropzone input[type="file"] {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   opacity: 0;
   cursor: pointer;
 }
