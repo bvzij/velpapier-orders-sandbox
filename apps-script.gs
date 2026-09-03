@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-03.2';
+const SCRIPT_VERSION = '2026-09-03.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -283,32 +283,43 @@ function createOrder(body) {
     if (resolution.confidence === 'fuzzy') mergeFlag = true;
   }
 
-  let status = body.status || 'No Pagado';
+    let status = body.status || 'No Pagado';
   if (body.channel === 'TikTok') status = 'Pagado';
 
-  const row = [
-    body.order_id || generateUUID(),
-    body.tracking_id || '',
-    customerID,
-    primaryUsername,
-    body.channel || 'Manual',
-    status,
-    body.products || '',
-    body.price || 0,
-    body.shopify_order_id || '',
-    body.notes || '',
-    nowISO(),
-    '',   // Packed Date
-    '',   // Shipped Date
-    '',   // Archive Date
-    body.linked_shipment || ''
-  ];
+  const orderID = body.order_id || generateUUID();
 
+  // Built by header name, not fixed position -- a fixed positional array
+  // silently shifts every value into the wrong column the moment the sheet
+  // gains, loses, or reorders a column (same bug already found and fixed
+  // in createCustomer/createCustomersBulk; this function had the same
+  // issue and just hadn't been hit yet).
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  const fieldValues = {
+    'Order ID': orderID,
+    'Tracking ID': body.tracking_id || '',
+    'Customer ID': customerID,
+    'Primary Username': primaryUsername,
+    'Channel': body.channel || 'Manual',
+    'Status': status,
+    'Products': body.products || '',
+    'Price': body.price || 0,
+    'Shopify Order ID': body.shopify_order_id || '',
+    'Notes': body.notes || '',
+    'Created Date': nowISO(),
+    'Packed Date': '',
+    'Shipped Date': '',
+    'Archive Date': '',
+    'Linked Shipment': body.linked_shipment || '',
+  };
+
+  const row = oh.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
+  const newRowNum = ordersSheet.getLastRow() + 1;
+  forceTextFormat(ordersSheet, oh, ['Order ID', 'Tracking ID'], newRowNum, 1);
   ordersSheet.appendRow(row);
 
   return jsonResponse({
     result: 'created',
-    order_id: row[0],
+    order_id: orderID,
     customer_id: customerID,
     merge_flag: mergeFlag,
     status: status
@@ -832,9 +843,12 @@ function importTikTokOrders(body) {
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
   });
 
-  // ─── Write orders in ONE batch ────────────────────────────────────
-  if (rows.length)
-    orders.getRange(orders.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    // ─── Write orders in ONE batch ────────────────────────────────────
+  if (rows.length) {
+    const startRow = orders.getLastRow() + 1;
+    forceTextFormat(orders, oh, ['Order ID', 'Tracking ID'], startRow, rows.length);
+    orders.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+  }
 
   // ─── Write updated Shipment Counts (TikTok orders per customer) ───
   const cCountCol = ch.indexOf('Shipment Count');
@@ -2134,6 +2148,29 @@ const TIKTOK_HISTORY_FIELD_MAP = {
 // Python side) to the TikTok Import History sheet, in ONE batched write.
 // Call once per import batch with every shipment's import_history combined,
 // same performance pattern as resolveLineItemsBatch.
+// ─── Force plain-text format on ID-like columns before writing ────────────
+// Google Sheets can still auto-convert a cell to a number even when Apps
+// Script sends a genuine JS string, if the string looks fully numeric.
+// For most IDs this only affects display (scientific notation), but for
+// very large integers (18+ digits, as TikTok's Order/SKU/Tracking IDs are)
+// JS/Sheets number representation has an actual precision ceiling -- IDs
+// happening to end in 3+ zeros are especially likely to have their true
+// trailing digits silently replaced by rounding. Explicitly forcing the
+// column's number format to "@" (plain text) BEFORE the write stops Sheets
+// from ever attempting the conversion, preserving the exact digits.
+// startRow/numRows describe the range to format (1-indexed, header-exclusive).
+function forceTextFormat(sheet, headers, columnNames, startRow, numRows) {
+  if (numRows <= 0) return;
+  columnNames.forEach(name => {
+    const col = headers.indexOf(name);
+    if (col >= 0) {
+      sheet.getRange(startRow, col + 1, numRows, 1).setNumberFormat('@');
+    }
+  });
+}
+
+const TIKTOK_ID_COLUMNS = ['Order ID', 'SKU ID', 'Tracking ID'];
+
 function appendTikTokImportHistory(allHistoryRecords) {
   if (!allHistoryRecords || !allHistoryRecords.length) return;
 
@@ -2148,7 +2185,9 @@ function appendTikTokImportHistory(allHistoryRecords) {
     });
   });
 
-    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+  const startRow = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, headers, TIKTOK_ID_COLUMNS, startRow, rows.length);
+  sheet.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
 }
 
 // ─── HISTORICAL / BACKFILL CSV IMPORT ──────────────────────────────────────
@@ -2257,10 +2296,13 @@ function runTikTokBackfill(records, dryRun) {
     // Write back only the rows that changed (existingData was mutated in place),
     // then append any brand-new rows -- both in single batched calls.
     if (existingData.length) {
+      forceTextFormat(sheet, headers, TIKTOK_ID_COLUMNS, 2, existingData.length);
       sheet.getRange(2, 1, existingData.length, headers.length).setValues(existingData);
     }
     if (newRows.length) {
-      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, headers.length).setValues(newRows);
+      const startRow = sheet.getLastRow() + 1;
+      forceTextFormat(sheet, headers, TIKTOK_ID_COLUMNS, startRow, newRows.length);
+      sheet.getRange(startRow, 1, newRows.length, headers.length).setValues(newRows);
     }
   }
 
