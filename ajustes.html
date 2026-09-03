@@ -46,10 +46,24 @@
     </div>
   </div>
 
+  <div class="aj-section">
+    <div class="aj-section-title">Historial de pedidos TikTok</div>
+    <div class="aj-card">
+      <div class="aj-row" style="margin-bottom:0">
+        <div>
+          <div class="aj-row-label">Importación histórica / backfill</div>
+          <div class="aj-row-hint">Sube un CSV completo de pedidos de TikTok para rellenar fechas de envío, entrega y cancelación que la importación diaria aún no conoce</div>
+        </div>
+        <button class="refresh-btn" id="aj-open-backfill">Importar CSV histórico</button>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <div id="modal-container"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="common.js"></script>
 <script>VP.mountNav('ajustes');</script>
 <script src="ajustes.js"></script>
