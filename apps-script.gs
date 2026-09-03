@@ -2402,7 +2402,7 @@ function findDuplicateProducts(e) {
       const pairKey = dismissedProductPairKey(a['Parent ID'], b['Parent ID']);
       if (dismissed.has(pairKey)) continue;
 
-      const score = stringSimilarity(a['Parent Name'], b['Parent Name']);
+      const score = stringSimilarity(String(a['Parent Name'] || ''), String(b['Parent Name'] || ''));
       const scorePct = Math.round(score * 100);
       if (scorePct < threshold) continue;
 
@@ -2439,7 +2439,7 @@ function suggestVariantPairs(variantsA, variantsB) {
     let best = null, bestScore = 0;
     variantsA.forEach(va => {
       if (claimedA.has(va['Catalog ID'])) return;
-      const score = stringSimilarity(vb['Variant Name'], va['Variant Name']);
+      const score = stringSimilarity(String(vb['Variant Name'] || ''), String(va['Variant Name'] || ''));
       if (score > bestScore) { bestScore = score; best = va; }
     });
     if (best && bestScore >= VARIANT_SUGGEST_THRESHOLD) {
