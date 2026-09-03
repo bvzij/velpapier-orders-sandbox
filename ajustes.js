@@ -318,6 +318,25 @@ async function handleUndo(btn) {
    Flow: pick file -> parse+map -> preview (dry run, no writes) -> confirm
    -> commit (real write) -> show result. ───────────────────────────── */
 
+// TikTok's export prefixes every money field with the currency code and a
+// space (e.g. "MXN 160.00") -- strip that so the sheet stores a plain,
+// summable number rather than text. Only applied to genuinely price-like
+// fields; dates, IDs, and text fields are left untouched.
+const AJ_BACKFILL_PRICE_FIELDS = [
+  'sku_unit_price', 'sku_subtotal_before', 'sku_platform_discount',
+  'sku_seller_discount', 'sku_subtotal_after', 'shipping_fee_after',
+  'shipping_fee_original', 'shipping_fee_seller_disc',
+  'shipping_fee_platform_disc', 'payment_platform_discount',
+  'retail_delivery_fee', 'order_amount', 'order_refund_amount',
+];
+
+function parseBackfillPrice(raw) {
+  const cleaned = String(raw || '').replace(/[A-Za-z\s]/g, '').trim();
+  if (!cleaned) return '';
+  const num = parseFloat(cleaned);
+  return isNaN(num) ? '' : num;
+}
+
 // Maps this CSV's exact header names to the same record keys the backend's
 // TIKTOK_HISTORY_FIELD_MAP already expects. Every field the sheet stores is
 // listed here -- not just the ones this tool updates on an existing match --
@@ -455,7 +474,8 @@ function mapBackfillRows(rows) {
     const rec = {};
     Object.keys(AJ_BACKFILL_COLUMN_MAP).forEach(header => {
       const key = AJ_BACKFILL_COLUMN_MAP[header];
-      rec[key] = String(row[header] || '').trim();
+      const raw = String(row[header] || '').trim();
+      rec[key] = AJ_BACKFILL_PRICE_FIELDS.includes(key) ? parseBackfillPrice(raw) : raw;
     });
     if (!rec.order_id || !rec.sku_id) return;
     if (AJ_BACKFILL_SKIP_SUBSTATUSES.includes(rec.order_substatus)) return;
