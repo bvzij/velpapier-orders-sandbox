@@ -19,6 +19,16 @@
 
 document.getElementById('aj-scan-duplicates').addEventListener('click', openDuplicatesModal);
 
+// Shared close-on-Escape for every modal on this page. Click-outside-to-close
+// is deliberately NOT used -- an accidental click just outside a modal (e.g.
+// on mobile, or a slightly-off click) should never lose in-progress work.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const modalRoot = document.getElementById('modal-container');
+    if (modalRoot.innerHTML.trim()) modalRoot.innerHTML = '';
+  }
+});
+
 const AJ_DUP_DEFAULT_THRESHOLD = 55;
 
 async function openDuplicatesModal() {
@@ -44,9 +54,6 @@ async function openDuplicatesModal() {
 
   document.getElementById('aj-merge-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
   document.getElementById('aj-merge-history-btn').addEventListener('click', openMergeHistoryModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => {
-    if (e.target.id === 'modal-overlay') modalRoot.innerHTML = '';
-  });
 
   const slider = document.getElementById('aj-dup-threshold-slider');
   const valueLabel = document.getElementById('aj-dup-threshold-value');
@@ -226,11 +233,8 @@ async function openMergeHistoryModal() {
     </div>
   </div>`;
 
-  document.getElementById('aj-history-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+    document.getElementById('aj-history-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
   document.getElementById('aj-history-back-btn').addEventListener('click', () => { openDuplicatesModal(); });
-  document.getElementById('modal-overlay-history').addEventListener('click', e => {
-    if (e.target.id === 'modal-overlay-history') modalRoot.innerHTML = '';
-  });
 
   try {
     const data = await VP.get('action=merge_history');
@@ -418,10 +422,7 @@ function openBackfillModal() {
     </div>
   </div>`;
 
-  document.getElementById('aj-backfill-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
-  document.getElementById('aj-backfill-overlay').addEventListener('click', e => {
-    if (e.target.id === 'aj-backfill-overlay') modalRoot.innerHTML = '';
-  });
+    document.getElementById('aj-backfill-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
   document.getElementById('aj-backfill-file').addEventListener('change', handleBackfillFileSelected);
 
   const dropzone = document.getElementById('aj-backfill-dropzone');
