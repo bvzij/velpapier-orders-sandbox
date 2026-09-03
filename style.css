@@ -1673,6 +1673,7 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 .aj-backfill-dropzone {
   display: block;
+  margin-bottom: 20px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-md);
   padding: 28px 16px;
