@@ -319,18 +319,55 @@ async function handleUndo(btn) {
    -> commit (real write) -> show result. ───────────────────────────── */
 
 // Maps this CSV's exact header names to the same record keys the backend's
-// TIKTOK_HISTORY_FIELD_MAP already expects (order_id, sku_id, etc.) -- only
-// the fields this tool actually reads/writes need to be listed here.
+// TIKTOK_HISTORY_FIELD_MAP already expects. Every field the sheet stores is
+// listed here -- not just the ones this tool updates on an existing match --
+// because a NOT-FOUND row is inserted fresh with whatever the record
+// contains; leaving fields out here means they'd be written blank on insert.
+// A few CSV header names differ slightly from the sheet's column names
+// (noted below) -- mapped by value (order_status, etc.), not by spelling.
 const AJ_BACKFILL_COLUMN_MAP = {
-  'Order ID':          'order_id',
-  'SKU ID':            'sku_id',
-  'Order Status':      'order_status',
-  'Order Substatus':   'order_substatus',
-  'Shipped Time':      'shipped_time',
-  'Delivered Time':    'delivered_time',
-  'Cancelled Time':    'cancelled_time',
-  'Cancel By':         'cancel_by',
-  'Cancel Reason':     'cancel_reason',
+  'Order ID':                        'order_id',
+  'SKU ID':                          'sku_id',
+  'Seller SKU':                      'seller_sku',
+  'Product Name':                    'product_name',
+  'Variation':                       'variation',
+  'Quantity':                        'quantity',
+  'Order Status':                    'order_status',
+  'Order Substatus':                 'order_substatus',
+  'Cancelation/Return Type':         'cancel_return_type',
+  'SKU Unit Original Price':         'sku_unit_price',
+  'SKU Subtotal Before Discount':    'sku_subtotal_before',
+  'SKU Platform Discount':           'sku_platform_discount',
+  'SKU Seller Discount':             'sku_seller_discount',
+  'SKU Subtotal After Discount':     'sku_subtotal_after',
+  'Shipping Fee After Discount':     'shipping_fee_after',
+  'Original Shipping Fee':           'shipping_fee_original',
+  'Shipping Fee Seller Discount':    'shipping_fee_seller_disc',
+  'Shipping Fee Platform Discount':  'shipping_fee_platform_disc',
+  'Payment platform discount':       'payment_platform_discount',   // CSV: lowercase "platform discount"
+  'Retail Delivery Fee':             'retail_delivery_fee',
+  'Order Amount':                    'order_amount',
+  'Order Refund Amount':             'order_refund_amount',
+  'Created Time':                    'created_time',
+  'Paid Time':                       'paid_time',
+  'RTS Time':                        'rts_time',
+  'Shipped Time':                    'shipped_time',
+  'Delivered Time':                  'delivered_time',
+  'Cancelled Time':                  'cancelled_time',
+  'Cancel By':                       'cancel_by',
+  'Cancel Reason':                   'cancel_reason',
+  'Fulfillment Type':                'fulfillment_type',
+  'Warehouse Name':                  'warehouse_name',
+  'Tracking ID':                     'tracking_id',
+  'Delivery Option Type':            'delivery_option_type',
+  'Delivery Option':                 'delivery_option',
+  'Shipping Provider Name':          'shipping_provider',           // CSV: "Shipping Provider Name"
+  'Buyer Username':                  'buyer_username',
+  'Payment Method':                  'payment_method',
+  'Weight(kg)':                      'weight_kg',                   // CSV: no space before "(kg)"
+  'Product Category':                'product_category',
+  'Order Channel':                   'order_channel',
+  'Creator Handle':                  'creator_handle',
 };
 
 const AJ_BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
@@ -340,16 +377,21 @@ document.getElementById('aj-open-backfill').addEventListener('click', openBackfi
 function openBackfillModal() {
   const modalRoot = document.getElementById('modal-container');
   modalRoot.innerHTML = `<div class="modal-overlay" id="aj-backfill-overlay">
-    <div class="modal aj-merge-modal">
-      <div class="modal-title">Importación histórica de TikTok</div>
-      <div class="aj-merge-scroll" id="aj-backfill-content">
-        <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px">
-          Sube el CSV completo de pedidos de TikTok (todos los estados). Esta
-          herramienta solo actualiza la pestaña <strong>TikTok Import History</strong>
-          — nunca crea ni modifica pedidos en "Orders", y nunca toca la lista
-          de control de calidad.
+    <div class="modal aj-backfill-modal">
+      <div class="aj-backfill-title">Importación histórica de TikTok</div>
+      <div id="aj-backfill-content">
+        <p class="aj-backfill-intro">
+          Sube el CSV completo de pedidos de TikTok (todos los estados). Solo
+          actualiza <strong>TikTok Import History</strong> — nunca crea ni
+          modifica pedidos en "Orders", y nunca toca la lista de control de
+          calidad.
         </p>
-        <input type="file" id="aj-backfill-file" accept=".csv" />
+        <label class="aj-backfill-dropzone" id="aj-backfill-dropzone">
+          <div class="aj-backfill-dropzone-icon">📄</div>
+          <div class="aj-backfill-dropzone-label">Arrastra tu CSV aquí</div>
+          <div class="aj-backfill-dropzone-hint">o haz clic para elegir un archivo</div>
+          <input type="file" id="aj-backfill-file" accept=".csv" />
+        </label>
       </div>
       <div class="modal-actions">
         <button class="btn" id="aj-backfill-close-btn">Cerrar</button>
@@ -362,12 +404,26 @@ function openBackfillModal() {
     if (e.target.id === 'aj-backfill-overlay') modalRoot.innerHTML = '';
   });
   document.getElementById('aj-backfill-file').addEventListener('change', handleBackfillFileSelected);
+
+  const dropzone = document.getElementById('aj-backfill-dropzone');
+  ['dragenter', 'dragover'].forEach(evt => {
+    dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('is-dragover'); });
+  });
+  ['dragleave', 'drop'].forEach(evt => {
+    dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('is-dragover'); });
+  });
+  dropzone.addEventListener('drop', e => {
+    const file = e.dataTransfer.files[0];
+    if (file) processBackfillFile(file);
+  });
 }
 
 function handleBackfillFileSelected(e) {
   const file = e.target.files[0];
-  if (!file) return;
+  if (file) processBackfillFile(file);
+}
 
+function processBackfillFile(file) {
   const content = document.getElementById('aj-backfill-content');
   content.innerHTML = '<div class="vp-loading">Leyendo el archivo…</div>';
 
@@ -430,35 +486,72 @@ async function runBackfillPreview(records) {
 function renderBackfillPreview(records, result) {
   const content = document.getElementById('aj-backfill-content');
   content.innerHTML = `
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas leídas del archivo</div><div>${VP.num(result.total)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se actualizarán (ya existían)</div><div>${VP.num(result.updated)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se crearán (no existían)</div><div>${VP.num(result.inserted)}</div></div>
-    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
-    <p style="font-size:12.5px;color:var(--text-faint);margin:14px 0 0">
+    <div class="aj-backfill-stats">
+      <div class="aj-backfill-stat-row">
+        <span class="aj-backfill-stat-label">Filas leídas del archivo</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.total)}</span>
+      </div>
+      <div class="aj-backfill-stat-row is-highlight">
+        <span class="aj-backfill-stat-label">Se actualizarán (ya existían)</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.updated)}</span>
+      </div>
+      <div class="aj-backfill-stat-row is-highlight">
+        <span class="aj-backfill-stat-label">Se crearán (no existían)</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.inserted)}</span>
+      </div>
+      <div class="aj-backfill-stat-row">
+        <span class="aj-backfill-stat-label">Omitidas</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.skipped)}</span>
+      </div>
+    </div>
+    <p class="aj-backfill-note">
       Solo se sobrescriben "Order Status" y "Order Substatus". Las fechas de
-      envío/entrega/cancelación solo se rellenan si estaban vacías — nunca
+      envío, entrega y cancelación solo se rellenan si estaban vacías — nunca
       se sobrescribe un valor ya existente.
     </p>
-    <div style="margin-top:16px;display:flex;justify-content:flex-end">
-      <button class="refresh-btn" id="aj-backfill-confirm-btn">Confirmar e importar</button>
-    </div>
   `;
+  const modalActions = document.querySelector('#aj-backfill-overlay .modal-actions');
+  modalActions.innerHTML = `
+    <button class="btn" id="aj-backfill-close-btn">Cerrar</button>
+    <button class="refresh-btn" id="aj-backfill-confirm-btn">Confirmar e importar</button>
+  `;
+  document.getElementById('aj-backfill-close-btn').addEventListener('click', () => {
+    document.getElementById('modal-container').innerHTML = '';
+  });
   document.getElementById('aj-backfill-confirm-btn').addEventListener('click', () => runBackfillCommit(records));
 }
 
 async function runBackfillCommit(records) {
   const content = document.getElementById('aj-backfill-content');
   content.innerHTML = '<div class="vp-loading">Escribiendo cambios…</div>';
+  document.querySelector('#aj-backfill-overlay .modal-actions').innerHTML =
+    `<button class="btn" id="aj-backfill-close-btn" disabled>Cerrar</button>`;
 
   try {
     const result = await VP.post({ action: 'backfill_tiktok_commit', records });
     content.innerHTML = `
-      <div style="padding:12px 0;font-size:13px;color:var(--green-text)">✓ Importación completada</div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas actualizadas</div><div>${VP.num(result.updated)}</div></div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas nuevas creadas</div><div>${VP.num(result.inserted)}</div></div>
-      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
+      <div class="aj-backfill-success">✓ Importación completada</div>
+      <div class="aj-backfill-stats">
+        <div class="aj-backfill-stat-row is-highlight">
+          <span class="aj-backfill-stat-label">Filas actualizadas</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.updated)}</span>
+        </div>
+        <div class="aj-backfill-stat-row is-highlight">
+          <span class="aj-backfill-stat-label">Filas nuevas creadas</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.inserted)}</span>
+        </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Omitidas</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.skipped)}</span>
+        </div>
+      </div>
     `;
   } catch (e) {
     content.innerHTML = `<div class="vp-empty-sm">Error al importar: ${VP.esc(e.message)}</div>`;
   }
+  document.querySelector('#aj-backfill-overlay .modal-actions').innerHTML =
+    `<button class="btn" id="aj-backfill-close-btn">Cerrar</button>`;
+  document.getElementById('aj-backfill-close-btn').addEventListener('click', () => {
+    document.getElementById('modal-container').innerHTML = '';
+  });
 }
