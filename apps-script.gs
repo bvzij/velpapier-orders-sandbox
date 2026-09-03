@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-03.5';
+const SCRIPT_VERSION = '2026-09-03.6';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -148,6 +148,8 @@ function doGet(e) {
     if (action === 'sessions') return getSessions(e);
     if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
     if (action === 'find_duplicate_products') return findDuplicateProducts(e);
+    if (action === 'search_products_for_merge') return searchProductsForMerge(e);
+    if (action === 'manual_product_pair') return getManualProductPair(e);
     if (action === 'product_merge_history') return getProductMergeHistory(e);
     if (action === 'merge_history') return getMergeHistory(e);
 
@@ -2447,6 +2449,105 @@ function suggestVariantPairs(variantsA, variantsB) {
       return { b_catalog_id: vb['Catalog ID'], suggested_a_catalog_id: best['Catalog ID'] };
     }
     return { b_catalog_id: vb['Catalog ID'], suggested_a_catalog_id: null };
+  });
+}
+
+// ─── Manual search-and-pick (alternative to the automatic fuzzy scan) ─────
+// Returns every non-merged Parent with its total units sold across ALL its
+// variants combined (summed from Orders' Product N Qty slots, matched by
+// Catalog ID) so Vel can visually spot an obvious split product (e.g. two
+// near-identical Parent Names each with a modest unit count that should
+// really be one line with the combined total). Computed once per call by
+// scanning Orders a single time and building one Catalog-ID -> qty map,
+// not per-Parent, since a per-Parent Orders scan would be far too slow.
+// The frontend filters this list client-side as the user types, avoiding a
+// server round-trip per keystroke.
+function searchProductsForMerge(e) {
+  const parents = sheetToObjects(getProductParentsSheet())
+    .filter(p => !String(p['Parent Name'] || '').includes('(merged→'));
+
+  const allVariants = sheetToObjects(getProductVariantsSheet())
+    .filter(v => !String(v['Variant Name'] || '').includes('(merged→'));
+
+  const variantsByParent = {};
+  const parentIdByCatalogId = {};
+  allVariants.forEach(v => {
+    const pid = String(v['Parent ID'] || '');
+    if (!variantsByParent[pid]) variantsByParent[pid] = [];
+    variantsByParent[pid].push(v);
+    parentIdByCatalogId[String(v['Catalog ID'])] = pid;
+  });
+
+  // ─── One pass over Orders to sum Qty per Catalog ID ─────────────────
+  const qtyByCatalogId = {};
+  const ordersSheet = getOrdersSheet();
+  const oLastRow = ordersSheet.getLastRow();
+  if (oLastRow > 1) {
+    const oLastCol = ordersSheet.getLastColumn();
+    const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
+    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
+    const PRODUCT_SLOTS = 30;
+    const slotCols = [];
+    for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+      slotCols.push({
+        catalogCol: oh.indexOf('Product ' + n + ' Catalog ID'),
+        qtyCol: oh.indexOf('Product ' + n + ' Qty'),
+      });
+    }
+    oData.forEach(row => {
+      slotCols.forEach(slot => {
+        if (slot.catalogCol < 0 || slot.qtyCol < 0) return;
+        const cid = String(row[slot.catalogCol] || '');
+        if (!cid) return;
+        const qty = Number(row[slot.qtyCol]) || 0;
+        qtyByCatalogId[cid] = (qtyByCatalogId[cid] || 0) + qty;
+      });
+    });
+  }
+
+  // ─── Sum each Parent's total from its variants' Catalog IDs ─────────
+  const results = parents.map(p => {
+    const variants = variantsByParent[p['Parent ID']] || [];
+    const totalUnitsSold = variants.reduce((sum, v) => sum + (qtyByCatalogId[String(v['Catalog ID'])] || 0), 0);
+    return {
+      parent: p,
+      variant_count: variants.length,
+      total_units_sold: totalUnitsSold,
+    };
+  });
+
+  results.sort((a, b) => b.total_units_sold - a.total_units_sold);
+  return jsonResponse({ products: results });
+}
+
+// Given two Parent IDs (chosen manually), returns the same shape
+// findDuplicateProducts would have produced for that pair -- so the
+// existing merge screen can render it without any special-casing for
+// "how this pair was found."
+function getManualProductPair(e) {
+  const idA = e.parameter.parent_id_a;
+  const idB = e.parameter.parent_id_b;
+  if (!idA || !idB) return jsonResponse({ error: 'parent_id_a and parent_id_b are required' });
+
+  const parents = sheetToObjects(getProductParentsSheet());
+  const a = parents.find(p => String(p['Parent ID']) === String(idA));
+  const b = parents.find(p => String(p['Parent ID']) === String(idB));
+  if (!a || !b) return jsonResponse({ error: 'One or both parents not found' });
+
+  const allVariants = sheetToObjects(getProductVariantsSheet())
+    .filter(v => !String(v['Variant Name'] || '').includes('(merged→'));
+  const variantsA = allVariants.filter(v => String(v['Parent ID']) === String(idA));
+  const variantsB = allVariants.filter(v => String(v['Parent ID']) === String(idB));
+
+  return jsonResponse({
+    pair: {
+      parent_a: a,
+      parent_b: b,
+      score: null,
+      variants_a: variantsA,
+      variants_b: variantsB,
+      suggested_variant_pairs: suggestVariantPairs(variantsA, variantsB),
+    }
   });
 }
 
