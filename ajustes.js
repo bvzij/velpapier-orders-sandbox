@@ -576,3 +576,265 @@ async function runBackfillCommit(records) {
     document.getElementById('modal-container').innerHTML = '';
   });
 }
+
+/* ── Product duplicate-merger ──────────────────────────────────────────
+   Two-level merge: Parent-level fuzzy match, then a per-variant pairing
+   screen (dropdown per losing-side variant, pre-filled with the backend's
+   fuzzy suggestion). Nothing is written until "Confirmar fusión" is
+   pressed. Mirrors the shape of the customer duplicate-finder but adds
+   the variant-pairing step, since Orders references Catalog IDs
+   (variant-level), not Parent IDs. ─────────────────────────────────── */
+
+const AJ_PROD_DUP_DEFAULT_THRESHOLD = 55;
+
+document.getElementById('aj-scan-product-duplicates').addEventListener('click', openProductDuplicatesModal);
+
+async function openProductDuplicatesModal() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="aj-prod-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Productos duplicados</div>
+      <div class="aj-dup-threshold-row">
+        <span class="aj-dup-threshold-label">Umbral</span>
+        <input type="range" id="aj-prod-threshold-slider" min="0" max="100" step="1" value="${AJ_PROD_DUP_DEFAULT_THRESHOLD}">
+        <span class="aj-dup-threshold-value" id="aj-prod-threshold-value">${AJ_PROD_DUP_DEFAULT_THRESHOLD}%</span>
+        <button class="btn aj-dup-refresh-btn" id="aj-prod-refresh-btn" title="Buscar de nuevo con este umbral" aria-label="Actualizar">↻</button>
+      </div>
+      <div class="aj-merge-scroll" id="aj-prod-duplicates-content">
+        <div class="vp-loading">Comparando productos, puede tardar un momento…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-prod-close-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-prod-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+
+  const slider = document.getElementById('aj-prod-threshold-slider');
+  const valueLabel = document.getElementById('aj-prod-threshold-value');
+  slider.addEventListener('input', () => { valueLabel.textContent = slider.value + '%'; });
+  document.getElementById('aj-prod-refresh-btn').addEventListener('click', () => {
+    loadProductDuplicates(parseInt(slider.value, 10));
+  });
+
+  await loadProductDuplicates(AJ_PROD_DUP_DEFAULT_THRESHOLD);
+}
+
+async function loadProductDuplicates(threshold) {
+  const content = document.getElementById('aj-prod-duplicates-content');
+  content.innerHTML = '<div class="vp-loading">Comparando productos, puede tardar un momento…</div>';
+  try {
+    await VP.ensureToken();
+    const data = await VP.get('action=find_duplicate_products&threshold=' + threshold);
+    renderProductDuplicates(data.pairs || []);
+  } catch (e) {
+    content.innerHTML = `<div class="vp-empty-sm">Error al buscar duplicados: ${VP.esc(e.message)}</div>`;
+  }
+}
+
+function renderProductDuplicates(pairs) {
+  const content = document.getElementById('aj-prod-duplicates-content');
+
+  if (!pairs.length) {
+    content.innerHTML = '<div class="vp-empty-sm">No se encontraron duplicados probables.</div>';
+    return;
+  }
+
+  content.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+    ${VP.num(pairs.length)} par${pairs.length !== 1 ? 'es' : ''} probable${pairs.length !== 1 ? 's' : ''} encontrado${pairs.length !== 1 ? 's' : ''}
+  </div>` + pairs.map(productPairHtml).join('');
+
+  content.querySelectorAll('.aj-prod-review-btn').forEach(el => {
+    el.addEventListener('click', () => openProductMergeScreen(JSON.parse(el.dataset.pair)));
+  });
+  content.querySelectorAll('.aj-prod-dismiss-btn').forEach(el => {
+    el.addEventListener('click', () => handleProductDismiss(el));
+  });
+}
+
+function productPairHtml(pair) {
+  const a = pair.parent_a, b = pair.parent_b;
+  const pairJson = VP.esc(JSON.stringify(pair));
+  return `<div class="aj-dup-pair" data-a="${VP.esc(a['Parent ID'])}" data-b="${VP.esc(b['Parent ID'])}">
+    <div class="aj-dup-header">
+      <span>Coincidencia probable</span>
+      <span class="aj-dup-score">${pair.score}%</span>
+    </div>
+    <div class="aj-dup-compare">
+      <div class="aj-dup-side">
+        <div class="aj-dup-username">${VP.esc(a['Parent Name'])}</div>
+        <div class="aj-dup-detail">${VP.num((pair.variants_a || []).length)} variante(s)</div>
+      </div>
+      <div class="aj-dup-side">
+        <div class="aj-dup-username">${VP.esc(b['Parent Name'])}</div>
+        <div class="aj-dup-detail">${VP.num((pair.variants_b || []).length)} variante(s)</div>
+      </div>
+    </div>
+    <div class="aj-dup-actions">
+      <button class="refresh-btn aj-prod-dismiss-btn">No son iguales</button>
+      <button class="refresh-btn aj-prod-review-btn" data-pair="${pairJson}">Revisar y fusionar</button>
+    </div>
+  </div>`;
+}
+
+async function handleProductDismiss(btn) {
+  const pairEl = btn.closest('.aj-dup-pair');
+  const idA = pairEl.dataset.a;
+  const idB = pairEl.dataset.b;
+  btn.disabled = true;
+  btn.textContent = 'Descartando…';
+  try {
+    await VP.post({ action: 'dismiss_product_pair', parent_id_a: idA, parent_id_b: idB });
+    pairEl.remove();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'No son iguales';
+    VP.toast('Error al descartar: ' + e.message, true);
+  }
+}
+
+// ── Merge screen: pick keeper, then pair variants ──────────────────────
+
+function openProductMergeScreen(pair) {
+  const modalRoot = document.getElementById('modal-container');
+  // Default keeper = parent_a until the user clicks a card.
+  const state = { keeper: 'a', pair: pair };
+
+  modalRoot.innerHTML = `<div class="modal-overlay" id="aj-prod-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Fusionar productos</div>
+      <div class="aj-merge-scroll" id="aj-prod-merge-content"></div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-prod-back-btn">← Volver</button>
+        <button class="refresh-btn" id="aj-prod-confirm-btn">Confirmar fusión</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-prod-back-btn').addEventListener('click', () => openProductDuplicatesModal());
+  document.getElementById('aj-prod-confirm-btn').addEventListener('click', () => submitProductMerge(state));
+
+  renderProductMergeScreen(state);
+}
+
+function renderProductMergeScreen(state) {
+  const { pair, keeper } = state;
+  const a = pair.parent_a, b = pair.parent_b;
+  const keeperParent = keeper === 'a' ? a : b;
+  const loserParent = keeper === 'a' ? b : a;
+  const keeperVariants = keeper === 'a' ? pair.variants_a : pair.variants_b;
+  const loserVariants = keeper === 'a' ? pair.variants_b : pair.variants_a;
+
+  // suggested_variant_pairs is always b_catalog_id -> suggested_a_catalog_id
+  // (computed once, from the ORIGINAL a/b orientation) -- re-map lookups by
+  // catalog ID rather than by a/b position so flipping the keeper still
+  // shows the right suggestion regardless of which side "b" ends up being.
+  const suggestionByLoserCatalogId = {};
+  (pair.suggested_variant_pairs || []).forEach(s => {
+    // s.b_catalog_id is always from the ORIGINAL parent_b; s.suggested_a_catalog_id from parent_a.
+    suggestionByLoserCatalogId[s.b_catalog_id] = s.suggested_a_catalog_id;
+  });
+
+  const content = document.getElementById('aj-prod-merge-content');
+  content.innerHTML = `
+    <div class="aj-prod-keeper-row">
+      <div class="aj-prod-keeper-card ${keeper === 'a' ? 'is-selected' : 'is-unselected'}" data-side="a">
+        <div class="aj-prod-keeper-name">${VP.esc(a['Parent Name'])}</div>
+        <div class="aj-prod-keeper-hint">${VP.num((pair.variants_a || []).length)} variante(s)</div>
+        ${keeper === 'a' ? '<div class="aj-prod-keeper-badge">Se mantiene</div>' : ''}
+      </div>
+      <div class="aj-prod-keeper-card ${keeper === 'b' ? 'is-selected' : 'is-unselected'}" data-side="b">
+        <div class="aj-prod-keeper-name">${VP.esc(b['Parent Name'])}</div>
+        <div class="aj-prod-keeper-hint">${VP.num((pair.variants_b || []).length)} variante(s)</div>
+        ${keeper === 'b' ? '<div class="aj-prod-keeper-badge">Se mantiene</div>' : ''}
+      </div>
+    </div>
+    <div class="aj-prod-variant-section-title">
+      Empareja cada variante de «${VP.esc(loserParent['Parent Name'])}» con su equivalente en «${VP.esc(keeperParent['Parent Name'])}» (o déjala como única)
+    </div>
+    <div id="aj-prod-variant-rows">
+      ${loserVariants.map(lv => {
+        // The suggestion map was computed with ORIGINAL a=parent_a/b=parent_b.
+        // If keeper is 'b', loser is 'a', and the suggestion map (keyed by
+        // b's catalog IDs) doesn't directly apply -- in that case we still
+        // show the dropdown, just without a pre-filled suggestion, rather
+        // than risk showing a wrong one.
+        const suggested = keeper === 'a' ? (suggestionByLoserCatalogId[lv['Catalog ID']] || '') : '';
+        return `<div class="aj-prod-variant-row" data-lose-catalog-id="${VP.esc(lv['Catalog ID'])}">
+          <div class="aj-prod-variant-name">${VP.esc(lv['Variant Name'] || '(sin nombre)')}</div>
+          <div class="aj-prod-variant-arrow">→</div>
+          <select class="aj-prod-variant-select">
+            <option value="">— Única, no fusionar —</option>
+            ${keeperVariants.map(kv => `<option value="${VP.esc(kv['Catalog ID'])}" ${kv['Catalog ID'] === suggested ? 'selected' : ''}>${VP.esc(kv['Variant Name'] || '(sin nombre)')}</option>`).join('')}
+          </select>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="aj-prod-unmapped-note">
+      Las variantes marcadas como "Única" se quedan tal cual, solo se moverán al producto que se mantiene. Las variantes de «${VP.esc(keeperParent['Parent Name'])}» que no aparecen arriba ya se consideran únicas automáticamente.
+    </div>
+  `;
+
+  content.querySelectorAll('.aj-prod-keeper-card').forEach(card => {
+    card.addEventListener('click', () => {
+      state.keeper = card.dataset.side;
+      renderProductMergeScreen(state);
+    });
+  });
+}
+
+async function submitProductMerge(state) {
+  const { pair, keeper } = state;
+  const keeperParent = keeper === 'a' ? pair.parent_a : pair.parent_b;
+  const loserParent = keeper === 'a' ? pair.parent_b : pair.parent_a;
+
+  const variantPairs = [];
+  document.querySelectorAll('#aj-prod-variant-rows .aj-prod-variant-row').forEach(row => {
+    const loseCatalogId = row.dataset.loseCatalogId;
+    const keepCatalogId = row.querySelector('.aj-prod-variant-select').value;
+    if (keepCatalogId) {
+      variantPairs.push({ keep_catalog_id: keepCatalogId, lose_catalog_id: loseCatalogId });
+    }
+  });
+
+  const confirmBtn = document.getElementById('aj-prod-confirm-btn');
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = 'Fusionando…';
+
+  try {
+    const result = await VP.post({
+      action: 'merge_products',
+      keep_parent_id: keeperParent['Parent ID'],
+      lose_parent_id: loserParent['Parent ID'],
+      variant_pairs: variantPairs,
+    });
+    const content = document.getElementById('aj-prod-merge-content');
+    content.innerHTML = `
+      <div class="aj-backfill-success">✓ Productos fusionados</div>
+      <div class="aj-backfill-stats">
+        <div class="aj-backfill-stat-row is-highlight">
+          <span class="aj-backfill-stat-label">Variantes fusionadas</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.variants_merged)}</span>
+        </div>
+        <div class="aj-backfill-stat-row is-highlight">
+          <span class="aj-backfill-stat-label">Variantes reasignadas (únicas)</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.variants_reassigned)}</span>
+        </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Pedidos actualizados</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.orders_repointed)}</span>
+        </div>
+      </div>
+    `;
+    document.querySelector('#aj-prod-overlay .modal-actions').innerHTML =
+      `<button class="btn" id="aj-prod-close-btn">Cerrar</button>`;
+    document.getElementById('aj-prod-close-btn').addEventListener('click', () => {
+      document.getElementById('modal-container').innerHTML = '';
+    });
+  } catch (e) {
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Confirmar fusión';
+    VP.toast('Error al fusionar: ' + e.message, true);
+  }
+}
