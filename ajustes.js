@@ -309,3 +309,156 @@ async function handleUndo(btn) {
     btn.textContent = 'Error, intenta de nuevo';
   }
 }
+
+/* ── Historical / backfill TikTok CSV import ──────────────────────────
+   Enriches "TikTok Import History" ONLY -- never touches Orders or QC.
+   CSV is parsed entirely client-side (PapaParse); Apps Script only ever
+   receives clean structured records, same shape as the daily import uses
+   (TIKTOK_HISTORY_FIELD_MAP keys in apps-script.gs).
+   Flow: pick file -> parse+map -> preview (dry run, no writes) -> confirm
+   -> commit (real write) -> show result. ───────────────────────────── */
+
+// Maps this CSV's exact header names to the same record keys the backend's
+// TIKTOK_HISTORY_FIELD_MAP already expects (order_id, sku_id, etc.) -- only
+// the fields this tool actually reads/writes need to be listed here.
+const AJ_BACKFILL_COLUMN_MAP = {
+  'Order ID':          'order_id',
+  'SKU ID':            'sku_id',
+  'Order Status':      'order_status',
+  'Order Substatus':   'order_substatus',
+  'Shipped Time':      'shipped_time',
+  'Delivered Time':    'delivered_time',
+  'Cancelled Time':    'cancelled_time',
+  'Cancel By':         'cancel_by',
+  'Cancel Reason':     'cancel_reason',
+};
+
+const AJ_BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
+
+document.getElementById('aj-open-backfill').addEventListener('click', openBackfillModal);
+
+function openBackfillModal() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="aj-backfill-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Importación histórica de TikTok</div>
+      <div class="aj-merge-scroll" id="aj-backfill-content">
+        <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px">
+          Sube el CSV completo de pedidos de TikTok (todos los estados). Esta
+          herramienta solo actualiza la pestaña <strong>TikTok Import History</strong>
+          — nunca crea ni modifica pedidos en "Orders", y nunca toca la lista
+          de control de calidad.
+        </p>
+        <input type="file" id="aj-backfill-file" accept=".csv" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="aj-backfill-close-btn">Cerrar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-backfill-close-btn').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+  document.getElementById('aj-backfill-overlay').addEventListener('click', e => {
+    if (e.target.id === 'aj-backfill-overlay') modalRoot.innerHTML = '';
+  });
+  document.getElementById('aj-backfill-file').addEventListener('change', handleBackfillFileSelected);
+}
+
+function handleBackfillFileSelected(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const content = document.getElementById('aj-backfill-content');
+  content.innerHTML = '<div class="vp-loading">Leyendo el archivo…</div>';
+
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: results => {
+      try {
+        const records = mapBackfillRows(results.data);
+        runBackfillPreview(records);
+      } catch (err) {
+        content.innerHTML = `<div class="vp-empty-sm">Error al leer el CSV: ${VP.esc(err.message)}</div>`;
+      }
+    },
+    error: err => {
+      content.innerHTML = `<div class="vp-empty-sm">Error al leer el CSV: ${VP.esc(err.message)}</div>`;
+    },
+  });
+}
+
+// Trims every value (TikTok pads Order ID / SKU ID / dates with a stray
+// trailing tab character) and maps CSV headers to the backend's expected
+// record keys. Rows with substatus Awaiting shipment / Unpaid are dropped
+// here already -- no Tracking ID yet, not useful to either preview or
+// commit, and no point sending them over the wire at all.
+function mapBackfillRows(rows) {
+  const mapped = [];
+  rows.forEach(row => {
+    const rec = {};
+    Object.keys(AJ_BACKFILL_COLUMN_MAP).forEach(header => {
+      const key = AJ_BACKFILL_COLUMN_MAP[header];
+      rec[key] = String(row[header] || '').trim();
+    });
+    if (!rec.order_id || !rec.sku_id) return;
+    if (AJ_BACKFILL_SKIP_SUBSTATUSES.includes(rec.order_substatus)) return;
+    mapped.push(rec);
+  });
+  return mapped;
+}
+
+async function runBackfillPreview(records) {
+  const content = document.getElementById('aj-backfill-content');
+
+  if (!records.length) {
+    content.innerHTML = '<div class="vp-empty-sm">No se encontraron filas útiles en este archivo (después de omitir "Awaiting shipment" y "Unpaid").</div>';
+    return;
+  }
+
+  content.innerHTML = `<div class="vp-loading">Comparando ${VP.num(records.length)} filas contra el historial existente…</div>`;
+
+  try {
+    await VP.ensureToken();
+    const result = await VP.post({ action: 'backfill_tiktok_preview', records });
+    renderBackfillPreview(records, result);
+  } catch (e) {
+    content.innerHTML = `<div class="vp-empty-sm">Error al comparar: ${VP.esc(e.message)}</div>`;
+  }
+}
+
+function renderBackfillPreview(records, result) {
+  const content = document.getElementById('aj-backfill-content');
+  content.innerHTML = `
+    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas leídas del archivo</div><div>${VP.num(result.total)}</div></div>
+    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se actualizarán (ya existían)</div><div>${VP.num(result.updated)}</div></div>
+    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Se crearán (no existían)</div><div>${VP.num(result.inserted)}</div></div>
+    <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
+    <p style="font-size:12.5px;color:var(--text-faint);margin:14px 0 0">
+      Solo se sobrescriben "Order Status" y "Order Substatus". Las fechas de
+      envío/entrega/cancelación solo se rellenan si estaban vacías — nunca
+      se sobrescribe un valor ya existente.
+    </p>
+    <div style="margin-top:16px;display:flex;justify-content:flex-end">
+      <button class="refresh-btn" id="aj-backfill-confirm-btn">Confirmar e importar</button>
+    </div>
+  `;
+  document.getElementById('aj-backfill-confirm-btn').addEventListener('click', () => runBackfillCommit(records));
+}
+
+async function runBackfillCommit(records) {
+  const content = document.getElementById('aj-backfill-content');
+  content.innerHTML = '<div class="vp-loading">Escribiendo cambios…</div>';
+
+  try {
+    const result = await VP.post({ action: 'backfill_tiktok_commit', records });
+    content.innerHTML = `
+      <div style="padding:12px 0;font-size:13px;color:var(--green-text)">✓ Importación completada</div>
+      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas actualizadas</div><div>${VP.num(result.updated)}</div></div>
+      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Filas nuevas creadas</div><div>${VP.num(result.inserted)}</div></div>
+      <div class="aj-dup-field-row" style="grid-template-columns:1fr auto"><div>Omitidas</div><div>${VP.num(result.skipped)}</div></div>
+    `;
+  } catch (e) {
+    content.innerHTML = `<div class="vp-empty-sm">Error al importar: ${VP.esc(e.message)}</div>`;
+  }
+}
