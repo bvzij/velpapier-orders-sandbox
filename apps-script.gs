@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-02.6';
+const SCRIPT_VERSION = '2026-09-03.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -232,7 +232,6 @@ function doPost(e) {
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     if (action === 'merge_customers') return mergeCustomersAction(body);
     if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
-    if (action === 'backfill_customer_fields') return backfillCustomerFieldsAction(body);
     if (action === 'undo_merge') return undoMergeAction(body);
     if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
     
@@ -2250,9 +2249,7 @@ function findDuplicateCustomers(e) {
         if (seenPairs.has(pairKey)) continue;
         seenPairs.add(pairKey);
 
-                if (dismissed.has(pairKey)) continue;
-
-                if (dismissed.has(pairKey)) continue;
+        if (dismissed.has(pairKey)) continue;
 
         const score = scoreCustomerPair(a, b);
         if (score >= threshold) {
@@ -2417,57 +2414,6 @@ function dismissDuplicatePairAction(body) {
   sheet.appendRow([idA, idB, nowISO()]);
 
   return jsonResponse({ result: 'dismissed' });
-}
-
-// Persists a "not a duplicate" decision so this pair stops being suggested
-// on future scans. Order-independent: dismissing A/B also covers B/A.
-function dismissDuplicatePairAction(body) {
-  const idA = body.customer_id_a;
-  const idB = body.customer_id_b;
-  if (!idA || !idB) return jsonResponse({ error: 'customer_id_a and customer_id_b are required' });
-
-  const sheet = getDismissedDuplicatesSheet();
-  sheet.appendRow([idA, idB, nowISO()]);
-
-  return jsonResponse({ result: 'dismissed' });
-}
-
-// Fills in ONLY currently-blank fields on an existing customer -- never
-// overwrites anything already populated. Used by the bulk PDF-enrichment
-// tool (old shipping labels matched to customers via tracking ID from a
-// historical order CSV) but written generically so any future safe
-// enrichment flow can reuse it. body.fields should only include keys from
-// MERGE_BACKFILL_FIELDS; anything else is ignored.
-function backfillCustomerFieldsAction(body) {
-  const customerId = body.customer_id;
-  const fields = body.fields || {};
-  if (!customerId) return jsonResponse({ error: 'customer_id is required' });
-
-  const sheet = getCustomersSheet();
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const idCol = headers.indexOf('Customer ID');
-
-  let row = -1;
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][idCol]) === String(customerId)) { row = i; break; }
-  }
-  if (row === -1) return jsonResponse({ error: 'Customer not found: ' + customerId });
-
-  const applied = {};
-  MERGE_BACKFILL_FIELDS.forEach(field => {
-    if (fields[field] === undefined) return;
-    const col = headers.indexOf(field);
-    if (col < 0) return;
-    const current = String(data[row][col] || '').trim();
-    const incoming = String(fields[field] || '').trim();
-    if (!current && incoming) {
-      sheet.getRange(row + 1, col + 1).setValue(incoming);
-      applied[field] = incoming;
-    }
-  });
-
-  return jsonResponse({ result: 'backfilled', customer_id: customerId, applied: applied });
 }
 
 function getMergeHistorySheet() {
