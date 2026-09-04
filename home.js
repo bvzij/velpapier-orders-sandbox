@@ -11,10 +11,31 @@ const price   = r => Number(r['Price']) || 0;
 const created = r => VP.asDate(r['Created Date']);
 
 let ORDERS = [];
+let ORDERS_READY = false;
+
+// The only four fields anything on this page reads. Caching just these
+// keeps the entry small enough to fit in sessionStorage -- the full order
+// records blow past the ~5MB quota, the write throws, and nothing ever
+// gets cached at all.
+const SLIM_FIELDS = ['Status', 'Price', 'Created Date', 'Customer ID'];
+
+function slimOrders(resp) {
+  return {
+    records: (resp.records || []).map(r => {
+      const o = {};
+      for (const f of SLIM_FIELDS) o[f] = r[f];
+      return o;
+    }),
+  };
+}
 
 // Paints every block from whatever ORDERS/session we currently hold.
 // Called once for cached data and again when the background refresh lands.
+// Does nothing until orders are actually in hand: painting an empty ORDERS
+// would replace the honest "Cargando..." / "-" placeholders with real
+// looking zeros, which reads as "you made no money" rather than "loading".
 function paintAll(session) {
+  if (!ORDERS_READY) return;
   paintStats();
   paintAlerts(session);
   paintRevenueChart();
@@ -40,13 +61,21 @@ function paintAll(session) {
     });
     if (rSession.data) session = rSession.data.session || null;
 
+    // Slimmed + its own cache key: the analytics page caches the SAME
+    // 'action=orders' response in full under the plain key, and it needs
+    // fields this page drops. Sharing the key would corrupt that page.
     const rOrders = VP.getCached('action=orders', fresh => {
       ORDERS = fresh.records || [];
+      ORDERS_READY = true;
       paintAll(session);
-    });
-    if (rOrders.data) ORDERS = rOrders.data.records || [];
+    }, { slim: slimOrders, cacheKey: 'orders_home_slim' });
 
-    if (rOrders.data || rSession.data) paintAll(session);
+    if (rOrders.data) {
+      ORDERS = rOrders.data.records || [];
+      ORDERS_READY = true;
+    }
+
+    paintAll(session);
 
     // Await whichever in-flight fetches getCached already kicked off above,
     // for anything NOT already served from cache. We never issue a second,
@@ -57,7 +86,10 @@ function paintAll(session) {
         rOrders.pending || Promise.resolve(null),
         rSession.pending ? rSession.pending.catch(() => null) : Promise.resolve(null),
       ]);
-      if (ordersData)  ORDERS  = ordersData.records || [];
+      if (ordersData) {
+        ORDERS = ordersData.records || [];
+        ORDERS_READY = true;
+      }
       if (sessionData) session = sessionData.session || null;
       paintAll(session);
     }
