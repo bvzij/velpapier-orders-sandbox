@@ -41,13 +41,24 @@ function setUpdating(on) {
 // person sees is always small and fast, never a stale/wrong snapshot.
 function ensureFullOrders() {
   if (DATA.fullOrdersLoaded) return;
-  setUpdating(true);
-  VP.getCached('action=orders', fresh => {
+  // getCached returns non-null synchronously when a fresh (<2min) cache
+  // entry exists -- in that case there's no real wait, so skip the
+  // "updating" flicker entirely instead of always flashing it on.
+  let announcedUpdating = false;
+  const cachedFull = VP.getCached('action=orders', fresh => {
     DATA.orders = fresh.records || [];
     DATA.fullOrdersLoaded = true;
-    setUpdating(false);
+    if (announcedUpdating) setUpdating(false);
     render();
   });
+  if (cachedFull) {
+    DATA.orders = cachedFull.records || [];
+    DATA.fullOrdersLoaded = true;
+    render();
+  } else {
+    announcedUpdating = true;
+    setUpdating(true);
+  }
 }
 
 /* ── Boot ───────────────────────────────────────────────────────────── */
@@ -61,11 +72,10 @@ function ensureFullOrders() {
     // first paint is quick and never shows a stale/wrong total. Full
     // history is fetched separately (see ensureFullOrders) only once the
     // person actually needs a longer period.
-    setUpdating(true);
-    const cachedOrders30  = VP.getCached('action=orders&days=30', fresh => {
+        const cachedOrders30  = VP.getCached('action=orders&days=30', fresh => {
       if (!DATA.fullOrdersLoaded) { DATA.orders = fresh.records || []; render(); }
-      setUpdating(false);
     });
+    if (!cachedOrders30) setUpdating(true);
     const cachedCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
     const cachedQc        = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
     const cachedSessions  = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
@@ -76,10 +86,9 @@ function ensureFullOrders() {
     if (cachedQc)        { DATA.qc = cachedQc.records || []; gotCache = true; }
     if (cachedSessions)  { DATA.sessions = cachedSessions.records || []; gotCache = true; }
 
-    if (gotCache) {
+        if (gotCache) {
       rebuildById();
       render();
-      if (!cachedOrders30) setUpdating(true); else setUpdating(false);
     } else {
       // No cache at all yet (first visit this session) -- fall back to a
       // normal blocking fetch of just the 30-day window.
@@ -95,7 +104,6 @@ function ensureFullOrders() {
       DATA.sessions  = s.records || [];
       rebuildById();
       render();
-      setUpdating(false);
     }
 
         // Always prefetch full history in the background after the fast 30-day
