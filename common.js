@@ -551,6 +551,7 @@ window.VP = (function () {
         <stop offset="100%" stop-color="${accent}" stop-opacity="0"/>
       </linearGradient></defs>
       ${grid}
+      <path d="${area}" fill="url(#${gid})"/>
       <path d="${line}" fill="none" stroke="${accent}" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round"/>
       ${projection}
