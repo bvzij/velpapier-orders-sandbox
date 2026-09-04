@@ -63,12 +63,18 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
    jump by reserving the space up front, before JS runs. !important wins
    over .vp-shell's own margin: 0 auto shorthand reliably regardless of
    cascade order. */
-.vp-shell { margin-top: 56px !important; }
 
-/* Paints the reserved 56px strip (see .vp-shell rule above) the same
-   color as the nav bar itself, so the split-second before mountNav()
-   inserts the real <nav> looks like "the nav, not yet interactive" rather
-   than an empty gap flashing before it snaps in. */
+/* Paints a placeholder strip the same color/height as the real nav bar
+   (see .vp-nav, 56px) so the split-second before mountNav() inserts the
+   actual <nav> looks like "the nav, just not interactive yet" instead of
+   flashing an empty gap or shifting content down once JS mounts it. This
+   does NOT reserve layout space on its own -- .vp-nav being position:sticky
+   already pushes normal content down by exactly 56px once mounted, and
+   that was always the correct final layout, so no separate margin is
+   needed on .vp-shell.
+   Caveat: this only works because .vp-nav's real background exactly
+   matches this placeholder and mounts in the same top-left corner --
+   if .vp-nav's height or color ever changes, update this to match. */
 body::before {
   content: '';
   position: fixed;
@@ -77,6 +83,7 @@ body::before {
   background: var(--surface);
   border-bottom: 0.5px solid var(--border);
   z-index: 119;
+  pointer-events: none;
 }
 
 .app-layout { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; max-width: 1400px; margin: 0 auto; }
