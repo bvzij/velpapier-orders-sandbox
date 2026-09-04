@@ -85,6 +85,8 @@ function ensureFullOrders() {
   } else {
     setUpdating(true);
   }
+}
+
 /* ── Boot ───────────────────────────────────────────────────────────── */
 
 (async function init() {
