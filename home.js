@@ -32,42 +32,37 @@ function paintAll(session) {
     // -- unlike analytics, these numbers need the long tail: the Trimestre
     // sparkline reaches ~360 days back, and "Por cobrar" counts unpaid
     // orders of ANY age. Narrowing the fetch would silently undercount.
-    let session = null;
+        let session = null;
 
-    const cachedSession = VP.getCached('action=active_session', fresh => {
+    const rSession = VP.getCached('action=active_session', fresh => {
       session = fresh.session || null;
       paintAll(session);
     });
-    if (cachedSession) session = cachedSession.session || null;
+    if (rSession.data) session = rSession.data.session || null;
 
-    const cachedOrders = VP.getCached('action=orders', fresh => {
+    const rOrders = VP.getCached('action=orders', fresh => {
       ORDERS = fresh.records || [];
       paintAll(session);
     });
+    if (rOrders.data) ORDERS = rOrders.data.records || [];
 
-    if (cachedOrders) {
-      ORDERS = cachedOrders.records || [];
-      paintAll(session);
-    } else {
-      // Nothing cached yet -- blocking fetch, same as before.
-      const [ordersData, sessionData] = await Promise.all([
-        VP.get('action=orders'),
-        VP.get('action=active_session').catch(() => ({ session: null })),
-      ]);
-      ORDERS = ordersData.records || [];
-      session = sessionData.session || null;
+    if (rOrders.data || rSession.data) paintAll(session);
+
+    // Await whichever in-flight fetches getCached already kicked off above
+    // for anything NOT already served from cache. Never issue a second,
+    // separate VP.get() for the same qs -- that would race the cached
+    // fetch and never write sessionStorage, silently defeating the cache.
+    const ordersWait  = rOrders.pending  || Promise.resolve(null);
+    const sessionWait = (rSession.pending || Promise.resolve(null)).catch
+      ? (rSession.pending || Promise.resolve(null)).catch(() => null)
+      : Promise.resolve(null);
+
+    if (rOrders.pending || rSession.pending) {
+      const [ordersData, sessionData] = await Promise.all([ordersWait, sessionWait]);
+      if (ordersData)  ORDERS  = ordersData.records || [];
+      if (sessionData) session = sessionData.session || null;
       paintAll(session);
     }
-  } catch (e) {
-    console.error('[home] load failed', e);
-    document.getElementById('hero-line').textContent =
-      'No se pudieron cargar los datos. Revisa la conexión y recarga.';
-    document.getElementById('alerts').innerHTML =
-      '<div class="vp-alert"><span class="vp-alert-dot" style="background:var(--red-text)"></span>' +
-      '<span class="vp-alert-text">Error al cargar. <a href="#" onclick="location.reload();return false">Reintentar</a></span></div>';
-    document.getElementById('home-revenue-chart').innerHTML =
-      '<div class="vp-empty-sm">Sin datos</div>';
-  }
 })();
 
 /* ── Hero ───────────────────────────────────────────────────────────── */
