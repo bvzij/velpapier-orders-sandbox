@@ -333,23 +333,32 @@ function blockRevenueOverTime(sc) {
     }
   }
 
-  // Two-line label (weekday above, day+month below) only for the per-day
-  // tier. Monthly buckets show plain day+month (e.g. "1/8") on the bucket
-  // START, not end -- bucketByMonth's "end" is the 1st of the NEXT month,
-  // which would mislabel every point one month ahead. The current month's
-  // point uses "en curso" instead of its month name -- see above.
+  // Label style depends on bucket width:
+  //  - per-day (30-day view): two lines, weekday abbreviation + date
+  //  - per-week (90-day view): two lines, month abbreviation + week number
+  //  - per-month (1 año/Todo): single line, month abbreviation (or
+  //    "en curso" for the current, still-in-progress month)
+  // Monthly buckets label off the bucket START, not end -- bucketByMonth's
+  // "end" is the 1st of the NEXT month, which would mislabel every point
+  // one month ahead.
+  const weekNumber = d => {
+    const start = new Date(d.getFullYear(), 0, 1);
+    const days = Math.floor((d - start) / VP.DAY);
+    return Math.ceil((days + start.getDay() + 1) / 7);
+  };
   const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
+  const weekLabel = d => `${VP.MONTHS_ES[d.getMonth()]}|SEM ${weekNumber(d)}`;
   const monthLabel = d => VP.MONTHS_ES[d.getMonth()];
 
   const revPoints = revB.map((b, i) => ({
     label: useMonths
       ? (i === revB.length - 1 && currentMonthLabel ? `${monthLabel(b.start)}|${currentMonthLabel}` : monthLabel(b.start))
-      : dayLabel(b.end),
+      : (per === 7 ? weekLabel(b.end) : dayLabel(b.end)),
     value: Math.round(b.value),
   }));
   const cntLabels = cntB.map((b, i) => useMonths
     ? (i === cntB.length - 1 && currentMonthLabel ? `${monthLabel(b.start)}|${currentMonthLabel}` : monthLabel(b.start))
-    : dayLabel(b.end));
+    : (per === 7 ? weekLabel(b.end) : dayLabel(b.end)));
 
   return `<section class="vp-section">
     <div class="vp-section-head">
