@@ -19,16 +19,15 @@
     <div class="vp-hero-date" id="an-range">—</div>
   </section>
 
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.75rem">
-    <div class="vp-period" id="an-period">
-      <button class="vp-period-btn" data-days="30">30 días</button>
-      <button class="vp-period-btn is-active" data-days="90">90 días</button>
-      <button class="vp-period-btn" data-days="365">1 año</button>
-      <button class="vp-period-btn" data-days="0">Todo</button>
+  <div class="vp-period" id="an-period">
+      <button class="vp-period-btn is-active" data-days="30">30 días</button>
+      <button class="vp-period-btn" data-days="90" disabled>90 días</button>
+      <button class="vp-period-btn" data-days="365" disabled>1 año</button>
+      <button class="vp-period-btn" data-days="0" disabled>Todo</button>
     </div>
     <span class="vp-section-note" id="an-count">—</span>
-    <span class="vp-section-note" id="an-updating" style="display:none;opacity:.6;font-style:italic;">Actualizando…</span>
   </div>
+  <div class="vp-section-note" id="an-updating-note" style="display:none;opacity:.65;font-style:italic;margin-top:-1.25rem;margin-bottom:1.25rem;">Actualizando las demás vistas…</div>
 
   <div id="an-content">
     <div class="vp-loading">Cargando pedidos, clientes y sesiones</div>
