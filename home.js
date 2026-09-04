@@ -32,7 +32,7 @@ function paintAll(session) {
     // -- unlike analytics, these numbers need the long tail: the Trimestre
     // sparkline reaches ~360 days back, and "Por cobrar" counts unpaid
     // orders of ANY age. Narrowing the fetch would silently undercount.
-        let session = null;
+    let session = null;
 
     const rSession = VP.getCached('action=active_session', fresh => {
       session = fresh.session || null;
@@ -48,21 +48,29 @@ function paintAll(session) {
 
     if (rOrders.data || rSession.data) paintAll(session);
 
-    // Await whichever in-flight fetches getCached already kicked off above
-    // for anything NOT already served from cache. Never issue a second,
+    // Await whichever in-flight fetches getCached already kicked off above,
+    // for anything NOT already served from cache. We never issue a second,
     // separate VP.get() for the same qs -- that would race the cached
     // fetch and never write sessionStorage, silently defeating the cache.
-    const ordersWait  = rOrders.pending  || Promise.resolve(null);
-    const sessionWait = (rSession.pending || Promise.resolve(null)).catch
-      ? (rSession.pending || Promise.resolve(null)).catch(() => null)
-      : Promise.resolve(null);
-
     if (rOrders.pending || rSession.pending) {
-      const [ordersData, sessionData] = await Promise.all([ordersWait, sessionWait]);
+      const [ordersData, sessionData] = await Promise.all([
+        rOrders.pending || Promise.resolve(null),
+        rSession.pending ? rSession.pending.catch(() => null) : Promise.resolve(null),
+      ]);
       if (ordersData)  ORDERS  = ordersData.records || [];
       if (sessionData) session = sessionData.session || null;
       paintAll(session);
     }
+  } catch (e) {
+    console.error('[home] load failed', e);
+    document.getElementById('hero-line').textContent =
+      'No se pudieron cargar los datos. Revisa la conexión y recarga.';
+    document.getElementById('alerts').innerHTML =
+      '<div class="vp-alert"><span class="vp-alert-dot" style="background:var(--red-text)"></span>' +
+      '<span class="vp-alert-text">Error al cargar. <a href="#" onclick="location.reload();return false">Reintentar</a></span></div>';
+    document.getElementById('home-revenue-chart').innerHTML =
+      '<div class="vp-empty-sm">Sin datos</div>';
+  }
 })();
 
 /* ── Hero ───────────────────────────────────────────────────────────── */
