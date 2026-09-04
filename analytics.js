@@ -17,6 +17,29 @@ const created   = r => VP.asDate(r['Created Date']);
 const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {}, fullOrdersLoaded: false };
 let periodDays = 30;
 
+// Every order field anything on this page reads. Caching just these keeps
+// the full-history entry inside sessionStorage's ~5MB quota -- storing the
+// whole records overflows it, the write throws, and the entry silently
+// never gets written, so every visit refetches from scratch.
+// If a new block starts reading another order field, ADD IT HERE, or that
+// field will read as undefined off a cache hit but fine on a cold load --
+// an intermittent bug that is miserable to track down.
+const ORDER_FIELDS = [
+  'Status', 'Price', 'Created Date', 'Customer ID',
+  'Products', 'Primary Username', 'Channel',
+  'Packed Date', 'Shipped Date',
+];
+
+function slimOrders(resp) {
+  return {
+    records: (resp.records || []).map(r => {
+      const o = {};
+      for (const f of ORDER_FIELDS) o[f] = r[f];
+      return o;
+    }),
+  };
+}
+
 function rebuildById() {
   DATA.byId = {};
   DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
@@ -45,12 +68,12 @@ function ensureFullOrders() {
   // fresh (<2min) entry exists -- in that case there's no real wait, so
   // skip the "updating" flicker entirely instead of always flashing it on.
   let announcedUpdating = false;
-  const rFull = VP.getCached('action=orders', fresh => {
+    const rFull = VP.getCached('action=orders', fresh => {
     DATA.orders = fresh.records || [];
     DATA.fullOrdersLoaded = true;
     if (announcedUpdating) setUpdating(false);
     render();
-  });
+  }, { slim: slimOrders, cacheKey: 'orders_analytics_slim' });
   if (rFull.data) {
     DATA.orders = rFull.data.records || [];
     DATA.fullOrdersLoaded = true;
