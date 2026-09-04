@@ -89,12 +89,26 @@ window.VP = (function () {
   }
 
   // Verifies the API token, prompting once if it's missing or stale.
+    const TOKEN_PING_TTL_MS = 5 * 60 * 1000; // 5 minutes -- once a token has
+                                            // been verified, don't re-ping
+                                            // Apps Script on every single
+                                            // page navigation; that round
+                                            // trip was adding a real 1-2s
+                                            // delay before ANY data fetch
+                                            // could even start.
+  const TOKEN_PING_KEY = 'vp_token_verified_at';
+
   async function ensureToken() {
     for (;;) {
       if (token) {
+        const lastVerified = Number(sessionStorage.getItem(TOKEN_PING_KEY) || 0);
+        if (Date.now() - lastVerified < TOKEN_PING_TTL_MS) return;
         try {
           const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(token)}`);
-          if ((await r.json()).ok) return;
+          if ((await r.json()).ok) {
+            sessionStorage.setItem(TOKEN_PING_KEY, String(Date.now()));
+            return;
+          }
         } catch (e) { /* fall through to prompt */ }
       }
       const input = prompt('Token de API:');
@@ -106,7 +120,6 @@ window.VP = (function () {
       localStorage.setItem(TOKEN_KEY, token);
     }
   }
-
   /* ── Navigation ─────────────────────────────────────────────────────── */
 
   const NAV = [
