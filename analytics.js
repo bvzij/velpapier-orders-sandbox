@@ -28,6 +28,7 @@ const ORDER_FIELDS = [
   'Status', 'Price', 'Created Date', 'Customer ID',
   'Products', 'Primary Username', 'Channel',
   'Packed Date', 'Shipped Date',
+  'Order ID', 'Tracking ID',
 ];
 
 function slimOrders(resp) {
@@ -503,15 +504,44 @@ function blockProducts(now) {
 
 /* ── 5 · Customers ──────────────────────────────────────────────────── */
 
+// Keyed store of the actual order records behind every aggregated customer
+// row currently on screen, so a click on a table row can look up exactly
+// which orders it represents without recomputing anything. Rebuilt on
+// every render(); keyed by the same synthetic id used in blockCustomers'
+// own agg object below, and read by openCustomerOrdersModal().
+const CUSTOMER_ROW_ORDERS = {};
+
+function openCustomerOrdersModal(rowKey) {
+  const c = CUSTOMER_ROW_ORDERS[rowKey];
+  if (!c) return;
+  const rows = c.records.slice().sort((a, b) => String(b['Created Date']).localeCompare(String(a['Created Date'])));
+  const body = `
+    <h3 style="margin:0 0 4px">${VP.esc(c.name)}</h3>
+    <p class="vp-section-note" style="margin:0 0 16px">${VP.num(rows.length)} pedido${rows.length !== 1 ? 's' : ''} en el periodo · ${VP.mxn(c.spend)} en total</p>
+    <table class="vp-table"><thead><tr>
+      <th>Order ID</th><th>Fecha</th><th>Estado</th><th>Canal</th><th class="num">Total</th>
+    </tr></thead><tbody>
+    ${rows.map(r => `<tr>
+      <td class="vp-table-name">${VP.esc(r['Order ID'] || r['Tracking ID'] || '—')}</td>
+      <td>${VP.esc(r['Created Date'] ? VP.fmtDate(VP.asDate(r['Created Date'])) : '—')}</td>
+      <td>${VP.esc(r['Status'] || '—')}</td>
+      <td>${VP.esc(r['Channel'] || '—')}</td>
+      <td class="num">${VP.mxn(price(r))}</td>
+    </tr>`).join('')}
+    </tbody></table>`;
+  VP.showModal(body, { maxWidth: '760px' });
+}
+
 function blockCustomers(now, sc) {
   // Spend and order count per customer, in scope
   const agg = {};
   now.forEach(r => {
     const id = r['Customer ID'] || ('__' + (r['Primary Username'] || 'sin-nombre'));
-    if (!agg[id]) agg[id] = { id, name: r['Primary Username'] || '—', spend: 0, orders: 0, items: 0 };
+    if (!agg[id]) agg[id] = { id, name: r['Primary Username'] || '—', spend: 0, orders: 0, items: 0, records: [] };
     if (isPaid(r)) agg[id].spend += price(r);
     agg[id].orders += 1;
     agg[id].items  += VP.itemCount(r['Products']);
+    agg[id].records.push(r);
   });
   const list = Object.values(agg);
 
@@ -560,15 +590,19 @@ function blockCustomers(now, sc) {
     { label: '6 o más',     value: sixPlus,   color: '#534ab7' },
   ].filter(s => s.value > 0);
 
-  const table = rows => `<table class="vp-table"><thead><tr>
+  const table = (rows, tablePrefix) => `<table class="vp-table"><thead><tr>
       <th>Cliente</th><th class="num">Pedidos</th><th class="num">Artículos</th><th class="num">Total</th>
     </tr></thead><tbody>
-    ${rows.map(c => `<tr>
+    ${rows.map((c, i) => {
+      const rowKey = `${tablePrefix}-${i}`;
+      CUSTOMER_ROW_ORDERS[rowKey] = c;
+      return `<tr class="vp-table-row-clickable" onclick="openCustomerOrdersModal('${rowKey}')">
       <td class="vp-table-name">${VP.esc(c.name)}</td>
       <td class="num">${VP.num(c.orders)}</td>
       <td class="num">${VP.num(c.items)}</td>
       <td class="num">${VP.mxn(c.spend)}</td>
-    </tr>`).join('')}
+    </tr>`;
+    }).join('')}
   </tbody></table>`;
 
   return `<section class="vp-section">
@@ -598,11 +632,11 @@ function blockCustomers(now, sc) {
     <div class="vp-grid-2">
       <div class="vp-panel">
         <div class="vp-panel-head"><span class="vp-panel-title">Top clientes por valor</span></div>
-        ${topSpend.length ? table(topSpend) : '<div class="vp-empty-sm">Sin datos</div>'}
+                ${topSpend.length ? table(topSpend, 'spend') : '<div class="vp-empty-sm">Sin datos</div>'}
       </div>
       <div class="vp-panel">
         <div class="vp-panel-head"><span class="vp-panel-title">Top clientes por frecuencia</span></div>
-        ${topFreq.length ? table(topFreq) : '<div class="vp-empty-sm">Sin datos</div>'}
+        ${topFreq.length ? table(topFreq, 'freq') : '<div class="vp-empty-sm">Sin datos</div>'}
       </div>
     </div>
 
