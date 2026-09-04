@@ -413,6 +413,7 @@ window.VP = (function () {
           tipText.setAttribute('x', boxX + tipW / 2);
           if (tipSub) tipSub.setAttribute('x', boxX + tipW / 2);
           tipBox.style.display = '';
+          tipText.style.display = '';
           if (tipSub) tipSub.style.display = '';
         }
       }
@@ -421,6 +422,7 @@ window.VP = (function () {
         guide.style.display = 'none';
         if (dot) dot.style.display = 'none';
         if (tipBox) tipBox.style.display = 'none';
+        if (tipText) tipText.style.display = 'none';
         if (tipSub) tipSub.style.display = 'none';
       }
 
