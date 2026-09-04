@@ -277,14 +277,37 @@ function blockRevenueOverTime(sc) {
     ? VP.bucketByMonth(DATA.orders, 'Created Date', buckets, rs => rs.length)
     : VP.bucketBy(DATA.orders, 'Created Date', buckets, per, rs => rs.length);
 
+  // Simple run-rate projection for the month still in progress: revenue
+  // so far divided by days elapsed, extended to the days remaining. This
+  // is a plain linear extrapolation of this month's own pace -- not a
+  // model, not seasonally aware -- so it's easy to explain and easy to
+  // distrust appropriately. Only the LAST bucket of the monthly view ever
+  // gets one, and only when that bucket is the current, incomplete month.
+  let projectedTotal = null;
+  if (useMonths) {
+    const lastBucket = revB[revB.length - 1];
+    const now = new Date();
+    const isCurrentMonth = lastBucket && lastBucket.start.getFullYear() === now.getFullYear()
+      && lastBucket.start.getMonth() === now.getMonth();
+    if (isCurrentMonth) {
+      const daysElapsed = now.getDate(); // 1..N, today counts as elapsed
+      const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+      if (daysElapsed > 0 && daysElapsed < daysInMonth) {
+        const dailyAvg = lastBucket.value / daysElapsed;
+        projectedTotal = Math.round(dailyAvg * daysInMonth);
+      }
+    }
+  }
+
   // Two-line label (weekday above, day+month below) only for the per-day
   // tier. Monthly buckets show plain day+month (e.g. "1/8") on the bucket
   // START, not end -- bucketByMonth's "end" is the 1st of the NEXT month,
   // which would mislabel every point one month ahead.
   const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
+  const monthLabel = d => VP.MONTHS_ES[d.getMonth()];
 
-  const revPoints = revB.map(b => ({ label: dayLabel(useMonths ? b.start : b.end), value: Math.round(b.value) }));
-  const cntLabels = cntB.map(b => dayLabel(useMonths ? b.start : b.end));
+  const revPoints = revB.map(b => ({ label: useMonths ? monthLabel(b.start) : dayLabel(b.end), value: Math.round(b.value) }));
+  const cntLabels = cntB.map(b => useMonths ? monthLabel(b.start) : dayLabel(b.end));
 
   return `<section class="vp-section">
     <div class="vp-section-head">
@@ -292,7 +315,7 @@ function blockRevenueOverTime(sc) {
       <span class="vp-section-note">${VP.esc(note)}</span>
     </div>
     <div class="vp-panel" style="margin-bottom:14px">
-      ${VP.chartSlot(w => VP.chart.area(revPoints, { width: w, height: 230, fmt: VP.mxn, accent: '#3b6d11' }), 230)}
+      ${VP.chartSlot(w => VP.chart.area(revPoints, { width: w, height: 230, fmt: VP.mxn, accent: '#3b6d11', projectedTotal }), 230)}
     </div>
     <div class="vp-panel">
       <div class="vp-panel-head">
