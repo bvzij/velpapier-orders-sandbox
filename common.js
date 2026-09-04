@@ -469,15 +469,38 @@ window.VP = (function () {
 
     if (!n) return emptyChart(H);
 
-    const maxRaw = Math.max(...points.map(p => p.value), 0);
+    // A projected point (see opts.projectedTotal) sits one slot past the
+    // last real point, so the x-scale needs n+1 slots to make room for it
+    // -- otherwise it would land exactly on top of the last real point.
+    const hasProjection = typeof opts.projectedTotal === 'number' && n > 1;
+    const xSlots = hasProjection ? n + 1 : n;
+
+    const maxRaw = Math.max(...points.map(p => p.value), 0, hasProjection ? opts.projectedTotal : 0);
     const max    = niceCeil(maxRaw || 1);
     const innerW = W - padL - padR;
     const innerH = H - padT - padB;
-    const x = i => padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
+    const x = i => padL + (xSlots === 1 ? innerW / 2 : (i / (xSlots - 1)) * innerW);
     const y = v => padT + innerH - (v / max) * innerH;
 
     const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join('');
     const area = `${line}L${x(n - 1).toFixed(1)},${(padT + innerH).toFixed(1)}L${x(0).toFixed(1)},${(padT + innerH).toFixed(1)}Z`;
+
+    // Faint dashed continuation from the last real point out to the
+    // projected month-end total -- a plain run-rate extrapolation (see
+    // analytics.js), rendered distinctly so it's never mistaken for an
+    // actual data point: no fill, dashed stroke, lower opacity, and
+    // deliberately left out of hoverPoints below.
+    const projection = hasProjection ? (() => {
+      const lastReal = points[n - 1];
+      const x1 = x(n - 1).toFixed(1), y1 = y(lastReal.value).toFixed(1);
+      const x2 = x(n).toFixed(1),     y2 = y(opts.projectedTotal).toFixed(1);
+      return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
+                stroke="${accent}" stroke-width="2" stroke-dasharray="4,4" stroke-opacity=".55"
+                stroke-linecap="round"/>
+              <circle cx="${x2}" cy="${y2}" r="3" fill="none" stroke="${accent}" stroke-width="2" stroke-opacity=".55">
+                <title>Proyección fin de mes: ${svgEsc(fmt(opts.projectedTotal))}</title>
+              </circle>`;
+    })() : '';
 
     const gridVals = [0, max / 2, max];
     const grid = gridVals.map(v => `
@@ -528,9 +551,9 @@ window.VP = (function () {
         <stop offset="100%" stop-color="${accent}" stop-opacity="0"/>
       </linearGradient></defs>
       ${grid}
-      <path d="${area}" fill="url(#${gid})"/>
       <path d="${line}" fill="none" stroke="${accent}" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round"/>
+      ${projection}
       ${dots}${xlabels}
       <line class="vp-chart-guide" x1="0" x2="0" y1="${padT}" y2="${padT + innerH}"
             stroke="var(--text)" stroke-opacity=".35" stroke-width="1" stroke-dasharray="3,3" style="display:none;pointer-events:none"/>
