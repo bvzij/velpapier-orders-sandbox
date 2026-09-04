@@ -873,6 +873,25 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 }
 .vp-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
 
+/* generic modal */
+.vp-modal-overlay {
+  position: fixed; inset: 0; background: rgba(20,19,17,.72); z-index: 900;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.vp-modal-card {
+  position: relative; width: 100%; max-height: 84vh; overflow-y: auto;
+  background: var(--surface); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card); padding: 24px;
+}
+.vp-modal-close {
+  position: absolute; top: 12px; right: 12px; width: 32px; height: 32px;
+  border: none; background: var(--surface2); border-radius: 50%; color: var(--text);
+  font-size: 20px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.vp-modal-close:hover { background: var(--border); }
+.vp-table-row-clickable { cursor: pointer; }
+.vp-table-row-clickable:hover { background: var(--surface2); }
+
 /* loading */
 .vp-loading { display: flex; align-items: center; justify-content: center; gap: 10px;
               padding: 4rem 1rem; color: var(--text-faint); font-size: 13.5px; }
