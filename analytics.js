@@ -258,19 +258,26 @@ function blockHeadline(now, prev) {
 /* ── 2 · Revenue over time ──────────────────────────────────────────── */
 
 function blockRevenueOverTime(sc) {
-  // Bucket width adapts so the chart always shows ~12–16 points
+  // Bucket width adapts so the chart always shows a readable number of
+  // points. 30-day view goes down to one bucket per calendar day -- with
+  // angled two-line labels (weekday + date) the chart has room for it.
   let buckets, per, note;
   if (!sc.days || sc.days > 365)      { buckets = 12; per = 30; note = 'por mes'; }
   else if (sc.days > 120)             { buckets = 13; per = 7;  note = 'por semana'; }
   else if (sc.days > 45)              { buckets = 13; per = 7;  note = 'por semana'; }
-  else                                { buckets = 15; per = 2;  note = 'cada 2 días'; }
+  else                                { buckets = 30; per = 1;  note = 'por día'; }
 
   const paid = DATA.orders.filter(isPaid);
   const revB = VP.bucketBy(paid, 'Created Date', buckets, per, rs => rs.reduce((s, r) => s + price(r), 0));
   const cntB = VP.bucketBy(DATA.orders, 'Created Date', buckets, per, rs => rs.length);
 
-  const revPoints = revB.map(b => ({ label: VP.shortDate(b.end), value: Math.round(b.value) }));
-  const cntLabels = cntB.map(b => VP.shortDate(b.end));
+  // Two-line label (weekday above, day+month below) only makes sense for
+  // per-day buckets -- weekly/monthly buckets keep the plain date so the
+  // label reads as a range, not a single day.
+  const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
+
+  const revPoints = revB.map(b => ({ label: dayLabel(b.end), value: Math.round(b.value) }));
+  const cntLabels = cntB.map(b => dayLabel(b.end));
 
   return `<section class="vp-section">
     <div class="vp-section-head">
