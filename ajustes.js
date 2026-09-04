@@ -335,7 +335,13 @@ const AJ_BACKFILL_PRICE_FIELDS = [
 ];
 
 function parseBackfillPrice(raw) {
-  const cleaned = String(raw || '').replace(/[A-Za-z\s]/g, '').trim();
+  // Strip currency letters/whitespace (e.g. "MXN ") AND comma thousands
+  // separators (e.g. "1,072.88") before parsing. parseFloat stops at the
+  // first character it can't interpret as part of a number -- a bare
+  // comma left in place silently truncates "1,072.88" down to just "1",
+  // which is exactly the bug that produced $1, $2, $3 "orders" for what
+  // were really four-figure amounts.
+  const cleaned = String(raw || '').replace(/[A-Za-z\s,]/g, '').trim();
   if (!cleaned) return '';
   const num = parseFloat(cleaned);
   return isNaN(num) ? '' : num;
