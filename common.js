@@ -62,8 +62,15 @@ window.VP = (function () {
   // `pending` instead of issuing their own separate VP.get() for the same
   // qs -- a second call would race this one and never write the cache,
   // silently defeating it every time the page loads with nothing cached.
-  function getCached(qs, onFresh) {
-    const key = CACHE_PREFIX + qs;
+    // opts.slim   — optional fn(response) => trimmed response. What it returns
+  //               is what gets cached AND what callers receive, so only use
+  //               it when the caller needs a subset of the fields.
+  // opts.cacheKey — optional distinct key. Required whenever slim is used and
+  //               another page caches the same qs in full, so the slim copy
+  //               can't overwrite the full one (home vs analytics on orders).
+  function getCached(qs, onFresh, opts) {
+    opts = opts || {};
+    const key = CACHE_PREFIX + (opts.cacheKey || qs);
     let cached = null;
     let isFresh = false;
     try {
@@ -75,12 +82,23 @@ window.VP = (function () {
       }
     } catch (e) { /* corrupt cache entry, ignore */ }
 
-    let pending = null;
+        let pending = null;
     if (!isFresh) {
       pending = get(qs).then(fresh => {
-        try { sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: fresh })); } catch (e) { /* storage full, non-fatal */ }
-        if (onFresh) onFresh(fresh);
-        return fresh;
+        const toStore = opts.slim ? opts.slim(fresh) : fresh;
+        try {
+          sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: toStore }));
+        } catch (e) {
+          // Almost always QuotaExceededError: sessionStorage caps around
+          // 5MB per origin and the full orders response is far too big to
+          // fit. Drop any half-written entry so a later read can't pick up
+          // garbage, and warn -- silently swallowing this is what made the
+          // home page look like caching "just didn't work" for a while.
+          try { sessionStorage.removeItem(key); } catch (_) {}
+          console.warn('[VP] cache write failed for', key, '-- payload too large?', e);
+        }
+        if (onFresh) onFresh(toStore);
+        return toStore;
       });
       pending.catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
     }
