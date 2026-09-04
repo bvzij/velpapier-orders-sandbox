@@ -395,6 +395,13 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 /* ── Persistent top bar ─────────────────────────────────────────────── */
 
+/* Fixed, not sticky: the nav is inserted by mountNav() *after* first
+   paint, so while it was in normal flow every page visibly dropped 56px
+   the moment JS ran. Taking it out of flow means it can never shift
+   anything -- the 56px it needs is reserved up front by body's padding-top
+   (declared inline in each page's <head> so it applies at first paint,
+   before style.css has even downloaded). Both numbers are 56px: change
+   one, change the other. */
 .vp-nav {
   display: flex;
   align-items: center;
@@ -403,8 +410,10 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
   height: 56px;
   background: var(--surface);
   border-bottom: 0.5px solid var(--border);
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 120;
 }
 
