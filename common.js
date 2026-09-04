@@ -329,13 +329,95 @@ window.VP = (function () {
     const id = 'vpc' + _slots.length;
     _slots.push({ id, builder });
     return `<div class="vp-chart-host" id="${id}" style="min-height:${height}px"></div>`;
-  }
   function paintCharts() {
     _slots.forEach(({ id, builder }) => {
       const el = document.getElementById(id);
       if (!el) return;
       const w = Math.max(260, Math.round(el.clientWidth || 700));
       el.innerHTML = builder(w);
+    });
+    wireAllChartHovers();
+  }
+
+  // Area charts render a data-vp-hover block describing their own points
+  // in SVG coordinates (see areaChart). innerHTML strips <script> tags, so
+  // the crosshair/tooltip behaviour has to be wired up here in JS after
+  // the markup lands, not inline in the chart's own returned string.
+  function wireAllChartHovers() {
+    document.querySelectorAll('svg[data-vp-hover]').forEach(svg => {
+      if (svg._vpHoverWired) return; // don't double-bind on repaint
+      svg._vpHoverWired = true;
+
+      let points;
+      try { points = JSON.parse(svg.getAttribute('data-vp-hover')); } catch (e) { return; }
+      if (!points || !points.length) return;
+
+      const guide   = svg.querySelector('.vp-chart-guide');
+      const dot     = svg.querySelector('.vp-chart-hoverdot');
+      const tipBox  = svg.querySelector('.vp-chart-tip-box');
+      const tipText = svg.querySelector('.vp-chart-tip-text');
+      const tipSub  = svg.querySelector('.vp-chart-tip-sub');
+      const capture = svg.querySelector('.vp-chart-capture');
+      if (!guide || !capture) return;
+
+      const vb = svg.viewBox.baseVal;
+
+      function toSvgX(clientX) {
+        const rect = svg.getBoundingClientRect();
+        const frac = (clientX - rect.left) / rect.width;
+        return vb.x + frac * vb.width;
+      }
+
+      function nearestIndex(svgX) {
+        let best = 0, bestDist = Infinity;
+        points.forEach((p, i) => {
+          const d = Math.abs(p.x - svgX);
+          if (d < bestDist) { bestDist = d; best = i; }
+        });
+        return best;
+      }
+
+      function show(clientX) {
+        const svgX = toSvgX(clientX);
+        const i = nearestIndex(svgX);
+        const p = points[i];
+
+        guide.setAttribute('x1', p.x); guide.setAttribute('x2', p.x);
+        guide.style.display = '';
+        if (dot) {
+          dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y);
+          dot.style.display = '';
+        }
+        if (tipBox && tipText) {
+          tipText.textContent = p.value;
+          if (tipSub) tipSub.textContent = p.label;
+
+          // Clamp so the tooltip never runs off either edge of the chart.
+          const tipW = Math.max(56, tipText.getComputedTextLength ? tipText.getComputedTextLength() + 20 : 70);
+          let boxX = p.x + 10;
+          if (boxX + tipW > vb.x + vb.width) boxX = p.x - tipW - 10;
+          tipBox.setAttribute('x', boxX);
+          tipBox.setAttribute('width', tipW);
+          tipText.setAttribute('x', boxX + tipW / 2);
+          if (tipSub) tipSub.setAttribute('x', boxX + tipW / 2);
+          tipBox.style.display = '';
+          if (tipSub) tipSub.style.display = '';
+        }
+      }
+
+      function hide() {
+        guide.style.display = 'none';
+        if (dot) dot.style.display = 'none';
+        if (tipBox) tipBox.style.display = 'none';
+        if (tipSub) tipSub.style.display = 'none';
+      }
+
+      capture.addEventListener('mousemove', e => show(e.clientX));
+      capture.addEventListener('mouseleave', hide);
+      capture.addEventListener('touchmove', e => {
+        if (e.touches && e.touches[0]) show(e.touches[0].clientX);
+      }, { passive: true });
+      capture.addEventListener('touchend', hide);
     });
   }
   let _rzTimer;
@@ -356,9 +438,16 @@ window.VP = (function () {
 
   /* Area / line chart.
      points: [{label, value}]  opts: {height, fmt, accent, showDots}      */
-    function areaChart(points, opts = {}) {
+      function areaChart(points, opts = {}) {
+    // Labels may be a plain string, or "weekday|date" for a two-line
+    // horizontal label (see analytics.js's per-day bucketing). Split once
+    // up front so the rest of the function just deals with 1 or 2 lines.
+    const splitLabel = raw => String(raw).split('|');
+
     const H       = opts.height || 190;
-    const padL    = 46, padR = 12, padT = 14, padB = 40; // 40, not 26: angled x-axis labels need more vertical room than horizontal ones did
+    const hasTwoLineLabels = points.some(p => splitLabel(p.label).length > 1);
+    const padL    = 46, padR = 12, padT = 14;
+    const padB    = hasTwoLineLabels ? 34 : 26; // second label line needs a bit more room
     const W       = opts.width || 720;
     const fmt     = opts.fmt || (v => num(v));
     const accent  = opts.accent || SERIES[0];
@@ -383,25 +472,42 @@ window.VP = (function () {
       <text x="${padL - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end"
             class="vp-chart-axis">${svgEsc(fmt(v))}</text>`).join('');
 
-        // Label every nth point so they never collide. Angled 45° lets many
-    // more labels fit in the same width than horizontal text could, so
-    // this shows roughly one per point up to ~20, rather than capping at
-    // 8 regardless of how many points there are.
+    // Label every nth point so they never collide. With two-line labels
+    // (weekday + date) we can still afford roughly one per point on a
+    // 30-ish point chart since each line is short; cap around 20 either way.
     const every = Math.max(1, Math.ceil(n / 20));
-    const xlabels = points.map((p, i) =>
-      (i % every === 0 || i === n - 1)
-        ? `<text x="${x(i).toFixed(1)}" y="${H - 7}" text-anchor="end" class="vp-chart-axis" transform="rotate(-45 ${x(i).toFixed(1)} ${H - 7})">${svgEsc(p.label)}</text>`
-        : '').join('');
+    const xlabels = points.map((p, i) => {
+      if (i % every !== 0 && i !== n - 1) return '';
+      const lines = splitLabel(p.label);
+      const cx = x(i).toFixed(1);
+      if (lines.length > 1) {
+        return `<text x="${cx}" y="${H - 20}" text-anchor="middle" class="vp-chart-axis" style="font-weight:600">${svgEsc(lines[0])}</text>
+                <text x="${cx}" y="${H - 7}" text-anchor="middle" class="vp-chart-axis">${svgEsc(lines[1])}</text>`;
+      }
+      return `<text x="${cx}" y="${H - 7}" text-anchor="middle" class="vp-chart-axis">${svgEsc(p.label)}</text>`;
+    }).join('');
 
     const dots = opts.showDots === false ? '' : points.map((p, i) => `
       <circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="3"
               fill="var(--surface)" stroke="${accent}" stroke-width="2">
-        <title>${svgEsc(p.label)}: ${svgEsc(fmt(p.value))}</title>
+        <title>${svgEsc(splitLabel(p.label).join(' '))}: ${svgEsc(fmt(p.value))}</title>
       </circle>`).join('');
 
     const gid = 'g' + Math.random().toString(36).slice(2, 8);
 
-    return `<svg class="vp-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img">
+    // Hover payload: one point per data point, in SVG coordinate space,
+    // read by wireAllChartHovers() after this markup is inserted via
+    // innerHTML (which strips any inline <script>, so wiring can't live
+    // here directly).
+    const hoverPoints = points.map((p, i) => ({
+      x: Number(x(i).toFixed(1)),
+      y: Number(y(p.value).toFixed(1)),
+      value: fmt(p.value),
+      label: splitLabel(p.label).join(' '),
+    }));
+
+    return `<svg class="vp-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img"
+                 data-vp-hover='${svgEsc(JSON.stringify(hoverPoints)).replace(/'/g, '&#39;')}'>
       <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${accent}" stop-opacity=".20"/>
         <stop offset="100%" stop-color="${accent}" stop-opacity="0"/>
@@ -411,9 +517,21 @@ window.VP = (function () {
       <path d="${line}" fill="none" stroke="${accent}" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round"/>
       ${dots}${xlabels}
+      <line class="vp-chart-guide" x1="0" x2="0" y1="${padT}" y2="${padT + innerH}"
+            stroke="rgba(0,0,0,.25)" stroke-width="1" stroke-dasharray="3,3" style="display:none;pointer-events:none"/>
+      <circle class="vp-chart-hoverdot" r="4" fill="${accent}" stroke="var(--surface)" stroke-width="2"
+              style="display:none;pointer-events:none"/>
+      <g style="pointer-events:none">
+        <rect class="vp-chart-tip-box" y="${padT}" height="30" rx="4" fill="var(--text)" style="display:none"/>
+        <text class="vp-chart-tip-text" y="${padT + 13}" text-anchor="middle" fill="var(--surface)"
+              style="display:none;font-size:11px;font-weight:600"></text>
+        <text class="vp-chart-tip-sub" y="${padT + 25}" text-anchor="middle" fill="var(--surface)"
+              style="display:none;font-size:9px;opacity:.75"></text>
+      </g>
+      <rect class="vp-chart-capture" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}"
+            fill="transparent" style="cursor:crosshair"/>
     </svg>`;
   }
-
   /* Grouped vertical bars. series: [{name, color, values:[]}], labels: [] */
   function barChart(labels, series, opts = {}) {
     const H    = opts.height || 190;
