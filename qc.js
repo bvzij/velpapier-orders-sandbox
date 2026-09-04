@@ -370,6 +370,7 @@ let activeSessionStartMs = null;
 // ── Pending list ─────────────────────────────────────────────────────────
 
 function applyPendingData(ordersData, qcData) {
+  console.log('[DIAG] applyPendingData called. orders records:', (ordersData.records || []).length, 'qc records:', (qcData.records || []).length, new Error().stack);
   allActiveOrders = ordersData.records || [];
   allQcRows = qcData.records || [];
 }
@@ -579,8 +580,10 @@ async function toggleHistorySession(i, targetId) {
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
+  console.log('[DIAG] renderPendingList: allActiveOrders.length =', allActiveOrders.length, 'tikTokOrders.length =', tikTokOrders.length);
 
   if (tikTokOrders.length === 0) {
+    console.log('[DIAG] Showing EMPTY STATE. Full allActiveOrders snapshot:', JSON.parse(JSON.stringify(allActiveOrders)));
     list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
     return;
   }
