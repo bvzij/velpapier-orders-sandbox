@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-03.6';
+const SCRIPT_VERSION = '2026-09-03.7';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -158,10 +158,11 @@ function doGet(e) {
       const data = sheet.getDataRange().getValues();
       if (data.length < 2) return jsonResponse({ records: [] });
 
-      const headers = data[0];
+            const headers = data[0];
       const statusCol = headers.indexOf('Status');
       const channelCol = headers.indexOf('Channel');
       const customerIdCol = headers.indexOf('Customer ID');
+      const createdCol = headers.indexOf('Created Date');
 
       const statusFilter = e.parameter.status
         ? e.parameter.status.split(',').map(s => s.trim()).filter(Boolean)
@@ -169,12 +170,23 @@ function doGet(e) {
       const channelFilter = e.parameter.channel || null;
       const customerIdFilter = e.parameter.customer_id || null;
 
+      // Optional fast-path: ?days=30 only returns orders created in the
+      // last N days, server-side, so a slim payload can render instantly.
+      // Omit entirely (no 'days' param) to get full history, unfiltered,
+      // same as before this change.
+      const daysFilter = e.parameter.days ? parseInt(e.parameter.days, 10) : null;
+      const cutoff = daysFilter ? new Date(Date.now() - daysFilter * 86400000) : null;
+
       const records = [];
       for (let i = 1; i < data.length; i++) {
         const row = data[i];
         if (statusFilter && !statusFilter.includes(row[statusCol])) continue;
         if (channelFilter && row[channelCol] !== channelFilter) continue;
         if (customerIdFilter && row[customerIdCol] !== customerIdFilter) continue;
+        if (cutoff) {
+          const cd = row[createdCol] ? new Date(row[createdCol]) : null;
+          if (!cd || cd < cutoff) continue;
+        }
 
         const obj = { _rowIndex: i + 1 };
         headers.forEach((h, j) => { obj[h] = row[j]; });
