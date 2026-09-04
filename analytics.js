@@ -327,9 +327,11 @@ function blockRevenueOverTime(sc) {
           // projection off that single month instead of showing nothing.
           const daysInLast = new Date(completedMonths[completedMonths.length - 1].start.getFullYear(),
             completedMonths[completedMonths.length - 1].start.getMonth() + 1, 0).getDate();
-          projectedTotal = Math.round((lastCompleted / daysInLast) * daysInMonth);
+                    projectedTotal = Math.round((lastCompleted / daysInLast) * daysInMonth);
         }
       }
+    }
+  }
 
   // Two-line label (weekday above, day+month below) only for the per-day
   // tier. Monthly buckets show plain day+month (e.g. "1/8") on the bucket
