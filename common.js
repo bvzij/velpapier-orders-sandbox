@@ -389,14 +389,25 @@ window.VP = (function () {
           dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y);
           dot.style.display = '';
         }
-        if (tipBox && tipText) {
-          tipText.textContent = p.value;
-          if (tipSub) tipSub.textContent = p.label;
+                if (tipBox && tipText) {
+          const valueStr = String(p.value);
+          const labelStr = String(p.label);
+          tipText.textContent = valueStr;
+          if (tipSub) tipSub.textContent = labelStr;
 
-          // Clamp so the tooltip never runs off either edge of the chart.
-          const tipW = Math.max(56, tipText.getComputedTextLength ? tipText.getComputedTextLength() + 20 : 70);
+          // Width from character count rather than getComputedTextLength():
+          // that call can throw or return 0 if the browser hasn't laid the
+          // text out yet on this same tick, which was silently aborting
+          // the rest of this block and leaving the tooltip's x position
+          // (and therefore the number) unset -- it was rendering at x=0,
+          // off to the chart's left edge, effectively invisible.
+          const longest = Math.max(valueStr.length, labelStr.length);
+          const tipW = Math.max(60, longest * 7 + 24);
+
           let boxX = p.x + 10;
           if (boxX + tipW > vb.x + vb.width) boxX = p.x - tipW - 10;
+          if (boxX < vb.x) boxX = vb.x;
+
           tipBox.setAttribute('x', boxX);
           tipBox.setAttribute('width', tipW);
           tipText.setAttribute('x', boxX + tipW / 2);
@@ -473,10 +484,11 @@ window.VP = (function () {
       <text x="${padL - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end"
             class="vp-chart-axis">${svgEsc(fmt(v))}</text>`).join('');
 
-    // Label every nth point so they never collide. With two-line labels
-    // (weekday + date) we can still afford roughly one per point on a
-    // 30-ish point chart since each line is short; cap around 20 either way.
-    const every = Math.max(1, Math.ceil(n / 20));
+        // Show every single point's label -- with short two-line labels
+    // (weekday abbreviation + date) this stays readable even at 30 points.
+    // If a much larger n ever gets passed through here, revisit this; for
+    // now the caller controls point count and asked for every day shown.
+    const every = 1;
     const xlabels = points.map((p, i) => {
       if (i % every !== 0 && i !== n - 1) return '';
       const lines = splitLabel(p.label);
@@ -519,7 +531,7 @@ window.VP = (function () {
             stroke-linejoin="round" stroke-linecap="round"/>
       ${dots}${xlabels}
       <line class="vp-chart-guide" x1="0" x2="0" y1="${padT}" y2="${padT + innerH}"
-            stroke="rgba(0,0,0,.25)" stroke-width="1" stroke-dasharray="3,3" style="display:none;pointer-events:none"/>
+            stroke="var(--text)" stroke-opacity=".35" stroke-width="1" stroke-dasharray="3,3" style="display:none;pointer-events:none"/>
       <circle class="vp-chart-hoverdot" r="4" fill="${accent}" stroke="var(--surface)" stroke-width="2"
               style="display:none;pointer-events:none"/>
       <g style="pointer-events:none">
