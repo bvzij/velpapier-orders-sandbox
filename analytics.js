@@ -67,23 +67,24 @@ function ensureFullOrders() {
   // getCached returns fresh cached data synchronously (in .data) when a
   // fresh (<2min) entry exists -- in that case there's no real wait, so
   // skip the "updating" flicker entirely instead of always flashing it on.
-  let announcedUpdating = false;
     const rFull = VP.getCached('action=orders', fresh => {
     DATA.orders = fresh.records || [];
     DATA.fullOrdersLoaded = true;
-    if (announcedUpdating) setUpdating(false);
+    setUpdating(false);
     render();
   }, { slim: slimOrders, cacheKey: 'orders_analytics_slim' });
   if (rFull.data) {
     DATA.orders = rFull.data.records || [];
     DATA.fullOrdersLoaded = true;
+    // Must re-enable the period buttons here too: they start disabled in
+    // the HTML, and setUpdating(false) is the only thing that ever turns
+    // them back on. On a cache hit there's no wait to announce, but the
+    // buttons still need enabling -- forgetting that left them dead.
+    setUpdating(false);
     render();
   } else {
-    announcedUpdating = true;
     setUpdating(true);
   }
-}
-
 /* ── Boot ───────────────────────────────────────────────────────────── */
 
 (async function init() {
