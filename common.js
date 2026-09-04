@@ -50,18 +50,32 @@ window.VP = (function () {
   //   const cached = VP.getCached('action=orders&...', freshData => { ...re-render... });
   //   if (cached) render(cached);  // show immediately if we had something
   //   else { const fresh = await VP.get('action=orders&...'); render(fresh); }
+    const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes -- long enough that tab-
+                                       // switching feels instant, short
+                                       // enough that stale data can't
+                                       // linger for a whole session.
+
   function getCached(qs, onFresh) {
     const key = CACHE_PREFIX + qs;
     let cached = null;
+    let isFresh = false;
     try {
       const raw = sessionStorage.getItem(key);
-      if (raw) cached = JSON.parse(raw);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        cached = parsed.data;
+        isFresh = (Date.now() - parsed.ts) < CACHE_TTL_MS;
+      }
     } catch (e) { /* corrupt cache entry, ignore */ }
 
-    get(qs).then(fresh => {
-      try { sessionStorage.setItem(key, JSON.stringify(fresh)); } catch (e) { /* storage full, non-fatal */ }
-      if (onFresh) onFresh(fresh);
-    }).catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
+    // Only skip the background refetch if the cache is BOTH present and
+    // still within TTL -- otherwise always refetch, same as before.
+    if (!isFresh) {
+      get(qs).then(fresh => {
+        try { sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: fresh })); } catch (e) { /* storage full, non-fatal */ }
+        if (onFresh) onFresh(fresh);
+      }).catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
+    }
 
     return cached;
   }
