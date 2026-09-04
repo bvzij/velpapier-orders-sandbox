@@ -14,12 +14,32 @@ const isShipped = r => SHIPPED.includes(r['Status']);
 const price     = r => Number(r['Price']) || 0;
 const created   = r => VP.asDate(r['Created Date']);
 
-const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {} };
+const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {}, fullOrdersLoaded: false };
 let periodDays = 90;
 
 function rebuildById() {
   DATA.byId = {};
   DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
+}
+
+function setUpdating(on) {
+  const el = document.getElementById('an-updating');
+  if (el) el.style.display = on ? '' : 'none';
+}
+
+// Full order history is only needed once the person picks a period longer
+// than the 30-day fast-path default (or "all time"). Fetched once, in the
+// background, then cached like everything else -- so the FIRST screen the
+// person sees is always small and fast, never a stale/wrong snapshot.
+function ensureFullOrders() {
+  if (DATA.fullOrdersLoaded) return;
+  setUpdating(true);
+  VP.getCached('action=orders', fresh => {
+    DATA.orders = fresh.records || [];
+    DATA.fullOrdersLoaded = true;
+    setUpdating(false);
+    render();
+  });
 }
 
 /* ── Boot ───────────────────────────────────────────────────────────── */
@@ -29,17 +49,21 @@ function rebuildById() {
   try {
     await VP.ensureToken();
 
-    // Show cached data instantly if we have it, while a fresh fetch runs
-    // quietly in the background and re-renders once it lands. Makes
-    // switching back to this page from another one feel instant instead
-    // of showing a blank loading state every time.
-    let gotCache = false;
-    const cachedOrders    = VP.getCached('action=orders',    fresh => { DATA.orders = fresh.records || []; render(); });
+    // Fast path: only the last 30 days of orders, small payload, so the
+    // first paint is quick and never shows a stale/wrong total. Full
+    // history is fetched separately (see ensureFullOrders) only once the
+    // person actually needs a longer period.
+    setUpdating(true);
+    const cachedOrders30  = VP.getCached('action=orders&days=30', fresh => {
+      if (!DATA.fullOrdersLoaded) { DATA.orders = fresh.records || []; render(); }
+      setUpdating(false);
+    });
     const cachedCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
     const cachedQc        = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
     const cachedSessions  = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
 
-    if (cachedOrders)    { DATA.orders = cachedOrders.records || []; gotCache = true; }
+    let gotCache = false;
+    if (cachedOrders30)  { DATA.orders = cachedOrders30.records || []; gotCache = true; }
     if (cachedCustomers) { DATA.customers = cachedCustomers.records || []; gotCache = true; }
     if (cachedQc)        { DATA.qc = cachedQc.records || []; gotCache = true; }
     if (cachedSessions)  { DATA.sessions = cachedSessions.records || []; gotCache = true; }
@@ -47,11 +71,12 @@ function rebuildById() {
     if (gotCache) {
       rebuildById();
       render();
+      if (!cachedOrders30) setUpdating(true); else setUpdating(false);
     } else {
       // No cache at all yet (first visit this session) -- fall back to a
-      // normal blocking fetch, same as before.
+      // normal blocking fetch of just the 30-day window.
       const [o, c, q, s] = await Promise.all([
-        VP.get('action=orders'),
+        VP.get('action=orders&days=30'),
         VP.get('action=customers'),
         VP.get('action=qc').catch(() => ({ records: [] })),
         VP.get('action=sessions').catch(() => ({ records: [] })),
@@ -62,7 +87,15 @@ function rebuildById() {
       DATA.sessions  = s.records || [];
       rebuildById();
       render();
+      setUpdating(false);
     }
+
+    // periodDays defaults to 90 (see top of file) which is > 30, so the
+    // full history fetch always kicks off on boot regardless of the
+    // default button. If you later change the default to <=30, this still
+    // fires correctly whenever the person clicks a longer period (see
+    // wirePeriod below).
+    if (!periodDays || periodDays > 30) ensureFullOrders();
   } catch (e) {
     console.error('[analytics]', e);
     document.getElementById('an-content').innerHTML =
@@ -77,6 +110,7 @@ function wirePeriod() {
     if (!btn) return;
     periodDays = parseInt(btn.dataset.days, 10);
     document.querySelectorAll('.vp-period-btn').forEach(b => b.classList.toggle('is-active', b === btn));
+    if (!periodDays || periodDays > 30) ensureFullOrders();
     render();
   });
 }
