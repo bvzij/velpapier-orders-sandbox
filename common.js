@@ -313,6 +313,26 @@ window.VP = (function () {
     document.body.appendChild(overlay);
   }
 
+  /* ── Generic modal ──────────────────────────────────────────────────── */
+  // A plain content modal (tables, detail lists, etc.) -- distinct from
+  // lightbox() above, which is image-only. Click outside or Escape to
+  // close; clicks inside the card itself don't bubble to the overlay.
+  function showModal(bodyHtml, opts = {}) {
+    const overlay = document.createElement('div');
+    overlay.className = 'vp-modal-overlay';
+    overlay.innerHTML = `<div class="vp-modal-card" style="max-width:${opts.maxWidth || '640px'}">
+      <button class="vp-modal-close" aria-label="Cerrar" type="button">&times;</button>
+      <div class="vp-modal-body">${bodyHtml}</div>
+    </div>`;
+    const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('.vp-modal-close').addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    return { close, el: overlay };
+  }
+
   /* ========================================================================
      Charts — hand-rolled SVG. No libraries: the whole product runs on
      three files and a Google Sheet, and that constraint has served it well.
@@ -822,7 +842,7 @@ window.VP = (function () {
     API, get, getCached, post, ensureToken, mountNav, NAV, getTheme, setTheme,
     mxn, mxnExact, num, esc, asDate, daysBetween, fmtDate, fmtDateTime,
     fmtDuration, initials, parseProducts, itemCount, baseProductName,
-    toast, lightbox,
+    toast, lightbox, showModal,
     chart: { area: areaChart, bars: barChart, rank: rankBars, donut, sparkline, funnel, SERIES },
     chartSlot, paintCharts, resetCharts,
     window_, pctChange, bucketBy, bucketByMonth, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
