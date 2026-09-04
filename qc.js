@@ -590,6 +590,11 @@ async function toggleHistorySession(i, targetId) {
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
+  console.log('[DIAG2] allActiveOrders.length =', allActiveOrders.length);
+  if (allActiveOrders.length > 0) {
+    console.log('[DIAG2] first record Channel/Status:', JSON.stringify(allActiveOrders[0]['Channel']), JSON.stringify(allActiveOrders[0]['Status']));
+  }
+  console.log('[DIAG2] tikTokOrders.length =', tikTokOrders.length);
 
   if (tikTokOrders.length === 0) {
     list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
