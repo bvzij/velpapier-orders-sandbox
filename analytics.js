@@ -347,7 +347,7 @@ function blockRevenueOverTime(sc) {
     return Math.ceil((days + start.getDay() + 1) / 7);
   };
   const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
-  const weekLabel = d => `${VP.MONTHS_ES[d.getMonth()]}|SEM ${weekNumber(d)}`;
+  const weekLabel = d => `${VP.shortDate(d)}|Sem ${weekNumber(d)}`;
   const monthLabel = d => VP.MONTHS_ES[d.getMonth()];
 
   const revPoints = revB.map((b, i) => ({
