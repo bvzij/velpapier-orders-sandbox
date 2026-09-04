@@ -610,7 +610,7 @@ window.VP = (function () {
     toast, lightbox,
     chart: { area: areaChart, bars: barChart, rank: rankBars, donut, sparkline, funnel, SERIES },
     chartSlot, paintCharts, resetCharts,
-    window_, pctChange, bucketBy, shortDate, MONTHS_ES, DAY,
+    window_, pctChange, bucketBy, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
     get token() { return token; },
   };
 })();
