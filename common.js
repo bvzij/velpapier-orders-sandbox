@@ -329,6 +329,7 @@ window.VP = (function () {
     const id = 'vpc' + _slots.length;
     _slots.push({ id, builder });
     return `<div class="vp-chart-host" id="${id}" style="min-height:${height}px"></div>`;
+  }
   function paintCharts() {
     _slots.forEach(({ id, builder }) => {
       const el = document.getElementById(id);
@@ -438,7 +439,7 @@ window.VP = (function () {
 
   /* Area / line chart.
      points: [{label, value}]  opts: {height, fmt, accent, showDots}      */
-      function areaChart(points, opts = {}) {
+  function areaChart(points, opts = {}) {
     // Labels may be a plain string, or "weekday|date" for a two-line
     // horizontal label (see analytics.js's per-day bucketing). Split once
     // up front so the rest of the function just deals with 1 or 2 lines.
