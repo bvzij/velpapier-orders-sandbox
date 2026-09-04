@@ -285,6 +285,15 @@ async function checkSessionAndRoute() {
     switchTab('pending');
     await loadPending();
   } else {
+    // No active session: show the gate (start/join session + history),
+    // not the pending list, which is session-scoped.
+    document.getElementById('view-session-gate').style.display = 'block';
+    historySessions = null;  // force a fresh fetch in case anything changed
+    renderHistoryList('history-list-gate');
+  }
+}
+
+let startingSession = false;
 
 let startingSession = false;
 
