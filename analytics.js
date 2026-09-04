@@ -41,18 +41,18 @@ function setUpdating(on) {
 // person sees is always small and fast, never a stale/wrong snapshot.
 function ensureFullOrders() {
   if (DATA.fullOrdersLoaded) return;
-  // getCached returns non-null synchronously when a fresh (<2min) cache
-  // entry exists -- in that case there's no real wait, so skip the
-  // "updating" flicker entirely instead of always flashing it on.
+  // getCached returns fresh cached data synchronously (in .data) when a
+  // fresh (<2min) entry exists -- in that case there's no real wait, so
+  // skip the "updating" flicker entirely instead of always flashing it on.
   let announcedUpdating = false;
-  const cachedFull = VP.getCached('action=orders', fresh => {
+  const rFull = VP.getCached('action=orders', fresh => {
     DATA.orders = fresh.records || [];
     DATA.fullOrdersLoaded = true;
     if (announcedUpdating) setUpdating(false);
     render();
   });
-  if (cachedFull) {
-    DATA.orders = cachedFull.records || [];
+  if (rFull.data) {
+    DATA.orders = rFull.data.records || [];
     DATA.fullOrdersLoaded = true;
     render();
   } else {
