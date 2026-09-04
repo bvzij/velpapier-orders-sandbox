@@ -495,20 +495,50 @@ window.VP = (function () {
     // point (second-to-last) out to the projected total, landing at the
     // last point's x -- so the two lines visibly fan out from one shared
     // point to two different possible endings for the current period.
+    // Standard palette amber, matching SERIES[2] ('#854f0b') used elsewhere
+    // for secondary/warning-adjacent series -- kept muted, not bright, to
+    // stay inside the dashboard's existing look.
+    const projAccent = '#854f0b';
+    const pgid = 'pg' + Math.random().toString(36).slice(2, 8);
+
+    // Layering (bottom to top) for the in-progress period:
+    //  1. orange glow, filled from baseline up to the PROJECTED line
+    //  2. green glow, filled from baseline up to the ACTUAL line -- this
+    //     sits on top of the orange, so as real progress climbs toward
+    //     the projection it visibly covers more and more of the orange
+    //     underneath, exactly like the rest of the month "filling in"
+    //  3. the solid (faded) green actual-progress line, on top of both fills
+    //  4. the dashed orange projection line + endpoint dot, on top of
+    //     EVERYTHING -- so it stays visible even where real progress has
+    //     already grown past it and covered the orange glow beneath
     const projection = hasProjection ? (() => {
       const from = points[n - 2], to = points[n - 1];
       const x1 = x(n - 2).toFixed(1), y1 = y(from.value).toFixed(1);
       const x2 = x(n - 1).toFixed(1);
       const yActual = y(to.value).toFixed(1);
       const yProjected = y(opts.projectedTotal).toFixed(1);
-      return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yActual}"
-                stroke="${accent}" stroke-width="2" stroke-opacity=".45" stroke-linecap="round"/>
-              <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yProjected}"
-                stroke="${accent}" stroke-width="2" stroke-dasharray="4,4" stroke-opacity=".45"
-                stroke-linecap="round"/>
-              <circle cx="${x2}" cy="${yProjected}" r="3" fill="none" stroke="${accent}" stroke-width="2" stroke-opacity=".45">
-                <title>Proyección: ${svgEsc(fmt(opts.projectedTotal))}</title>
-              </circle>`;
+      const baseline = (padT + innerH).toFixed(1);
+
+      const orangeArea = `M${x1},${y1}L${x2},${yProjected}L${x2},${baseline}L${x1},${baseline}Z`;
+      const greenArea  = `M${x1},${y1}L${x2},${yActual}L${x2},${baseline}L${x1},${baseline}Z`;
+
+      return `
+        <defs>
+          <linearGradient id="${pgid}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${projAccent}" stop-opacity=".22"/>
+            <stop offset="100%" stop-color="${projAccent}" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <path d="${orangeArea}" fill="url(#${pgid})"/>
+        <path d="${greenArea}" fill="url(#${gid})"/>
+        <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yActual}"
+              stroke="${accent}" stroke-width="2" stroke-opacity=".45" stroke-linecap="round"/>
+        <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yProjected}"
+              stroke="${projAccent}" stroke-width="2" stroke-dasharray="4,4" stroke-opacity=".8"
+              stroke-linecap="round"/>
+        <circle cx="${x2}" cy="${yProjected}" r="3" fill="none" stroke="${projAccent}" stroke-width="2" stroke-opacity=".8">
+          <title>Proyección: ${svgEsc(fmt(opts.projectedTotal))}</title>
+        </circle>`;
     })() : '';
 
     const gridVals = [0, max / 2, max];
