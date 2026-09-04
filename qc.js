@@ -370,7 +370,6 @@ let activeSessionStartMs = null;
 // ── Pending list ─────────────────────────────────────────────────────────
 
 function applyPendingData(ordersData, qcData) {
-  console.log('[DIAG] applyPendingData called. orders records:', (ordersData.records || []).length, 'qc records:', (qcData.records || []).length, new Error().stack);
   allActiveOrders = ordersData.records || [];
   allQcRows = qcData.records || [];
 }
@@ -412,10 +411,21 @@ async function loadPending() {
 
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
   try {
-    const [ordersData, qcData] = await Promise.all([
+    let [ordersData, qcData] = await Promise.all([
       apiGet('action=orders&status=Pagado,No Pagado'),
       apiGet('action=qc'),
     ]);
+    // Apps Script occasionally returns a valid-but-empty response under load
+    // (same flakiness already worked around in the Python import service's
+    // _fetch_customers retry logic). An orders response with zero records
+    // here is almost always this glitch, not a real "nothing to pack" state
+    // -- so retry once before trusting it, rather than showing a false
+    // "all done" empty state that could get an order skipped.
+    if ((ordersData.records || []).length === 0) {
+      console.warn('[loadPending] orders came back empty on first try, retrying once...');
+      await new Promise(r => setTimeout(r, 600));
+      ordersData = await apiGet('action=orders&status=Pagado,No Pagado');
+    }
     applyPendingData(ordersData, qcData);
   } catch (e) {
     list.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
@@ -580,10 +590,8 @@ async function toggleHistorySession(i, targetId) {
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
-  console.log('[DIAG] renderPendingList: allActiveOrders.length =', allActiveOrders.length, 'tikTokOrders.length =', tikTokOrders.length);
 
   if (tikTokOrders.length === 0) {
-    console.log('[DIAG] Showing EMPTY STATE. Full allActiveOrders snapshot:', JSON.parse(JSON.stringify(allActiveOrders)));
     list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
     return;
   }
