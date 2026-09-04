@@ -469,36 +469,45 @@ window.VP = (function () {
 
     if (!n) return emptyChart(H);
 
-    // A projected point (see opts.projectedTotal) sits one slot past the
-    // last real point, so the x-scale needs n+1 slots to make room for it
-    // -- otherwise it would land exactly on top of the last real point.
+    // A projected value (opts.projectedTotal) shares the LAST real point's
+    // x position -- it's an alternate y for where that same month/period
+    // might land, not an extra time slot. No change to point count needed.
     const hasProjection = typeof opts.projectedTotal === 'number' && n > 1;
-    const xSlots = hasProjection ? n + 1 : n;
 
     const maxRaw = Math.max(...points.map(p => p.value), 0, hasProjection ? opts.projectedTotal : 0);
     const max    = niceCeil(maxRaw || 1);
     const innerW = W - padL - padR;
     const innerH = H - padT - padB;
-    const x = i => padL + (xSlots === 1 ? innerW / 2 : (i / (xSlots - 1)) * innerW);
+    const x = i => padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
     const y = v => padT + innerH - (v / max) * innerH;
 
-    const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join('');
-    const area = `${line}L${x(n - 1).toFixed(1)},${(padT + innerH).toFixed(1)}L${x(0).toFixed(1)},${(padT + innerH).toFixed(1)}Z`;
+    // The main line/area stop one point short of the end when there's a
+    // projection -- the last real segment (e.g. Aug -> Sep) is drawn
+    // separately below at reduced opacity, since it's a partial/in-progress
+    // period and shouldn't look identical to a completed one.
+    const solidUpTo = hasProjection ? n - 2 : n - 1;
+    const line = points.slice(0, solidUpTo + 1).map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join('');
+    const area = `${line}L${x(solidUpTo).toFixed(1)},${(padT + innerH).toFixed(1)}L${x(0).toFixed(1)},${(padT + innerH).toFixed(1)}Z`;
 
-    // Faint dashed continuation from the last real point out to the
-    // projected month-end total -- a plain run-rate extrapolation (see
-    // analytics.js), rendered distinctly so it's never mistaken for an
-    // actual data point: no fill, dashed stroke, lower opacity, and
-    // deliberately left out of hoverPoints below.
+    // In-progress segment: real data (last two points), same accent color
+    // but faded, so a low value there reads as "partial period" rather
+    // than "revenue crashed." Projection: dashed line from the SAME start
+    // point (second-to-last) out to the projected total, landing at the
+    // last point's x -- so the two lines visibly fan out from one shared
+    // point to two different possible endings for the current period.
     const projection = hasProjection ? (() => {
-      const lastReal = points[n - 1];
-      const x1 = x(n - 1).toFixed(1), y1 = y(lastReal.value).toFixed(1);
-      const x2 = x(n).toFixed(1),     y2 = y(opts.projectedTotal).toFixed(1);
-      return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
-                stroke="${accent}" stroke-width="2" stroke-dasharray="4,4" stroke-opacity=".55"
+      const from = points[n - 2], to = points[n - 1];
+      const x1 = x(n - 2).toFixed(1), y1 = y(from.value).toFixed(1);
+      const x2 = x(n - 1).toFixed(1);
+      const yActual = y(to.value).toFixed(1);
+      const yProjected = y(opts.projectedTotal).toFixed(1);
+      return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yActual}"
+                stroke="${accent}" stroke-width="2" stroke-opacity=".45" stroke-linecap="round"/>
+              <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${yProjected}"
+                stroke="${accent}" stroke-width="2" stroke-dasharray="4,4" stroke-opacity=".45"
                 stroke-linecap="round"/>
-              <circle cx="${x2}" cy="${y2}" r="3" fill="none" stroke="${accent}" stroke-width="2" stroke-opacity=".55">
-                <title>Proyección fin de mes: ${svgEsc(fmt(opts.projectedTotal))}</title>
+              <circle cx="${x2}" cy="${yProjected}" r="3" fill="none" stroke="${accent}" stroke-width="2" stroke-opacity=".45">
+                <title>Proyección: ${svgEsc(fmt(opts.projectedTotal))}</title>
               </circle>`;
     })() : '';
 
