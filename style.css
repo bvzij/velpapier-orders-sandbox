@@ -30,6 +30,13 @@
 /* Dark theme — same warm, slightly-cream character as the light palette,
    just inverted, rather than a stark pure-black scheme. Toggled by setting
    data-theme="dark" on <html> (see VP.setTheme in common.js). */
+/* Always reserve room for the vertical scrollbar. Without this, pages
+   paint short (heading + "Cargando...") with no scrollbar, then grow tall
+   once data renders -- the scrollbar appears, the viewport narrows by its
+   width, and every centred .vp-shell slides left. Reserving the gutter up
+   front means its arrival changes nothing. */
+html { scrollbar-gutter: stable; }
+
 html[data-theme="dark"] {
   --bg: #171614;
   --surface: #211f1c;
