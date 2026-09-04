@@ -55,6 +55,13 @@ window.VP = (function () {
                                        // enough that stale data can't
                                        // linger for a whole session.
 
+    // Returns { data, pending }. `data` is the cached value (or null if none
+  // / stale). `pending` is the in-flight fetch promise when a background
+  // refresh was kicked off (or null when the cache was already fresh and
+  // no fetch was needed). Callers on a cold load (no cache yet) MUST await
+  // `pending` instead of issuing their own separate VP.get() for the same
+  // qs -- a second call would race this one and never write the cache,
+  // silently defeating it every time the page loads with nothing cached.
   function getCached(qs, onFresh) {
     const key = CACHE_PREFIX + qs;
     let cached = null;
@@ -68,16 +75,17 @@ window.VP = (function () {
       }
     } catch (e) { /* corrupt cache entry, ignore */ }
 
-    // Only skip the background refetch if the cache is BOTH present and
-    // still within TTL -- otherwise always refetch, same as before.
+    let pending = null;
     if (!isFresh) {
-      get(qs).then(fresh => {
+      pending = get(qs).then(fresh => {
         try { sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data: fresh })); } catch (e) { /* storage full, non-fatal */ }
         if (onFresh) onFresh(fresh);
-      }).catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
+        return fresh;
+      });
+      pending.catch(() => { /* background refresh failed silently -- cached view stays as-is */ });
     }
 
-    return cached;
+    return { data: cached, pending };
   }
 
   function post(data) {
