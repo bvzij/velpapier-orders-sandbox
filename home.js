@@ -12,19 +12,52 @@ const created = r => VP.asDate(r['Created Date']);
 
 let ORDERS = [];
 
+// Paints every block from whatever ORDERS/session we currently hold.
+// Called once for cached data and again when the background refresh lands.
+function paintAll(session) {
+  paintStats();
+  paintAlerts(session);
+  paintRevenueChart();
+  paintHeroLine(session);
+}
+
 (async function init() {
   paintDateline();
   try {
     await VP.ensureToken();
-    const [ordersData, sessionData] = await Promise.all([
-      VP.get('action=orders'),
-      VP.get('action=active_session').catch(() => ({ session: null })),
-    ]);
-    ORDERS = ordersData.records || [];
-    paintStats();
-    paintAlerts(sessionData.session || null);
-    paintRevenueChart();
-    paintHeroLine(sessionData.session || null);
+
+    // Cache-first, same stale-while-revalidate pattern as the analytics
+    // page: a fresh (<2min) cache entry paints instantly, then a quiet
+    // background refresh repaints once it lands. No 30-day fast path here
+    // -- unlike analytics, these numbers need the long tail: the Trimestre
+    // sparkline reaches ~360 days back, and "Por cobrar" counts unpaid
+    // orders of ANY age. Narrowing the fetch would silently undercount.
+    let session = null;
+
+    const cachedSession = VP.getCached('action=active_session', fresh => {
+      session = fresh.session || null;
+      paintAll(session);
+    });
+    if (cachedSession) session = cachedSession.session || null;
+
+    const cachedOrders = VP.getCached('action=orders', fresh => {
+      ORDERS = fresh.records || [];
+      paintAll(session);
+    });
+
+    if (cachedOrders) {
+      ORDERS = cachedOrders.records || [];
+      paintAll(session);
+    } else {
+      // Nothing cached yet -- blocking fetch, same as before.
+      const [ordersData, sessionData] = await Promise.all([
+        VP.get('action=orders'),
+        VP.get('action=active_session').catch(() => ({ session: null })),
+      ]);
+      ORDERS = ordersData.records || [];
+      session = sessionData.session || null;
+      paintAll(session);
+    }
   } catch (e) {
     console.error('[home] load failed', e);
     document.getElementById('hero-line').textContent =
