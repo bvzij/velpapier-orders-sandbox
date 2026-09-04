@@ -277,24 +277,39 @@ function blockRevenueOverTime(sc) {
     ? VP.bucketByMonth(DATA.orders, 'Created Date', buckets, rs => rs.length)
     : VP.bucketBy(DATA.orders, 'Created Date', buckets, per, rs => rs.length);
 
-  // Simple run-rate projection for the month still in progress: revenue
-  // so far divided by days elapsed, extended to the days remaining. This
-  // is a plain linear extrapolation of this month's own pace -- not a
-  // model, not seasonally aware -- so it's easy to explain and easy to
-  // distrust appropriately. Only the LAST bucket of the monthly view ever
-  // gets one, and only when that bucket is the current, incomplete month.
+  // The current, still-in-progress month gets two extra things instead of
+  // being plotted like a normal completed month:
+  //  - its label reads "en curso" (rather than dropping in low and reading
+  //    like a crash -- it's not, it's just a partial month)
+  //  - a separate dashed trend line projects where the month is headed,
+  //    based on the average DAILY pace of the last 3 completed months.
+  //    3 months, not 12: this business has ~7 months of history, so a
+  //    trailing quarter is long enough to smooth out one unusually good
+  //    or bad month, short enough to track recent growth rather than
+  //    dilute it against months when the business was much smaller.
+  //    There isn't enough history yet for a same-month-last-year
+  //    comparison to mean anything.
   let projectedTotal = null;
+  let currentMonthLabel = null;
   if (useMonths) {
     const lastBucket = revB[revB.length - 1];
     const now = new Date();
     const isCurrentMonth = lastBucket && lastBucket.start.getFullYear() === now.getFullYear()
       && lastBucket.start.getMonth() === now.getMonth();
     if (isCurrentMonth) {
-      const daysElapsed = now.getDate(); // 1..N, today counts as elapsed
+      currentMonthLabel = 'en curso';
+      const daysElapsed = now.getDate();
       const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-      if (daysElapsed > 0 && daysElapsed < daysInMonth) {
-        const dailyAvg = lastBucket.value / daysElapsed;
-        projectedTotal = Math.round(dailyAvg * daysInMonth);
+
+      const completedMonths = revB.slice(0, -1).slice(-3); // last 3 completed months
+      if (completedMonths.length) {
+        const totalRevenue = completedMonths.reduce((s, b) => s + b.value, 0);
+        const totalDays = completedMonths.reduce((s, b) => {
+          const daysInThatMonth = new Date(b.start.getFullYear(), b.start.getMonth() + 1, 0).getDate();
+          return s + daysInThatMonth;
+        }, 0);
+        const trendDailyAvg = totalDays > 0 ? totalRevenue / totalDays : 0;
+        projectedTotal = Math.round(trendDailyAvg * daysInMonth);
       }
     }
   }
@@ -302,12 +317,20 @@ function blockRevenueOverTime(sc) {
   // Two-line label (weekday above, day+month below) only for the per-day
   // tier. Monthly buckets show plain day+month (e.g. "1/8") on the bucket
   // START, not end -- bucketByMonth's "end" is the 1st of the NEXT month,
-  // which would mislabel every point one month ahead.
+  // which would mislabel every point one month ahead. The current month's
+  // point uses "en curso" instead of its month name -- see above.
   const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
   const monthLabel = d => VP.MONTHS_ES[d.getMonth()];
 
-  const revPoints = revB.map(b => ({ label: useMonths ? monthLabel(b.start) : dayLabel(b.end), value: Math.round(b.value) }));
-  const cntLabels = cntB.map(b => useMonths ? monthLabel(b.start) : dayLabel(b.end));
+  const revPoints = revB.map((b, i) => ({
+    label: useMonths
+      ? (i === revB.length - 1 && currentMonthLabel ? currentMonthLabel : monthLabel(b.start))
+      : dayLabel(b.end),
+    value: Math.round(b.value),
+  }));
+  const cntLabels = cntB.map((b, i) => useMonths
+    ? (i === cntB.length - 1 && currentMonthLabel ? currentMonthLabel : monthLabel(b.start))
+    : dayLabel(b.end));
 
   return `<section class="vp-section">
     <div class="vp-section-head">
