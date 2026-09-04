@@ -262,8 +262,11 @@ function blockRevenueOverTime(sc) {
   // points. 30-day view goes down to one bucket per calendar day -- with
   // angled two-line labels (weekday + date) the chart has room for it.
   let buckets, per, note;
-  if (!sc.days || sc.days > 365)      { buckets = 12; per = 30; note = 'por mes'; }
-  else if (sc.days > 120)             { buckets = 13; per = 7;  note = 'por semana'; }
+  // Todo (sc.days falsy) and 1 año (365) both need the coarse monthly view
+  // -- >365 was unreachable for the "1 año" button itself since that
+  // period is exactly 365 days, so it was falling into the same weekly
+  // tier as 90 days and looking identical.
+  if (!sc.days || sc.days >= 365)     { buckets = 12; per = 30; note = 'por mes'; }
   else if (sc.days > 45)              { buckets = 13; per = 7;  note = 'por semana'; }
   else                                { buckets = 30; per = 1;  note = 'por día'; }
 
