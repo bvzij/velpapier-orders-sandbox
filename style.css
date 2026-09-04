@@ -56,6 +56,15 @@ html[data-theme="dark"] {
 
 body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 15px; }
 
+/* Reserves the same space the nav bar (56px, see .vp-nav) occupies once
+   mountNav() inserts it via JS on every page. Without this, each page
+   briefly renders with .vp-shell content flush at the very top, then
+   visibly jumps down the instant the nav is mounted -- this removes that
+   jump by reserving the space up front, before JS runs. !important wins
+   over .vp-shell's own margin: 0 auto shorthand reliably regardless of
+   cascade order. */
+.vp-shell { margin-top: 56px !important; }
+
 .app-layout { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; max-width: 1400px; margin: 0 auto; }
 
 .app-header { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 0.5px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 50; }
