@@ -295,8 +295,6 @@ async function checkSessionAndRoute() {
 
 let startingSession = false;
 
-let startingSession = false;
-
 async function handleStartSession() {
   if (startingSession) return;
   startingSession = true;
