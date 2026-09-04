@@ -481,6 +481,10 @@ window.VP = (function () {
     const x = i => padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
     const y = v => padT + innerH - (v / max) * innerH;
 
+    // gid is declared here, BEFORE projection, because the in-progress
+    // glow fill (below) reuses this same green gradient definition.
+    const gid = 'g' + Math.random().toString(36).slice(2, 8);
+
     // The main line/area stop one point short of the end when there's a
     // projection -- the last real segment (e.g. Aug -> Sep) is drawn
     // separately below at reduced opacity, since it's a partial/in-progress
@@ -489,28 +493,21 @@ window.VP = (function () {
     const line = points.slice(0, solidUpTo + 1).map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join('');
     const area = `${line}L${x(solidUpTo).toFixed(1)},${(padT + innerH).toFixed(1)}L${x(0).toFixed(1)},${(padT + innerH).toFixed(1)}Z`;
 
-    // In-progress segment: real data (last two points), same accent color
-    // but faded, so a low value there reads as "partial period" rather
-    // than "revenue crashed." Projection: dashed line from the SAME start
-    // point (second-to-last) out to the projected total, landing at the
-    // last point's x -- so the two lines visibly fan out from one shared
-    // point to two different possible endings for the current period.
-    // Standard palette amber, matching SERIES[2] ('#854f0b') used elsewhere
-    // for secondary/warning-adjacent series -- kept muted, not bright, to
-    // stay inside the dashboard's existing look.
+    // Standard palette amber (SERIES[2]) -- muted, matches the dashboard's
+    // existing secondary color rather than introducing a bright new one.
     const projAccent = '#854f0b';
     const pgid = 'pg' + Math.random().toString(36).slice(2, 8);
 
     // Layering (bottom to top) for the in-progress period:
     //  1. orange glow, filled from baseline up to the PROJECTED line
-    //  2. green glow, filled from baseline up to the ACTUAL line -- this
-    //     sits on top of the orange, so as real progress climbs toward
-    //     the projection it visibly covers more and more of the orange
-    //     underneath, exactly like the rest of the month "filling in"
+    //  2. green glow, filled from baseline up to the ACTUAL line -- sits
+    //     on top of the orange, so as real progress climbs toward the
+    //     projection it visibly covers more of the orange beneath, like
+    //     the month "filling in" toward its projected total
     //  3. the solid (faded) green actual-progress line, on top of both fills
     //  4. the dashed orange projection line + endpoint dot, on top of
-    //     EVERYTHING -- so it stays visible even where real progress has
-    //     already grown past it and covered the orange glow beneath
+    //     EVERYTHING -- stays visible even once real progress has grown
+    //     past it and covered the orange glow underneath
     const projection = hasProjection ? (() => {
       const from = points[n - 2], to = points[n - 1];
       const x1 = x(n - 2).toFixed(1), y1 = y(from.value).toFixed(1);
@@ -569,8 +566,6 @@ window.VP = (function () {
               fill="var(--surface)" stroke="${accent}" stroke-width="2">
         <title>${svgEsc(splitLabel(p.label).join(' '))}: ${svgEsc(fmt(p.value))}</title>
       </circle>`).join('');
-
-    const gid = 'g' + Math.random().toString(36).slice(2, 8);
 
     // Hover payload: one point per data point, in SVG coordinate space,
     // read by wireAllChartHovers() after this markup is inserted via
