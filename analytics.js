@@ -15,16 +15,24 @@ const price     = r => Number(r['Price']) || 0;
 const created   = r => VP.asDate(r['Created Date']);
 
 const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {}, fullOrdersLoaded: false };
-let periodDays = 90;
+let periodDays = 30;
 
 function rebuildById() {
   DATA.byId = {};
   DATA.customers.forEach(x => { DATA.byId[x['Customer ID']] = x; });
 }
 
+// While the full order history hasn't landed yet, the 90-day/1-year/Todo
+// buttons would show numbers computed from only the 30-day fast-path data
+// -- silently wrong, not just incomplete. So they stay disabled, with a
+// visible note, until ensureFullOrders() resolves.
 function setUpdating(on) {
-  const el = document.getElementById('an-updating');
-  if (el) el.style.display = on ? '' : 'none';
+  const note = document.getElementById('an-updating-note');
+  if (note) note.style.display = on ? '' : 'none';
+  document.querySelectorAll('#an-period .vp-period-btn').forEach(b => {
+    if (b.dataset.days === '30') return; // 30-day view is always safe to click
+    b.disabled = on;
+  });
 }
 
 // Full order history is only needed once the person picks a period longer
@@ -90,12 +98,11 @@ function ensureFullOrders() {
       setUpdating(false);
     }
 
-    // periodDays defaults to 90 (see top of file) which is > 30, so the
-    // full history fetch always kicks off on boot regardless of the
-    // default button. If you later change the default to <=30, this still
-    // fires correctly whenever the person clicks a longer period (see
-    // wirePeriod below).
-    if (!periodDays || periodDays > 30) ensureFullOrders();
+        // Always prefetch full history in the background after the fast 30-day
+    // view loads, regardless of which period is currently showing -- this
+    // way the 90-day/1-year/Todo buttons re-enable themselves as soon as
+    // possible, without waiting for the person to click one first.
+    ensureFullOrders();
   } catch (e) {
     console.error('[analytics]', e);
     document.getElementById('an-content').innerHTML =
@@ -107,14 +114,13 @@ function ensureFullOrders() {
 function wirePeriod() {
   document.getElementById('an-period').addEventListener('click', e => {
     const btn = e.target.closest('.vp-period-btn');
-    if (!btn) return;
+    if (!btn || btn.disabled) return;
     periodDays = parseInt(btn.dataset.days, 10);
     document.querySelectorAll('.vp-period-btn').forEach(b => b.classList.toggle('is-active', b === btn));
     if (!periodDays || periodDays > 30) ensureFullOrders();
     render();
   });
 }
-
 /* ── Scope helpers ──────────────────────────────────────────────────── */
 
 function scope() {
