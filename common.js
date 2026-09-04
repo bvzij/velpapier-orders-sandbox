@@ -598,6 +598,7 @@ window.VP = (function () {
   }
 
   const MONTHS_ES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+  const WEEKDAYS_ES = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb']; // index matches Date.getDay()
   const shortDate = d => `${d.getDate()} ${MONTHS_ES[d.getMonth()]}`;
 
   /* ── Public surface ─────────────────────────────────────────────────── */
