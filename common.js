@@ -730,6 +730,30 @@ window.VP = (function () {
     return out;
   }
 
+  // Same shape as bucketBy's output, but bucket boundaries land on real
+  // calendar months (the 1st of each month) instead of fixed 30-day
+  // windows counted back from right now -- so "1 año" reads as Ene, Feb,
+  // Mar... rather than an arbitrary rolling cutoff that drifts a little
+  // more out of alignment with real months every day.
+  function bucketByMonth(records, dateField, months, valueFn) {
+    const now = new Date();
+    const out = [];
+    for (let i = months - 1; i >= 0; i--) {
+      const end   = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const inRange = records.filter(r => {
+        const d = asDate(r[dateField]);
+        return d && d >= start && d < end;
+      });
+      out.push({
+        start, end,
+        records: inRange,
+        value: valueFn ? valueFn(inRange) : inRange.length,
+      });
+    }
+    return out;
+  }
+
   const MONTHS_ES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
   const WEEKDAYS_ES = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb']; // index matches Date.getDay()
   const shortDate = d => `${d.getDate()}/${d.getMonth() + 1}`; // "30/8" -- getMonth() is 0-based, so +1
@@ -743,7 +767,7 @@ window.VP = (function () {
     toast, lightbox,
     chart: { area: areaChart, bars: barChart, rank: rankBars, donut, sparkline, funnel, SERIES },
     chartSlot, paintCharts, resetCharts,
-    window_, pctChange, bucketBy, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
+    window_, pctChange, bucketBy, bucketByMonth, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
     get token() { return token; },
   };
 })();
