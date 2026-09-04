@@ -356,9 +356,9 @@ window.VP = (function () {
 
   /* Area / line chart.
      points: [{label, value}]  opts: {height, fmt, accent, showDots}      */
-  function areaChart(points, opts = {}) {
+    function areaChart(points, opts = {}) {
     const H       = opts.height || 190;
-    const padL    = 46, padR = 12, padT = 14, padB = 26;
+    const padL    = 46, padR = 12, padT = 14, padB = 40; // 40, not 26: angled x-axis labels need more vertical room than horizontal ones did
     const W       = opts.width || 720;
     const fmt     = opts.fmt || (v => num(v));
     const accent  = opts.accent || SERIES[0];
@@ -383,11 +383,14 @@ window.VP = (function () {
       <text x="${padL - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end"
             class="vp-chart-axis">${svgEsc(fmt(v))}</text>`).join('');
 
-    // Label every nth point so they never collide
-    const every = Math.max(1, Math.ceil(n / 8));
+        // Label every nth point so they never collide. Angled 45° lets many
+    // more labels fit in the same width than horizontal text could, so
+    // this shows roughly one per point up to ~20, rather than capping at
+    // 8 regardless of how many points there are.
+    const every = Math.max(1, Math.ceil(n / 20));
     const xlabels = points.map((p, i) =>
       (i % every === 0 || i === n - 1)
-        ? `<text x="${x(i).toFixed(1)}" y="${H - 7}" text-anchor="middle" class="vp-chart-axis">${svgEsc(p.label)}</text>`
+        ? `<text x="${x(i).toFixed(1)}" y="${H - 7}" text-anchor="end" class="vp-chart-axis" transform="rotate(-45 ${x(i).toFixed(1)} ${H - 7})">${svgEsc(p.label)}</text>`
         : '').join('');
 
     const dots = opts.showDots === false ? '' : points.map((p, i) => `
