@@ -347,7 +347,9 @@ function blockRevenueOverTime(sc) {
     return Math.ceil((days + start.getDay() + 1) / 7);
   };
   const dayLabel = d => per === 1 ? `${VP.WEEKDAYS_ES[d.getDay()]}|${VP.shortDate(d)}` : VP.shortDate(d);
-  const weekLabel = d => `${VP.shortDate(d)}|Sem ${weekNumber(d)}`;
+  // Uses "24 ago" (day + month abbreviation), not VP.shortDate's "24/8" --
+  // this tier wants the readable form since there's room for it.
+  const weekLabel = d => `${d.getDate()} ${VP.MONTHS_ES[d.getMonth()]}|Sem ${weekNumber(d)}`;
   const monthLabel = d => VP.MONTHS_ES[d.getMonth()];
 
   const revPoints = revB.map((b, i) => ({
