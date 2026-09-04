@@ -301,18 +301,35 @@ function blockRevenueOverTime(sc) {
       const daysElapsed = now.getDate();
       const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
 
-      const completedMonths = revB.slice(0, -1).slice(-3); // last 3 completed months
-      if (completedMonths.length) {
-        const totalRevenue = completedMonths.reduce((s, b) => s + b.value, 0);
-        const totalDays = completedMonths.reduce((s, b) => {
-          const daysInThatMonth = new Date(b.start.getFullYear(), b.start.getMonth() + 1, 0).getDate();
-          return s + daysInThatMonth;
-        }, 0);
-        const trendDailyAvg = totalDays > 0 ? totalRevenue / totalDays : 0;
-        projectedTotal = Math.round(trendDailyAvg * daysInMonth);
+      // Growth-based projection, not a flat average: this business has
+      // been growing month over month, so averaging raw revenue across
+      // the last few months would drag the projection down toward the
+      // slower, older months instead of reflecting the current trajectory.
+      // Instead: look at the last few completed months, measure the
+      // month-over-month % change between each consecutive pair, average
+      // those changes, and apply that average growth rate forward from
+      // the most recent completed month.
+      const completedMonths = revB.slice(0, -1).slice(-4); // need 4 to get 3 deltas
+      if (completedMonths.length >= 2) {
+        const growthRates = [];
+        for (let i = 1; i < completedMonths.length; i++) {
+          const prev = completedMonths[i - 1].value;
+          const curr = completedMonths[i].value;
+          if (prev > 0) growthRates.push((curr - prev) / prev);
+        }
+        const lastCompleted = completedMonths[completedMonths.length - 1].value;
+        if (growthRates.length) {
+          const avgGrowth = growthRates.reduce((s, g) => s + g, 0) / growthRates.length;
+          projectedTotal = Math.round(lastCompleted * (1 + avgGrowth));
+        } else {
+          // Only one completed month available (early days) -- nothing to
+          // measure growth against yet, so fall back to a flat daily-rate
+          // projection off that single month instead of showing nothing.
+          const daysInLast = new Date(completedMonths[completedMonths.length - 1].start.getFullYear(),
+            completedMonths[completedMonths.length - 1].start.getMonth() + 1, 0).getDate();
+          projectedTotal = Math.round((lastCompleted / daysInLast) * daysInMonth);
+        }
       }
-    }
-  }
 
   // Two-line label (weekday above, day+month below) only for the per-day
   // tier. Monthly buckets show plain day+month (e.g. "1/8") on the bucket
@@ -324,12 +341,12 @@ function blockRevenueOverTime(sc) {
 
   const revPoints = revB.map((b, i) => ({
     label: useMonths
-      ? (i === revB.length - 1 && currentMonthLabel ? currentMonthLabel : monthLabel(b.start))
+      ? (i === revB.length - 1 && currentMonthLabel ? `${monthLabel(b.start)}|${currentMonthLabel}` : monthLabel(b.start))
       : dayLabel(b.end),
     value: Math.round(b.value),
   }));
   const cntLabels = cntB.map((b, i) => useMonths
-    ? (i === cntB.length - 1 && currentMonthLabel ? currentMonthLabel : monthLabel(b.start))
+    ? (i === cntB.length - 1 && currentMonthLabel ? `${monthLabel(b.start)}|${currentMonthLabel}` : monthLabel(b.start))
     : dayLabel(b.end));
 
   return `<section class="vp-section">
