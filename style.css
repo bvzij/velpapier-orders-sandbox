@@ -65,6 +65,20 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
    cascade order. */
 .vp-shell { margin-top: 56px !important; }
 
+/* Paints the reserved 56px strip (see .vp-shell rule above) the same
+   color as the nav bar itself, so the split-second before mountNav()
+   inserts the real <nav> looks like "the nav, not yet interactive" rather
+   than an empty gap flashing before it snaps in. */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 56px;
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--border);
+  z-index: 119;
+}
+
 .app-layout { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; max-width: 1400px; margin: 0 auto; }
 
 .app-header { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.5rem; border-bottom: 0.5px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 50; }
