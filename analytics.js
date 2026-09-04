@@ -72,31 +72,35 @@ function ensureFullOrders() {
     // first paint is quick and never shows a stale/wrong total. Full
     // history is fetched separately (see ensureFullOrders) only once the
     // person actually needs a longer period.
-        const cachedOrders30  = VP.getCached('action=orders&days=30', fresh => {
+            const r30       = VP.getCached('action=orders&days=30', fresh => {
       if (!DATA.fullOrdersLoaded) { DATA.orders = fresh.records || []; render(); }
     });
-    if (!cachedOrders30) setUpdating(true);
-    const cachedCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
-    const cachedQc        = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
-    const cachedSessions  = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
+    if (!r30.data) setUpdating(true);
+    const rCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
+    const rQc         = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
+    const rSessions   = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
 
     let gotCache = false;
-    if (cachedOrders30)  { DATA.orders = cachedOrders30.records || []; gotCache = true; }
-    if (cachedCustomers) { DATA.customers = cachedCustomers.records || []; gotCache = true; }
-    if (cachedQc)        { DATA.qc = cachedQc.records || []; gotCache = true; }
-    if (cachedSessions)  { DATA.sessions = cachedSessions.records || []; gotCache = true; }
+    if (r30.data)        { DATA.orders = r30.data.records || []; gotCache = true; }
+    if (rCustomers.data) { DATA.customers = rCustomers.data.records || []; gotCache = true; }
+    if (rQc.data)        { DATA.qc = rQc.data.records || []; gotCache = true; }
+    if (rSessions.data)  { DATA.sessions = rSessions.data.records || []; gotCache = true; }
 
-        if (gotCache) {
+    if (gotCache) {
       rebuildById();
       render();
     } else {
-      // No cache at all yet (first visit this session) -- fall back to a
-      // normal blocking fetch of just the 30-day window.
+      // No cache at all yet (first visit this session) -- await the SAME
+      // in-flight fetches getCached already kicked off above (each writes
+      // its own sessionStorage entry in its own .then()). We must not
+      // issue separate VP.get() calls here -- that would race the cached
+      // ones and never write the cache, silently defeating it on every
+      // cold load.
       const [o, c, q, s] = await Promise.all([
-        VP.get('action=orders&days=30'),
-        VP.get('action=customers'),
-        VP.get('action=qc').catch(() => ({ records: [] })),
-        VP.get('action=sessions').catch(() => ({ records: [] })),
+        r30.pending,
+        rCustomers.pending,
+        rQc.pending.catch(() => ({ records: [] })),
+        rSessions.pending.catch(() => ({ records: [] })),
       ]);
       DATA.orders    = o.records || [];
       DATA.customers = c.records || [];
