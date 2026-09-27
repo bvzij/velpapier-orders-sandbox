@@ -12,6 +12,7 @@ let pdfFile = null;
 
 // Result data (kept for PDF re-download + modal)
 let lastPdfBase64   = null;
+let lastCsvBase64   = null;
 let lastMatches     = [];
 let allCustomers    = [];   // fetched from Apps Script for modal dropdown
 let activeMatchIdx  = null; // which match card is being resolved
@@ -175,8 +176,9 @@ async function runImport() {
 function handleResult(data) {
   const s = data.summary || {};
 
-  // Store for re-download + modal
+    // Store for re-download + modal
   lastPdfBase64 = data.pdf_base64 || null;
+  lastCsvBase64 = data.csv_base64 || null;
   lastMatches   = data.possible_matches || [];
 
   // Summary card
@@ -231,6 +233,25 @@ function openAndDownloadPDF() {
   document.body.removeChild(a);
 
   // Don't revoke immediately — keep blob alive for the opened tab
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+  downloadCombinedCSV();
+}
+
+function downloadCombinedCSV() {
+  if (!lastCsvBase64) return;
+  const bytes = Uint8Array.from(atob(lastCsvBase64), c => c.charCodeAt(0));
+  const blob  = new Blob([bytes], { type: 'text/csv' });
+  const url   = URL.createObjectURL(blob);
+
+  const a = Object.assign(document.createElement('a'), {
+    href:     url,
+    download: `Combined_Orders_To_Ship_${new Date().toISOString().slice(0,10)}.csv`,
+  });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
