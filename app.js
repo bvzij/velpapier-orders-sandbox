@@ -579,8 +579,8 @@ function applyActiveData(activeData, customersData, matchesData) {
   allCustomers = {};
   customersById = {};
   (customersData.records || []).forEach(c => {
-    const primary = (c['Primary Username'] || '').trim();
-    const custId = (c['Customer ID'] || '').trim();
+    const primary = String(c['Primary Username'] || '').trim();
+    const custId = String(c['Customer ID'] || '').trim();
     if (custId) customersById[custId] = primary;
     if (!primary) return;
     const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
@@ -763,8 +763,8 @@ function renderQCHistory() {
   if (sessionFilter) rows = rows.filter(r => r['Session ID'] === sessionFilter);
   if (query) {
     rows = rows.filter(r =>
-      (r['Primary Username'] || '').toLowerCase().includes(query) ||
-      (r['Tracking ID'] || '').toLowerCase().includes(query)
+      String(r['Primary Username'] || '').toLowerCase().includes(query) ||
+      String(r['Tracking ID'] || '').toLowerCase().includes(query)
     );
   }
 
@@ -1419,8 +1419,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
       allCustomers = {};
       customersById = {};
       (data.records || []).forEach(c => {
-        const primary = (c['Primary Username'] || '').trim();
-        const custId = (c['Customer ID'] || '').trim();
+        const primary = String(c['Primary Username'] || '').trim();
+        const custId = String(c['Customer ID'] || '').trim();
         if (custId) customersById[custId] = primary;
         if (!primary) return;
         const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
