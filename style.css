@@ -135,7 +135,7 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .btn-pagado:hover { background: var(--green-border); }
 .btn-enviado { background: #3a3a3a; color: var(--surface); border-color: #3a3a3a; }
 .btn-enviado:hover { opacity: 0.85; background: #3a3a3a; }
-html[data-theme="dark"] .btn-enviado { background: #8f8b82; color: #171614; border-color: #8f8b82; }
+html[data-theme="dark"] .btn-enviado { background: #a09c92; color: #171614; border-color: #8f8b82; }
 html[data-theme="dark"] .btn-enviado:hover { background: #a09c92; opacity: 1; }
 .btn-undo { background: var(--surface2); color: var(--text-muted); border-color: var(--border); }
 .btn-undo:hover { background: var(--amber-bg); color: var(--amber-text); }
