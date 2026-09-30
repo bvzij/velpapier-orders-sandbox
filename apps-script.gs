@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-09-04.1';
+const SCRIPT_VERSION = '2026-09-29.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -2315,8 +2315,13 @@ function runTikTokBackfill(records, dryRun) {
     // Write back only the rows that changed (existingData was mutated in place),
     // then append any brand-new rows -- both in single batched calls.
     if (existingData.length) {
-      forceTextFormat(sheet, headers, TIKTOK_ID_COLUMNS, 2, existingData.length);
-      sheet.getRange(2, 1, existingData.length, headers.length).setValues(existingData);
+            // Only the 7 columns this tool can change are written back, not the whole sheet
+      ['Order Status', 'Order Substatus'].concat(BACKFILL_FILL_ONLY_FIELDS).forEach(name => {
+        const c = headers.indexOf(name);
+        if (c < 0) return;
+        sheet.getRange(2, c + 1, existingData.length, 1).setValues(existingData.map(r => [r[c]]));
+      });
+            // (full-sheet rewrite removed: too slow at 12k+ rows)
     }
     if (newRows.length) {
       const startRow = sheet.getLastRow() + 1;
