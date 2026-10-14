@@ -167,7 +167,17 @@ def group_shipments(rows: list) -> list:
                 "line_items":        [],
                 "import_history":    [],
                 "raw_rows":          [],
-                "price":             0.0,
+                # price_by_order replaces the old single "price" float.
+                # TikTok's "Order Amount" is the total PER ORDER, repeated
+                # on every line-item row of that order -- so for a
+                # combined shipment (2+ distinct orders in one package),
+                # taking a single max() across all rows kept only the
+                # larger order's amount and silently dropped the rest.
+                # Keying by order_id and taking max WITHIN each order
+                # (still needed because that order's own rows repeat the
+                # same amount) then summing across orders gives the real
+                # shipment total.
+                "price_by_order":    {},
                 "address":           {},
             }
         g = groups[tid]
@@ -181,9 +191,13 @@ def group_shipments(rows: list) -> list:
             g["import_history"].append(r["import_history_row"])
         if r.get("raw_row"):
             g["raw_rows"].append(r["raw_row"])
-        g["price"] = max(g["price"], r["price_float"])
+        oid = r["order_id"]
+        if oid:
+            g["price_by_order"][oid] = max(g["price_by_order"].get(oid, 0.0), r["price_float"])
     for g in groups.values():
         g["products"] = "; ".join(g["products"])
+        g["price"] = round(sum(g["price_by_order"].values()), 2)
+        del g["price_by_order"]
     return list(groups.values())
 
 
