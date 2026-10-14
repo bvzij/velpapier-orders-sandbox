@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-13.3';
+const SCRIPT_VERSION = '2026-10-13.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -29,7 +29,30 @@ function getCustomersSheet() {
 }
 
 function getQCSheet() {
-  return SpreadsheetApp.openById(QC_SHEET_ID).getSheets()[0];
+  const ss = SpreadsheetApp.openById(QC_SHEET_ID);
+
+  // Fast path: the tab name found last time (cached), as long as it still exists.
+  const cache = CacheService.getScriptCache();
+  const cachedName = cache.get('qc_sheet_name');
+  if (cachedName) {
+    const cached = ss.getSheetByName(cachedName);
+    if (cached) return cached;
+  }
+
+  // This used to be "the first tab", so dragging the Sessions tab to the
+  // front would have silently sent every QC record into the Sessions sheet.
+  // Identify the QC tab by its header row instead.
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    const sh = sheets[i];
+    if (sh.getName() === 'Sessions' || sh.getLastColumn() < 2) continue;
+    const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    if (h.indexOf('QC ID') >= 0 && h.indexOf('Tracking ID') >= 0) {
+      cache.put('qc_sheet_name', sh.getName(), 21600);
+      return sh;
+    }
+  }
+  return sheets[0];   // legacy fallback, same as before
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
@@ -87,6 +110,16 @@ function jsonResponse(data, status) {
 // Shopify ID into scientific notation or strip the leading zero off a
 // CDMX postcode (every ZIP in Mexico City starts with 0).
 const CUSTOMER_ID_COLUMNS = ['Customer ID', 'Shopify Customer ID', 'ZIP', 'Phone Partial', 'Phone Full'];
+
+// Writes one customer cell. Identifier-like fields (ZIP, phones, Shopify ID)
+// are forced to plain text FIRST: a plain setValue() on a General-format cell
+// makes Sheets re-parse '01000' as the number 1000, silently stripping the
+// leading zero from every CDMX postcode.
+function setCustomerCell(sheet, row1, col1, fieldName, value) {
+  const rg = sheet.getRange(row1, col1);
+  if (CUSTOMER_ID_COLUMNS.indexOf(fieldName) >= 0) rg.setNumberFormat('@');
+  rg.setValue(value);
+}
 
 function appendCustomerRowByHeader(sheet, fieldValues) {
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -426,6 +459,10 @@ function createOrder(body) {
     order_id: orderID,
     customer_id: customerID,
     merge_flag: mergeFlag,
+    // Set only when the username looked CLOSE to an existing customer but
+    // not close enough to trust. The order was saved unlinked; the UI can
+    // offer this as a one-click "link to this customer?" suggestion.
+    fuzzy_suggestion: fuzzySuggestion,
     status: status
   });
 }
@@ -500,49 +537,119 @@ function updateOrderStatus(body) {
 
 // ─── Recalculate shipment count ────────────────────────────────────────────────
 
-// Single source of truth for "how many times has this customer shipped
-// before" -- counts TikTok + Shopify orders in Enviado/Archivado only.
-// Used both to recompute the stored Shipment Count (recalculateShipmentCount)
-// and to answer "what was their count BEFORE this order" for the TikTok
-// import label (countPriorShipments). Keeping one counting rule in one
-// place is what the label-count bugs (P8) were about -- three different
-// definitions existed before this fix.
-function countShippedOrders(customerID, excludeOrderID) {
-  const ordersSheet = getOrdersSheet();
-  const data = ordersSheet.getDataRange().getValues();
-  const headers = data[0];
+// ─── Narrow sheet I/O helpers ──────────────────────────────────────────────
+// The Orders sheet is ~75 columns wide. Reading or rewriting all of it to
+// touch one or two columns (what the merge / undo / QC-finalize / shipment
+// count code used to do) is slow, holds the write lock longer, and
+// re-parses every cell on the way back in -- which is how long numeric IDs
+// get corrupted into scientific notation. These helpers touch only the
+// columns they actually need.
 
-  const channelCol = headers.indexOf('Channel');
-  const statusCol = headers.indexOf('Status');
-  const customerIdCol = headers.indexOf('Customer ID');
-  const orderIdCol = headers.indexOf('Order ID');
+// Data rows (row 2..last) of ONE column, as a flat array. [] if the column
+// does not exist or the sheet is empty.
+function readColumn(sheet, colIdx0) {
+  const lastRow = sheet.getLastRow();
+  if (colIdx0 < 0 || lastRow < 2) return [];
+  return sheet.getRange(2, colIdx0 + 1, lastRow - 1, 1).getValues().map(r => r[0]);
+}
 
-  let count = 0;
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    if (String(row[customerIdCol]) !== String(customerID)) continue;
-    if (excludeOrderID && String(row[orderIdCol]) === String(excludeOrderID)) continue;
-    if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
-    if (row[statusCol] === 'Enviado' || row[statusCol] === 'Archivado') count++;
+// Writes back the changed entries of a column previously read with
+// readColumn(). Few changes -> touch only those cells. Many changes -> one
+// write of the whole column, which is ONLY safe for plain-text columns
+// (Customer ID, Catalog ID) because it re-writes the unchanged cells too.
+function writeColumnChanges(sheet, colIdx0, flatValues, changedIdxs) {
+  if (colIdx0 < 0 || !changedIdxs.length) return;
+  if (changedIdxs.length <= 15) {
+    changedIdxs.forEach(i => sheet.getRange(i + 2, colIdx0 + 1).setValue(flatValues[i]));
+  } else {
+    sheet.getRange(2, colIdx0 + 1, flatValues.length, 1).setValues(flatValues.map(v => [v]));
   }
-  return count;
+}
+
+// Sets the SAME value on many cells of one column in as few API calls as
+// possible. rowIdxs0 are 0-based data-row indexes (as from readColumn()).
+function setCellsToValue(sheet, colIdx0, rowIdxs0, value, asText) {
+  if (colIdx0 < 0 || !rowIdxs0.length) return;
+  try {
+    const rl = sheet.getRangeList(rowIdxs0.map(i => colLetter(colIdx0) + (i + 2)));
+    if (asText) rl.setNumberFormat('@');
+    rl.setValue(value);
+  } catch (err) {
+    // Fallback: identical result, one cell at a time.
+    rowIdxs0.forEach(i => {
+      const rg = sheet.getRange(i + 2, colIdx0 + 1);
+      if (asText) rg.setNumberFormat('@');
+      rg.setValue(value);
+    });
+  }
+}
+
+// Tracks which cells of an in-memory 2D array were changed, so only those
+// cells are written back (instead of the whole sheet). textCols are column
+// indexes forced to plain text before writing (IDs / SKUs).
+function makeCellTracker(data, firstSheetRow) {
+  const touched = {};
+  const base = firstSheetRow || 1;   // sheet row that data[0] sits on (1 = array includes the header row)
+  return {
+    set: function (r, c, v) { data[r][c] = v; touched[r + ',' + c] = true; },
+    flush: function (sheet, textCols) {
+      Object.keys(touched).forEach(k => {
+        const parts = k.split(',').map(Number);
+        const rg = sheet.getRange(parts[0] + base, parts[1] + 1);
+        if ((textCols || []).indexOf(parts[1]) >= 0) rg.setNumberFormat('@');
+        rg.setValue(data[parts[0]][parts[1]]);
+      });
+    },
+  };
+}
+
+// ─── Shipment count: ONE definition, computed ONE way ──────────────────────
+// "How many times has this customer shipped" = TikTok + Shopify orders that
+// are Enviado or Archivado. Used by the stored Shipment Count (customer
+// badge), by the TikTok import (label: "Nuevo" / "N env") and by the merge
+// and undo actions. Three different definitions used to exist (P8); keeping
+// exactly one, in exactly one place, is what keeps them from drifting apart
+// again. Reads only the three columns it needs.
+function buildShippedCountMap(ordersSheet, headers) {
+  const cid  = readColumn(ordersSheet, headers.indexOf('Customer ID'));
+  const chan = readColumn(ordersSheet, headers.indexOf('Channel'));
+  const stat = readColumn(ordersSheet, headers.indexOf('Status'));
+  const map = {};
+  for (let i = 0; i < cid.length; i++) {
+    if (!cid[i]) continue;
+    if (chan[i] !== 'TikTok' && chan[i] !== 'Shopify') continue;
+    if (stat[i] !== 'Enviado' && stat[i] !== 'Archivado') continue;
+    const k = String(cid[i]);
+    map[k] = (map[k] || 0) + 1;
+  }
+  return map;
+}
+
+// Refreshes the stored Shipment Count for several customers with ONE read of
+// the Orders columns and one cell write per customer.
+function recalculateShipmentCountsFor(customerIds) {
+  const wanted = {};
+  (customerIds || []).forEach(id => { if (id) wanted[String(id)] = true; });
+  if (!Object.keys(wanted).length) return;
+
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  const counts = buildShippedCountMap(ordersSheet, oh);
+
+  const cs = getCustomersSheet();
+  const ch = cs.getRange(1, 1, 1, cs.getLastColumn()).getValues()[0];
+  const idCol = ch.indexOf('Customer ID');
+  const countCol = ch.indexOf('Shipment Count');
+  if (idCol < 0 || countCol < 0) return;
+
+  readColumn(cs, idCol).forEach((v, i) => {
+    const k = String(v);
+    if (wanted[k]) cs.getRange(i + 2, countCol + 1).setValue(counts[k] || 0);
+  });
 }
 
 function recalculateShipmentCount(customerID) {
-  const count = countShippedOrders(customerID);
-
-  const customersSheet = getCustomersSheet();
-  const custData = customersSheet.getDataRange().getValues();
-  const custHeaders = custData[0];
-  const custIdCol = custHeaders.indexOf('Customer ID');
-  const countCol = custHeaders.indexOf('Shipment Count');
-
-  for (let i = 1; i < custData.length; i++) {
-    if (String(custData[i][custIdCol]) === String(customerID)) {
-      customersSheet.getRange(i + 1, countCol + 1).setValue(count);
-      break;
-    }
-  }
+  recalculateShipmentCountsFor([customerID]);
 }
 
 // ─── Add alias ─────────────────────────────────────────────────────────────────
@@ -721,6 +828,50 @@ function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
   }
 }
 
+// ONE-TIME REPAIR -- run once by hand from the Apps Script editor (pick this
+// function in the dropdown, press Run), then check the log.
+//
+// Release 2026-10-13.3 wrote the phone number of Shopify-created customers
+// into 'Phone Partial' instead of 'Phone Full'. The matcher only reads a
+// masked number ("953*****58") from the Partial column, so those customers
+// could never be matched on phone again. This moves such numbers to
+// 'Phone Full'. It only touches rows whose Notes say they were created from
+// Shopify, only when Phone Full is empty, and only when the Partial value
+// is a complete (unmasked) number -- so it is safe to run more than once.
+function repairShopifyPhoneColumns() {
+  const sheet = getCustomersSheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iPartial = headers.indexOf('Phone Partial');
+  const iFull = headers.indexOf('Phone Full');
+  const iNotes = headers.indexOf('Notes');
+  if (iPartial < 0 || iFull < 0 || iNotes < 0) {
+    Logger.log('Missing Phone Partial / Phone Full / Notes column -- nothing done.');
+    return 0;
+  }
+
+  const partials = readColumn(sheet, iPartial);
+  const fulls = readColumn(sheet, iFull);
+  const notes = readColumn(sheet, iNotes);
+  let moved = 0;
+
+  partials.forEach((p, i) => {
+    const value = String(p || '').trim();
+    if (!value || value.indexOf('*') >= 0) return;                // empty or masked: leave alone
+    if (normalizePhone(value).length < 10) return;                // not a complete number
+    if (String(fulls[i] || '').trim()) return;                    // Phone Full already set
+    if (String(notes[i] || '').indexOf('Shopify') < 0) return;    // not a Shopify-created customer
+
+    const full = sheet.getRange(i + 2, iFull + 1);
+    full.setNumberFormat('@');
+    full.setValue(value);
+    sheet.getRange(i + 2, iPartial + 1).setValue('');
+    moved++;
+  });
+
+  Logger.log('Moved ' + moved + ' phone number(s) from Phone Partial to Phone Full.');
+  return moved;
+}
+
 // Full recompute of every customer's shipment count from scratch.
 // Counts TikTok + Shopify orders in Enviado/Archivado. Excludes Manual.
 function recalculateAllShipmentCounts() {
@@ -808,8 +959,18 @@ function importTikTokOrders(body) {
   const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
 
   const trackingSet = {};
+  // Customer ID -> number of shipped (Enviado/Archivado) TikTok+Shopify orders.
+  // Built ONCE from the rows already loaded above. It used to be recomputed
+  // by re-reading the whole Orders sheet for EVERY shipment in the batch
+  // (up to 200 full-sheet reads per request).
+  const shippedCountMap = {};
   allOrderData.forEach(r => {
     if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
+    const cid = String(r[iCustO] || '');
+    if (cid && (r[iChanO] === 'TikTok' || r[iChanO] === 'Shopify') &&
+        (r[iStatO] === 'Enviado' || r[iStatO] === 'Archivado')) {
+      shippedCountMap[cid] = (shippedCountMap[cid] || 0) + 1;
+    }
   });
 
   // ─── Read customers sheet ONCE into a 2D array ───────────────────
@@ -828,6 +989,12 @@ function importTikTokOrders(body) {
     notes:  ch.indexOf('Notes'),
   };
 
+  // Customer address enrichment below goes through this tracker so only the
+  // cells that actually changed are written. This used to write the ENTIRE
+  // Customers sheet back on every import that enriched anyone, re-parsing
+  // every ZIP (stripping the leading 0 off every CDMX postcode) and every
+  // phone number in the sheet on the way in.
+  const custTrack = makeCellTracker(custData, 2);
   const custRowMap = {};
   custData.forEach((r, i) => { custRowMap[String(r[cCol.id])] = i; });
 
@@ -880,7 +1047,7 @@ function importTikTokOrders(body) {
     let shipCount  = null;
 
     if (customerID) {
-      shipCount = countShippedOrders(customerID);  // count BEFORE this order, by design
+      shipCount = shippedCountMap[String(customerID)] || 0;  // count BEFORE this order, by design
       const idx = custRowMap[customerID];
       if (idx !== undefined) {
         const addr = s.address || {};
@@ -895,7 +1062,7 @@ function importTikTokOrders(body) {
           if (!incoming || colIdx < 0) return;
           const current = (custData[idx][colIdx] || '').toString().trim();
           if (!current) {
-            custData[idx][colIdx] = incoming;
+            custTrack.set(idx, colIdx, incoming);
             customersDirty = true;
           } else if (current.toLowerCase() !== incoming.toLowerCase()) {
             // Only flag this alternate value if it hasn't already been
@@ -910,7 +1077,7 @@ function importTikTokOrders(body) {
           }
         });
         if (noteAdd.length && cCol.notes >= 0) {
-          custData[idx][cCol.notes] = (existingNotes ? existingNotes + ' | ' : '') + noteAdd.join('; ');
+          custTrack.set(idx, cCol.notes, (existingNotes ? existingNotes + ' | ' : '') + noteAdd.join('; '));
           customersDirty = true;
         }
       }
@@ -968,17 +1135,17 @@ function importTikTokOrders(body) {
   // row that arrived via a different tracking ID on a previous run.
   appendTikTokImportHistoryDeduped(allImportHistory);
 
-  // Shipment Count on the Customers sheet is NOT touched here anymore --
-  // it only reflects Enviado/Archivado orders (see countShippedOrders),
-  // and a freshly-imported order is still Pagado at this point, so there
-  // is nothing to add yet. It will update naturally the next time this
-  // order's status changes to Enviado, via applyStatusSideEffects ->
-  // recalculateShipmentCount. This removes the second, conflicting
-  // definition of "Shipment Count" that used to live in this function.
+  // Shipment Count on the Customers sheet is NOT touched here: it only
+  // reflects Enviado/Archivado orders (see buildShippedCountMap), and a
+  // freshly-imported order is still Pagado, so there is nothing to add yet.
+  // It is refreshed when the order actually ships -- by saveQC (finalize)
+  // on the packing page, or by applyStatusSideEffects on a manual status
+  // change. That removes the second, conflicting definition of "Shipment
+  // Count" that used to live in this function.
 
-  // ─── Write modified customers back in ONE batch ───────────────────
+  // ─── Write back ONLY the customer cells that changed ──────────────
   if (customersDirty && custData.length > 0) {
-    customersSheet.getRange(2, 1, custData.length, custLastCol).setValues(custData);
+    custTrack.flush(customersSheet, [cCol.zip, cCol.phone]);
   }
 
   return jsonResponse({
@@ -1210,7 +1377,18 @@ function saveQC(body) {
   if (body.packer) set('Packer', body.packer);
   // Finalizing marks the QC row itself, so other devices polling QC rows can
   // drop this shipment from their pending list without refetching all orders.
-  if (body.finalize) set('Status', 'Enviado');
+  if (body.finalize) {
+    // Validate BEFORE marking anything. This check used to run after the QC
+    // row had already been written as 'Enviado', so an incomplete finalize
+    // request returned an error while leaving a shipped QC record whose
+    // orders had never actually been updated.
+    const preOrderIds = (body.order_ids || []).map(o => o.id);
+    const prePhotos = [1, 2, 3, 4, 5].map(n => get('Content' + n)).filter(Boolean);
+    if (!preOrderIds.length || prePhotos.length === 0) {
+      return jsonResponse({ error: 'order_ids y al menos una foto de contenido son obligatorios para finalizar' });
+    }
+    set('Status', 'Enviado');
+  }
 
   qcSheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
@@ -1221,53 +1399,59 @@ function saveQC(body) {
     box_urls:     [1,2,3,4,5].map(n => get('Box' + n)).filter(Boolean),
   };
 
-  // Finalize: trigger the real shipping side-effects (batched — no per-order
-  // full-sheet re-reads, which was the main cause of the 7-9s save time).
+  // Finalize: trigger the real shipping side-effects.
+  // Touches ONLY the cells that actually change (Packed Date, Linked
+  // Shipment, Status, Shipped Date on the shipped orders). It used to read
+  // all ~75 columns of every order and write the WHOLE sheet back: slow
+  // (the 7-9s "Enviar" save), and every unrelated cell got re-parsed on the
+  // way back in, which is how long numeric IDs were being corrupted.
   if (body.finalize) {
     const allOrderIds = (body.order_ids || []).map(o => o.id);
-    const finalContentUrls = result.content_urls;
-    if (!allOrderIds.length || finalContentUrls.length === 0) {
-      return jsonResponse({ error: 'order_ids y al menos una foto de contenido son obligatorios para finalizar' });
-    }
 
     const orders = getOrdersSheet();
-    const oLastCol = orders.getLastColumn();
-    const oh = orders.getRange(1, 1, 1, oLastCol).getValues()[0];
-    const iPacked = oh.indexOf('Packed Date');
-    const iLink   = oh.indexOf('Linked Shipment');
-    const iChan   = oh.indexOf('Channel');
-    const iStat   = oh.indexOf('Status');
+    const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+    const iOrderId = oh.indexOf('Order ID');
+    const iPacked  = oh.indexOf('Packed Date');
+    const iLink    = oh.indexOf('Linked Shipment');
+    const iChan    = oh.indexOf('Channel');
+    const iStat    = oh.indexOf('Status');
+    const iShipped = oh.indexOf('Shipped Date');
+    const iCust    = oh.indexOf('Customer ID');
 
-    const oLastRow = orders.getLastRow();
-    const oData = oLastRow > 1 ? orders.getRange(2, 1, oLastRow - 1, oLastCol).getValues() : [];
-    const idToRowIdx = {};  // Order ID -> index into oData
-    oData.forEach((r, i) => { idToRowIdx[String(r[0])] = i; });  // col A = Order ID
+    // Order ID located by header (it used to be assumed to be column A).
+    const idVals   = readColumn(orders, iOrderId);
+    const chanVals = readColumn(orders, iChan);
+    const custVals = readColumn(orders, iCust);
+    const idToRowIdx = {};
+    idVals.forEach((v, i) => { idToRowIdx[String(v)] = i; });
 
     const shipResults = [];
+    const shippedRows = [];        // every order being shipped
+    const linkRows = [];           // non-TikTok orders get Linked Shipment = tracking ID
+    const customersToRecount = [];
 
     allOrderIds.forEach(id => {
       const idx = idToRowIdx[String(id)];
       if (idx === undefined) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
-      const r = oData[idx];
-      if (iPacked >= 0) r[iPacked] = nowISO();
-      if (iChan >= 0 && iLink >= 0 && r[iChan] !== 'TikTok') r[iLink] = body.tracking_id;
-      if (iStat >= 0) {
-        r[iStat] = 'Enviado';
-        const shippedIdx = oh.indexOf('Shipped Date');
-        if (shippedIdx >= 0) r[shippedIdx] = nowISO();
+      shippedRows.push(idx);
+      if (iChan >= 0 && iLink >= 0 && chanVals[idx] !== 'TikTok') linkRows.push(idx);
+      if ((chanVals[idx] === 'TikTok' || chanVals[idx] === 'Shopify') && custVals[idx]) {
+        customersToRecount.push(String(custVals[idx]));
       }
       shipResults.push({ order_id: id, result: 'shipped' });
     });
 
-    // Write all order row changes back in ONE batch
-    if (oData.length > 0) {
-      orders.getRange(2, 1, oData.length, oLastCol).setValues(oData);
-    }
+    const now = nowISO();
+    setCellsToValue(orders, iPacked,  shippedRows, now, false);
+    setCellsToValue(orders, iLink,    linkRows, body.tracking_id, true);
+    setCellsToValue(orders, iStat,    shippedRows, 'Enviado', false);
+    setCellsToValue(orders, iShipped, shippedRows, now, false);
 
-    // Shipment Count is no longer touched here — it's set once at TikTok
-    // import time (see importTikTokOrders) based on cancellation being rare
-    // enough (~1-in-4000) that "imported" is treated as "will ship."
-    // This keeps the Enviar save fast: no per-shipment recalculation.
+    // Shipping is what moves a customer's Shipment Count. Finalize writes
+    // Status directly (it does not go through applyStatusSideEffects), so
+    // refresh the count here, for just the customers involved.
+    SpreadsheetApp.flush();
+    recalculateShipmentCountsFor(customersToRecount);
 
     result.result = 'created';
     result.orders = shipResults;
@@ -1321,8 +1505,18 @@ function generateQCID(sheet) {
 }
 
 // Generic single-column exact-match finder, reused for QC dedup.
-function findRowByColumn(sheet, colLetter, value) {
-  const colIdx = colLetter.charCodeAt(0) - 64; // 'A' -> 1
+function columnLetterToIndex(letters) {
+  let n = 0;
+  String(letters).toUpperCase().split('').forEach(ch => { n = n * 26 + (ch.charCodeAt(0) - 64); });
+  return n;
+}
+
+// Generic single-column exact-match finder, reused for QC dedup.
+// Accepts multi-letter column names ('AA', 'AB', ...). The previous version
+// only understood a single letter, so a column past Z silently pointed at
+// the wrong column.
+function findRowByColumn(sheet, columnLetters, value) {
+  const colIdx = columnLetterToIndex(columnLetters);
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
   const vals = sheet.getRange(2, colIdx, lastRow - 1, 1).getValues();
@@ -1998,7 +2192,7 @@ function importShopifyOrder(body) {
         'City': incoming.city || '',
         'State': incoming.state || '',
         'ZIP': incoming.zip || '',
-        'Phone Partial': incoming.phone || '',
+        'Phone Full': incoming.phone || '',
         'Email': incoming.email || '',
         'First Order Date': nowISO(),
         'Shipment Count': 0,
@@ -2124,7 +2318,7 @@ function resolveShopifyMatchAction(body) {
       'City': addrParts[0] || '',
       'State': addrParts[1] || '',
       'ZIP': addrParts[2] || '',
-      'Phone Partial': match['Incoming Phone'] || '',
+      'Phone Full': match['Incoming Phone'] || '',
       'Email': match['Incoming Email'] || '',
       'First Order Date': nowISO(),
       'Shipment Count': 0,
@@ -2173,7 +2367,7 @@ function appendShopifyIdToCustomer(customerId, newShopifyId) {
       const current = String(data[i][shopCol] || '').split('/').map(s => s.trim()).filter(Boolean);
       if (!current.includes(String(newShopifyId))) {
         current.push(String(newShopifyId));
-        sheet.getRange(i + 1, shopCol + 1).setValue(current.join('/'));
+        setCustomerCell(sheet, i + 1, shopCol + 1, 'Shopify Customer ID', current.join('/'));
       }
       return;
     }
@@ -2205,7 +2399,7 @@ function enrichCustomerFromMatch(customerId, match) {
       const colIdx = headers.indexOf(field);
       const newVal = fieldsToFill[field];
       if (colIdx >= 0 && newVal && !String(data[i][colIdx] || '').trim()) {
-        sheet.getRange(i + 1, colIdx + 1).setValue(newVal);
+        setCustomerCell(sheet, i + 1, colIdx + 1, field, newVal);
       }
     });
     return;
@@ -2803,6 +2997,13 @@ function mergeProductsAction(body) {
     variantRowByCatalogId[String(vData[i][vCatalogCol])] = i;
   }
 
+  // Every change to the variants goes through this tracker so that ONLY the
+  // cells that changed are written back. This function used to write the
+  // entire Product Variants sheet back with setValues(), which re-parses
+  // every cell -- including every 19-digit TikTok SKU ID -- on the way in.
+  const vTrack = makeCellTracker(vData);
+  const setCell = vTrack.set;
+
   // Snapshot every variant belonging to the LOSING parent, before any
   // mutation, so undo can fully restore Parent ID / SKU unions / names.
   const loserVariantCatalogIds = [];
@@ -2839,20 +3040,20 @@ function mergeProductsAction(body) {
     const keepSkus = String(vData[keepRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
     const loseSkus = String(vData[loseRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
     const mergedSkus = [...new Set([...keepSkus, ...loseSkus])];
-    vData[keepRow][vTiktokSkusCol] = mergedSkus.join(', ');
+    setCell(keepRow, vTiktokSkusCol, mergedSkus.join(', '));
 
     // Backfill blank fields from loser
     if (!String(vData[keepRow][vYourSkuCol] || '').trim() && vData[loseRow][vYourSkuCol]) {
-      vData[keepRow][vYourSkuCol] = vData[loseRow][vYourSkuCol];
+      setCell(keepRow, vYourSkuCol, vData[loseRow][vYourSkuCol]);
     }
     const keeperNotes = String(vData[keepRow][vNotesCol] || '');
     const loserNotes = String(vData[loseRow][vNotesCol] || '');
     if (loserNotes && !keeperNotes.includes(loserNotes)) {
-      vData[keepRow][vNotesCol] = keeperNotes ? keeperNotes + ' | ' + loserNotes : loserNotes;
+      setCell(keepRow, vNotesCol, keeperNotes ? keeperNotes + ' | ' + loserNotes : loserNotes);
     }
 
     // Mark the losing variant as merged (kept, not deleted)
-    vData[loseRow][vNameCol] = String(vData[loseRow][vNameCol] || '') + ` (merged→${pair.keep_catalog_id})`;
+    setCell(loseRow, vNameCol, String(vData[loseRow][vNameCol] || '') + ` (merged→${pair.keep_catalog_id})`);
 
     catalogIdRepointMap[pair.lose_catalog_id] = pair.keep_catalog_id;
   });
@@ -2863,53 +3064,60 @@ function mergeProductsAction(body) {
   loserVariantCatalogIds.forEach(cid => {
     if (pairedLoserCatalogIds.has(cid)) return; // already handled above
     const row = variantRowByCatalogId[cid];
-    vData[row][vParentCol] = keepParentId;
+    setCell(row, vParentCol, keepParentId);
   });
 
-  variantsSheet.getRange(2, 1, vData.length - 1, vHeaders.length).setValues(vData.slice(1));
+  vTrack.flush(variantsSheet, [vTiktokSkusCol, vYourSkuCol, vCatalogCol, vParentCol]);
 
-  // ─── Repoint every Orders row across all 30 Product N Catalog ID slots ─
+  // ─── Repoint Orders across the 30 Product N Catalog ID slots ──────────
+  // Reads only those 30 columns (plus Order ID) and writes back only the
+  // columns that changed -- never the whole ~75-column sheet. Every cell
+  // that moves is recorded (order + slot + original Catalog ID) so undo can
+  // revert exactly those cells and nothing else.
   const ordersSheet = getOrdersSheet();
-  const oLastRow = ordersSheet.getLastRow();
-  const oLastCol = ordersSheet.getLastColumn();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
   let ordersRepointed = 0;
+  const movedCells = [];     // 'orderId|slot|originalCatalogId'
 
-  if (oLastRow > 1 && Object.keys(catalogIdRepointMap).length) {
-    const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
-    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
-    const PRODUCT_SLOTS = 30;
-    const catalogCols = [];
-    for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+  if (ordersSheet.getLastRow() > 1 && Object.keys(catalogIdRepointMap).length) {
+    const orderIdVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+    const touchedRows = new Set();
+    for (let n = 1; n <= 30; n++) {
       const col = oh.indexOf('Product ' + n + ' Catalog ID');
-      if (col >= 0) catalogCols.push(col);
-    }
-
-    let touchedAnyRow = false;
-    oData.forEach(row => {
-      let touchedThisRow = false;
-      catalogCols.forEach(col => {
-        const current = String(row[col] || '');
-        if (catalogIdRepointMap[current]) {
-          row[col] = catalogIdRepointMap[current];
-          touchedThisRow = true;
+      if (col < 0) continue;
+      const vals = readColumn(ordersSheet, col);
+      const changed = [];
+      vals.forEach((v, i) => {
+        const cur = String(v || '');
+        if (catalogIdRepointMap[cur]) {
+          vals[i] = catalogIdRepointMap[cur];
+          changed.push(i);
+          touchedRows.add(i);
+          movedCells.push(String(orderIdVals[i]) + '|' + n + '|' + cur);
         }
       });
-      if (touchedThisRow) { ordersRepointed++; touchedAnyRow = true; }
-    });
-
-    if (touchedAnyRow) {
-      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+      writeColumnChanges(ordersSheet, col, vals, changed);
     }
+    ordersRepointed = touchedRows.size;
   }
 
   // ─── Mark the losing Parent (kept, not deleted) ────────────────────────
   pData[loseParentRow][pNameCol] = loseParentName + ` (merged→${keepParentId})`;
   parentsSheet.getRange(loseParentRow + 1, pNameCol + 1).setValue(pData[loseParentRow][pNameCol]);
 
+  // Store exactly which order cells moved, so undo can revert those and
+  // nothing else -- as long as it fits in one cell (50,000 character cap).
+  const mergeSnapshot = { keeperVariantSnapshot: keeperVariantSnapshot, loserVariantSnapshot: variantSnapshot };
+  if (JSON.stringify(mergeSnapshot).length + JSON.stringify(movedCells).length < 45000) {
+    mergeSnapshot.movedCells = movedCells;
+  } else {
+    mergeSnapshot.movedCellsOverflow = movedCells.length;
+  }
+
   logProductMergeHistory(
     keepParentId, keepParentName, loseParentId, loseParentName,
     variantPairs, ordersRepointed,
-    { keeperVariantSnapshot: keeperVariantSnapshot, loserVariantSnapshot: variantSnapshot }
+    mergeSnapshot
   );
 
   return jsonResponse({
@@ -2978,6 +3186,13 @@ function undoProductMergeAction(body) {
   const keeperVariantSnapshot = snapshot.keeperVariantSnapshot || {};
   const loserVariantSnapshot = snapshot.loserVariantSnapshot || {};
 
+  // Checked BEFORE anything is changed, so a refusal never leaves a
+  // half-undone merge behind.
+  if (snapshot.movedCellsOverflow) {
+    return jsonResponse({ error: 'Este merge movió demasiados pedidos (' + snapshot.movedCellsOverflow +
+      ') para deshacerse de forma segura y automática. No se cambió nada.' });
+  }
+
   // ─── Restore Parent ────────────────────────────────────────────────
   const parentsSheet = getProductParentsSheet();
   const pData = parentsSheet.getDataRange().getValues();
@@ -3005,65 +3220,96 @@ function undoProductMergeAction(body) {
   const rowByCatalogId = {};
   for (let i = 1; i < vData.length; i++) rowByCatalogId[String(vData[i][vCatalogCol])] = i;
 
+  // Only changed cells are written back (see the matching note in
+  // mergeProductsAction) -- never the whole Product Variants sheet.
+  const vTrack = makeCellTracker(vData);
+  const setCell = vTrack.set;
+
   // Restore every loser variant's Parent ID + Variant Name
   Object.keys(loserVariantSnapshot).forEach(cid => {
     const row = rowByCatalogId[cid];
     if (row === undefined) return;
-    vData[row][vParentCol] = loserVariantSnapshot[cid].parentId;
-    vData[row][vNameCol] = loserVariantSnapshot[cid].variantName;
+    setCell(row, vParentCol, loserVariantSnapshot[cid].parentId);
+    setCell(row, vNameCol, loserVariantSnapshot[cid].variantName);
   });
 
   // Restore keeper variants' pre-merge field values (undoes the SKU union)
   Object.keys(keeperVariantSnapshot).forEach(cid => {
     const row = rowByCatalogId[cid];
     if (row === undefined) return;
-    vData[row][vYourSkuCol] = keeperVariantSnapshot[cid].yourSku;
-    vData[row][vTiktokSkusCol] = keeperVariantSnapshot[cid].tiktokSkus;
-    vData[row][vNotesCol] = keeperVariantSnapshot[cid].notes;
+    setCell(row, vYourSkuCol, keeperVariantSnapshot[cid].yourSku);
+    setCell(row, vTiktokSkusCol, keeperVariantSnapshot[cid].tiktokSkus);
+    setCell(row, vNotesCol, keeperVariantSnapshot[cid].notes);
   });
 
-  variantsSheet.getRange(2, 1, vData.length - 1, vHeaders.length).setValues(vData.slice(1));
+  vTrack.flush(variantsSheet, [vTiktokSkusCol, vYourSkuCol, vCatalogCol, vParentCol]);
 
   // ─── Repoint Orders back to the loser's Catalog IDs ───────────────────
   const ordersSheet = getOrdersSheet();
-  const oLastRow = ordersSheet.getLastRow();
-  const oLastCol = ordersSheet.getLastColumn();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
   let ordersReverted = 0;
 
-  if (oLastRow > 1 && variantPairs.length) {
-    const reverseMap = {}; // keeper Catalog ID -> loser Catalog ID
-    variantPairs.forEach(p => { reverseMap[p.keep_catalog_id] = p.lose_catalog_id; });
-
-    const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
-    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
-    const PRODUCT_SLOTS = 30;
-    const catalogCols = [];
-    for (let n = 1; n <= PRODUCT_SLOTS; n++) {
-      const col = oh.indexOf('Product ' + n + ' Catalog ID');
-      if (col >= 0) catalogCols.push(col);
-    }
-
-    // NOTE: this reverts EVERY row currently pointing at a keeper Catalog ID
-    // that was involved in this merge back to the loser's ID. If the keeper
-    // variant received genuinely new orders (unrelated to this merge) after
-    // the merge happened, those get reverted too -- undo is intended to run
-    // soon after a mistaken merge, not long after, for this reason.
-    let touchedAnyRow = false;
-    oData.forEach(row => {
-      let touchedThisRow = false;
-      catalogCols.forEach(col => {
-        const current = String(row[col] || '');
-        if (reverseMap[current]) {
-          row[col] = reverseMap[current];
-          touchedThisRow = true;
-        }
-      });
-      if (touchedThisRow) { ordersReverted++; touchedAnyRow = true; }
+  if (ordersSheet.getLastRow() > 1 && variantPairs.length) {
+    const forwardMap = {};   // loser Catalog ID  -> keeper Catalog ID
+    const reverseMap = {};   // keeper Catalog ID -> loser Catalog ID
+    variantPairs.forEach(p => {
+      forwardMap[p.lose_catalog_id] = p.keep_catalog_id;
+      reverseMap[p.keep_catalog_id] = p.lose_catalog_id;
     });
+    const touchedRows = new Set();
 
-    if (touchedAnyRow) {
-      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+    if (Array.isArray(snapshot.movedCells)) {
+      // Exact revert: ONLY the cells this merge moved. The previous version
+      // reverted EVERY order pointing at the keeper variant -- including
+      // orders that belonged to the keeper long before the merge -- so
+      // undoing a merge of a 500-order variant with a 20-order duplicate
+      // would have moved all 520 orders onto the duplicate.
+      const orderIdVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+      const rowById = {};
+      orderIdVals.forEach((v, i) => { rowById[String(v)] = i; });
+      const colState = {};   // column index -> { vals, changed }
+
+      snapshot.movedCells.forEach(entry => {
+        const parts = String(entry).split('|');
+        const rowIdx = rowById[parts[0]];
+        const slot = parseInt(parts[1], 10);
+        const original = parts[2];
+        if (rowIdx === undefined) return;               // order deleted since the merge
+        const col = oh.indexOf('Product ' + slot + ' Catalog ID');
+        if (col < 0) return;
+        if (!colState[col]) colState[col] = { vals: readColumn(ordersSheet, col), changed: [] };
+        const st = colState[col];
+        // Only revert a cell that STILL holds the keeper ID this merge wrote;
+        // if someone has since edited that order, leave it alone.
+        if (String(st.vals[rowIdx] || '') !== forwardMap[original]) return;
+        st.vals[rowIdx] = original;
+        st.changed.push(rowIdx);
+        touchedRows.add(rowIdx);
+      });
+
+      Object.keys(colState).forEach(col => {
+        writeColumnChanges(ordersSheet, Number(col), colState[col].vals, colState[col].changed);
+      });
+    } else {
+      // Merge logged before moved cells were recorded: original behaviour
+      // (reverts every order currently pointing at a merged keeper variant).
+      for (let n = 1; n <= 30; n++) {
+        const col = oh.indexOf('Product ' + n + ' Catalog ID');
+        if (col < 0) continue;
+        const vals = readColumn(ordersSheet, col);
+        const changed = [];
+        vals.forEach((v, i) => {
+          const cur = String(v || '');
+          if (reverseMap[cur]) {
+            vals[i] = reverseMap[cur];
+            changed.push(i);
+            touchedRows.add(i);
+          }
+        });
+        writeColumnChanges(ordersSheet, col, vals, changed);
+      }
     }
+    ordersReverted = touchedRows.size;
   }
 
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
@@ -3076,63 +3322,296 @@ function undoProductMergeAction(body) {
 // DUPLICATE CUSTOMER DETECTION
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ─── Duplicate finder: how pairs are found and scored ──────────────────────
+//
+// WHY THIS WAS REWRITTEN. The previous finder only compared customers who
+// shared the exact same City string, so a real duplicate was never even
+// looked at if one record said "Querétaro", the other "Queretaro" and a
+// third had no city. Its phone comparison could not compare a masked TikTok
+// number ("953*****58") against a full Shopify number at all, and treated
+// "+52 953..." and "953..." as different people. Customers imported from the
+// original spreadsheet only carry a phone + an initial, which could just
+// barely reach the threshold and never exceed it.
+//
+// HOW IT WORKS NOW
+//  1. Each customer is normalised ONCE (accents stripped, ZIPs padded back
+//     to 5 digits, phones reduced to comparable digits, initials derived).
+//  2. Candidate pairs are generated from SEVERAL independent keys (same
+//     phone ending, ZIP, email, Shopify ID, similar username, same name) --
+//     any shared key makes two customers worth comparing. City is no longer
+//     a gate.
+//  3. Each pair is scored only on the signals BOTH records actually have.
+//     A signal that is missing on either side is skipped, not counted as a
+//     mismatch, and a pair with very little to compare is scaled down so a
+//     single coincidence can't look like a certainty.
+//  4. A few decisive identifiers (same Shopify ID, same email, same
+//     username/alias, same full phone) set a minimum score.
+//  5. Every pair carries a plain-language list of WHY it matched.
+// This only SUGGESTS pairs. Nothing is merged without a human decision.
+
 const DUPLICATE_SCORE_THRESHOLD = 55;
+const DUP_MAX_PAIRS = 1000;       // cap on how many pairs one scan returns
+const DUP_MAX_BUCKET = 250;       // a key shared by more customers than this is too common to be useful
+const DUP_WEIGHTS = { phone: 30, username: 15, street: 15, name: 10, initials: 10, zip: 10, city: 5, email: 5 };
+const DUP_REQUIRED_WEIGHT = 60;   // below this much comparable evidence, scores are scaled down
+const DUP_STREET_NOISE = ['calle', 'col', 'colonia', 'av', 'avenida', 'no', 'num', 'numero', 'int',
+  'interior', 'ext', 'exterior', 'fracc', 'fraccionamiento', 'cp', 'sn', 's', 'n'];
 
-function phoneSimilarityScore(phoneA, fullA, phoneB, fullB) {
-  const fA = normalizePhone(fullA);
-  const fB = normalizePhone(fullB);
-  if (fA && fB) return fA === fB ? 100 : 0;
+function dupStripAccents(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
 
-  const extract = (partial) => {
-    const s = String(partial || '');
-    const prefixM = s.match(/(\d+)\*/);
-    const suffixM = s.match(/\*(\d+)$/);
-    return { prefix: prefixM ? prefixM[1] : '', suffix: suffixM ? suffixM[1] : '' };
+// lowercase, no accents, punctuation -> spaces, single spaces
+function dupNorm(s) {
+  return dupStripAccents(s).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Mexican postcodes are 5 digits and every CDMX one starts with 0. If a
+// sheet ever stored one as a number (01000 -> 1000), put the zero back.
+function dupZip(z) {
+  const d = String(z || '').replace(/\D/g, '');
+  if (!d) return '';
+  return d.length < 5 ? d.padStart(5, '0') : d.slice(0, 5);
+}
+
+// Similarity 0..1 for short free text (street, name): the better of
+// character-level similarity and word overlap, so word order doesn't matter.
+function dupTextSim(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const ta = a.split(' ').filter(Boolean), tb = b.split(' ').filter(Boolean);
+  const setA = new Set(ta);
+  let inter = 0;
+  new Set(tb).forEach(t => { if (setA.has(t)) inter++; });
+  const union = new Set(ta.concat(tb)).size;
+  const jaccard = union ? inter / union : 0;
+  const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
+  const lev = ratio < 0.5 ? 0 : shopifyStringSimilarity(a, b);
+  return Math.max(lev, jaccard);
+}
+
+// Similarity 0..1 for single-token handles. Anything under 0.75 is not
+// worth reporting, so skip the expensive comparison when lengths rule it out.
+function dupFastSim(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (Math.min(a.length, b.length) / Math.max(a.length, b.length) < 0.75) return 0;
+  return shopifyStringSimilarity(a, b);
+}
+
+// A phone reduced to what can be compared: a full 10-digit number
+// (country code removed) and/or the digits TikTok leaves visible around the
+// mask ("(+52)953*****58" -> prefix 52953, suffix 58).
+function dupPhoneFeatures(partial, full) {
+  const out = { full10: '', prefix: '', suffix: '' };
+  const toTen = d => (d.length > 10 ? d.slice(-10) : d);
+
+  const f = normalizePhone(full);
+  if (f.length >= 10) out.full10 = toTen(f);
+
+  const p = String(partial || '');
+  if (p.indexOf('*') === -1) {
+    // Not masked: a complete number that ended up in the "partial" column.
+    const pd = normalizePhone(p);
+    if (!out.full10 && pd.length >= 10) out.full10 = toTen(pd);
+    return out;
+  }
+  const digits = p.replace(/[^\d*]/g, '');
+  const pm = digits.match(/^(\d+)\*/);
+  const sm = digits.match(/\*(\d+)$/);
+  let prefix = pm ? pm[1] : '';
+  if (prefix.length >= 4 && prefix.indexOf('52') === 0) prefix = prefix.slice(2);   // drop country code
+  out.prefix = prefix;
+  out.suffix = sm ? sm[1] : '';
+  return out;
+}
+
+// Turns "does the visible start match / does the visible end match" into a
+// similarity. A contradiction in either part means different numbers.
+// A match on both parts is strong but not certain (only ~5 digits are
+// visible); a match on one part alone is weak evidence.
+function dupPartialScore(prefixOk, suffixOk) {
+  if (prefixOk === false || suffixOk === false) return 0;
+  if (prefixOk && suffixOk) return 0.85;
+  if (suffixOk) return 0.4;
+  if (prefixOk) return 0.25;
+  return null;   // nothing comparable
+}
+
+// 0..1, or null when the two records don't have comparable phone data.
+function dupPhoneSim(A, B) {
+  const hasA = A.full10 || A.prefix || A.suffix;
+  const hasB = B.full10 || B.prefix || B.suffix;
+  if (!hasA || !hasB) return null;
+
+  if (A.full10 && B.full10) return A.full10 === B.full10 ? 1 : 0;
+
+  const full = A.full10 ? A : (B.full10 ? B : null);
+  if (full) {
+    // one full number, one masked number
+    const part = (full === A) ? B : A;
+    const f10 = full.full10;
+    const prefixOk = part.prefix ? f10.indexOf(part.prefix) === 0 || ('52' + f10).indexOf(part.prefix) === 0 : null;
+    const suffixOk = part.suffix ? f10.slice(-part.suffix.length) === part.suffix : null;
+    return dupPartialScore(prefixOk, suffixOk);
+  }
+
+  // both masked
+  const prefixOk = (A.prefix && B.prefix) ? A.prefix === B.prefix : null;
+  const suffixOk = (A.suffix && B.suffix) ? A.suffix === B.suffix : null;
+  return dupPartialScore(prefixOk, suffixOk);
+}
+
+// The letters of the recipient's name that are visible on a TikTok label
+// ("J*** N***" -> J, N), or the first letters of the real name when the
+// customer has one.
+function dupInitials(c, first, sur) {
+  const tt = String(c['Initials (TT Format)'] || '').trim();
+  let letters = [];
+  if (tt.indexOf('*') >= 0) {
+    const re = /([A-Za-z\u00C0-\u017F])\*+/g;
+    let m;
+    while ((m = re.exec(tt)) !== null) letters.push(dupStripAccents(m[1]).toUpperCase());
+  } else if (tt) {
+    const words = dupNorm(tt).split(' ').filter(Boolean);
+    letters = (words.length === 1 && words[0].length <= 3)
+      ? words[0].toUpperCase().split('')
+      : words.map(w => w[0].toUpperCase());
+  }
+  if (!letters.length) {
+    letters = (first + ' ' + sur).trim().split(' ').filter(Boolean).map(w => w[0].toUpperCase());
+  }
+  return letters;
+}
+
+function dupFeatures(c) {
+  const names = [normalizeUsername(c['Primary Username'])]
+    .concat(String(c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim())))
+    .filter(Boolean);
+  const first = dupNorm(c['First Name']);
+  const sur = dupNorm(c['Surname']);
+  const street = dupNorm(c['Street + Number']).split(' ')
+    .filter(t => t && DUP_STREET_NOISE.indexOf(t) < 0).join(' ');
+  return {
+    c: c,
+    names: Array.from(new Set(names)),
+    fullName: (first + ' ' + sur).trim(),
+    initials: dupInitials(c, first, sur),
+    street: street,
+    streetNums: street.match(/\d+/g) || [],
+    zip: dupZip(c['ZIP']),
+    city: dupNorm(c['City']),
+    email: String(c['Email'] || '').trim().toLowerCase(),
+    phone: dupPhoneFeatures(c['Phone Partial'], c['Phone Full']),
+    shopifyIds: String(c['Shopify Customer ID'] || '').split('/').map(s => s.trim()).filter(Boolean),
   };
-  const pa = extract(phoneA);
-  const pb = extract(phoneB);
-  if (!pa.prefix && !pa.suffix) return 0;
-  if (!pb.prefix && !pb.suffix) return 0;
-  if (pa.prefix === pb.prefix && pa.suffix === pb.suffix && (pa.prefix || pa.suffix)) return 100;
-  if (pa.suffix && pa.suffix === pb.suffix) return 50;
-  if (pa.prefix && pa.prefix === pb.prefix) return 40;
-  return 0;
 }
 
-function scoreCustomerPair(a, b) {
+// Scores one pair of normalised customers. Returns { score 0-100, reasons[] }.
+function dupScorePair(fa, fb) {
+  const reasons = [];
+  let wsum = 0, avail = 0, floor = 0;
+  const add = (key, sim) => {
+    if (sim === null || sim === undefined) return;
+    wsum += DUP_WEIGHTS[key] * sim;
+    avail += DUP_WEIGHTS[key];
+  };
+
+  // ── decisive identifiers ──
+  if (fa.shopifyIds.some(id => fb.shopifyIds.indexOf(id) >= 0)) {
+    floor = Math.max(floor, 100); reasons.push('Mismo ID de Shopify');
+  }
+  if (fa.email && fa.email === fb.email) {
+    floor = Math.max(floor, 95); reasons.push('Mismo correo'); add('email', 1);
+  }
+  const sharedName = fa.names.some(n => fb.names.indexOf(n) >= 0);
+  if (sharedName) {
+    floor = Math.max(floor, 95); reasons.push('Mismo usuario o alias'); add('username', 1);
+  }
+
+  // ── phone ──
+  const phoneSim = dupPhoneSim(fa.phone, fb.phone);
+  add('phone', phoneSim);
+  if (fa.phone.full10 && fa.phone.full10 === fb.phone.full10) {
+    floor = Math.max(floor, 85); reasons.push('Mismo teléfono');
+  } else if (phoneSim !== null && phoneSim >= 0.85) {
+    reasons.push('Teléfono parcial coincide');
+  } else if (phoneSim === 0) {
+    reasons.push('Teléfono distinto');
+  }
+
+  // ── usernames: only counted when similar (two accounts of one person
+  //    normally have DIFFERENT usernames, so a difference proves nothing) ──
+  if (!sharedName && fa.names.length && fb.names.length) {
+    let best = 0;
+    for (let i = 0; i < fa.names.length; i++) {
+      for (let j = 0; j < fb.names.length; j++) {
+        const s = dupFastSim(fa.names[i], fb.names[j]);
+        if (s > best) best = s;
+      }
+    }
+    if (best >= 0.75) { add('username', best); reasons.push('Usuarios parecidos (' + Math.round(best * 100) + '%)'); }
+  }
+
+  // ── real name ──
+  if (fa.fullName && fb.fullName) {
+    const s = dupTextSim(fa.fullName, fb.fullName);
+    add('name', s);
+    if (s >= 0.8) reasons.push('Nombre parecido');
+  }
+
+  // ── initials ──
+  let initSim = null;
+  if (fa.initials.length && fb.initials.length) {
+    const sa = new Set(fa.initials), sb = new Set(fb.initials);
+    let inter = 0;
+    sa.forEach(x => { if (sb.has(x)) inter++; });
+    initSim = inter / Math.max(sa.size, sb.size);
+    add('initials', initSim);
+    if (initSim >= 0.5) reasons.push('Iniciales coinciden');
+  }
+
+  // ── street (a different house number on a similar street is NOT a match) ──
+  if (fa.street.length >= 4 && fb.street.length >= 4) {
+    let s = dupTextSim(fa.street, fb.street);
+    if (fa.streetNums.length && fb.streetNums.length &&
+        !fa.streetNums.some(n => fb.streetNums.indexOf(n) >= 0)) s *= 0.5;
+    add('street', s);
+    if (s >= 0.8) reasons.push('Dirección parecida');
+  }
+
+  // ── ZIP / city ──
+  let zipDiffers = false, cityDiffers = false;
+  if (fa.zip && fb.zip) {
+    const same = fa.zip === fb.zip;
+    add('zip', same ? 1 : 0);
+    if (same) reasons.push('Mismo código postal'); else { zipDiffers = true; reasons.push('Código postal distinto'); }
+  }
+  if (fa.city && fb.city) {
+    const cs = fa.city === fb.city ? 1 : dupTextSim(fa.city, fb.city);
+    add('city', cs >= 0.8 ? cs : 0);
+    if (cs >= 0.8) reasons.push('Misma ciudad'); else cityDiffers = cs < 0.5;
+  }
+
+  // ── combine ──
   let score = 0;
+  if (avail > 0) score = (wsum / avail) * 100 * Math.min(1, avail / DUP_REQUIRED_WEIGHT);
 
-  score += phoneSimilarityScore(a['Phone Partial'], a['Phone Full'], b['Phone Partial'], b['Phone Full']) * 0.45;
-
-  const streetA = String(a['Street + Number'] || '');
-  const streetB = String(b['Street + Number'] || '');
-  if (streetA && streetB) {
-    score += shopifyStringSimilarity(streetA, streetB) * 100 * 0.25;
+  // A matching masked phone together with IDENTICAL visible initials is
+  // worth flagging even when little else is known -- unless the addresses
+  // contradict each other. Masked numbers only show ~5 digits, so on their
+  // own they coincide by chance between strangers; requiring every visible
+  // initial to match as well (not just the first) is what keeps that
+  // coincidence rate low while still catching the same person's two
+  // accounts, whose recipient name is masked identically.
+  if (phoneSim !== null && phoneSim >= 0.85 && initSim !== null && initSim >= 0.99 &&
+      !zipDiffers && !cityDiffers) {
+    floor = Math.max(floor, 60);
   }
 
-  if (a['ZIP'] && b['ZIP'] && String(a['ZIP']) === String(b['ZIP'])) {
-    score += 15;
-  }
-
-  const initA = String(a['Initials (TT Format)'] || '').charAt(0).toUpperCase();
-  const initB = String(b['Initials (TT Format)'] || '').charAt(0).toUpperCase();
-  if (initA && initA === initB) {
-    score += 10;
-  }
-
-  const nameA = `${a['First Name'] || ''} ${a['Surname'] || ''}`.trim();
-  const nameB = `${b['First Name'] || ''} ${b['Surname'] || ''}`.trim();
-  if (nameA && nameB) {
-    score += shopifyStringSimilarity(nameA, nameB) * 100 * 0.05;
-  }
-
-  return Math.round(Math.min(score, 100));
+  return { score: Math.round(Math.min(100, Math.max(score, floor))), reasons: reasons };
 }
 
-// Bucketed by City first -- two customers in different cities are
-// essentially never the same person, so this avoids a full O(n²)
-// comparison across everyone (~850 customers = ~360,000 pairs unbucketed;
-// bucketing cuts this to a low-thousands worst case).
 function getDismissedDuplicatesSheet() {
   return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Dismissed Duplicates');
 }
@@ -3155,37 +3634,62 @@ function findDuplicateCustomers(e) {
       .map(d => dismissedPairKey(d['Customer ID A'], d['Customer ID B']))
   );
 
+  const feats = customers.map(dupFeatures);
+
+  // Candidate generation: two customers are compared if they share ANY key.
   const buckets = {};
-  customers.forEach(c => {
-    const key = String(c['City'] || '').trim().toLowerCase() || '__no_city__';
-    if (!buckets[key]) buckets[key] = [];
-    buckets[key].push(c);
+  const addKey = (k, i) => { (buckets[k] || (buckets[k] = [])).push(i); };
+  feats.forEach((f, i) => {
+    if (f.phone.full10) {
+      addKey('pf:' + f.phone.full10, i);
+      addKey('ps:' + f.phone.full10.slice(-2), i);
+    } else if (f.phone.suffix.length >= 2) {
+      addKey('ps:' + f.phone.suffix.slice(-2), i);
+    }
+    if (f.zip) addKey('z:' + f.zip, i);
+    if (f.email) addKey('e:' + f.email, i);
+    f.shopifyIds.forEach(id => addKey('s:' + id, i));
+    f.names.forEach(n => {
+      addKey('u:' + n, i);
+      if (n.length >= 5) addKey('up:' + n.slice(0, 5), i);
+    });
+    if (f.fullName.indexOf(' ') > 0) addKey('n:' + f.fullName, i);
   });
 
+  const seen = new Set();
   const pairs = [];
-  const seenPairs = new Set();
+  let skippedKeys = 0;
 
-  Object.values(buckets).forEach(bucket => {
-    for (let i = 0; i < bucket.length; i++) {
-      for (let j = i + 1; j < bucket.length; j++) {
-        const a = bucket[i], b = bucket[j];
-        const pairKey = [a['Customer ID'], b['Customer ID']].sort().join('|');
-        if (seenPairs.has(pairKey)) continue;
-        seenPairs.add(pairKey);
+  Object.keys(buckets).forEach(k => {
+    const idxs = buckets[k];
+    if (idxs.length < 2) return;
+    if (idxs.length > DUP_MAX_BUCKET) { skippedKeys++; return; }
+    for (let x = 0; x < idxs.length; x++) {
+      for (let y = x + 1; y < idxs.length; y++) {
+        const ia = idxs[x], ib = idxs[y];
+        const pk = ia < ib ? ia + ',' + ib : ib + ',' + ia;
+        if (seen.has(pk)) continue;
+        seen.add(pk);
 
-        if (dismissed.has(pairKey)) continue;
+        const a = feats[ia].c, b = feats[ib].c;
+        if (dismissed.has(dismissedPairKey(a['Customer ID'], b['Customer ID']))) continue;
 
-        const score = scoreCustomerPair(a, b);
-        if (score >= threshold) {
-          pairs.push({ customer_a: a, customer_b: b, score: score });
+        const res = dupScorePair(feats[ia], feats[ib]);
+        if (res.score >= threshold) {
+          pairs.push({ customer_a: a, customer_b: b, score: res.score, reasons: res.reasons });
         }
       }
     }
   });
 
-  pairs.sort((x, y) => y.score - x.score);
+  pairs.sort((p, q) => q.score - p.score);
 
-  return jsonResponse({ pairs: pairs });
+  return jsonResponse({
+    pairs: pairs.slice(0, DUP_MAX_PAIRS),
+    total_matches: pairs.length,
+    truncated: pairs.length > DUP_MAX_PAIRS,
+    skipped_common_keys: skippedKeys,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3204,7 +3708,7 @@ const MERGE_BACKFILL_FIELDS = [
 
 // Merges loseId into keepId: backfills any of the keeper's blank fields from
 // the loser (so information is never lost just because the loser happens to
-// be the one getting retired), sums Shipment Count across both, unions
+// be the one getting retired), recomputes Shipment Count from the keeper's orders, unions
 // Aliases (also stripping the keeper's own username out of that list, in
 // case it was already recorded as an alias of the loser), repoints every
 // order pointing at the loser's Customer ID over to the winner, and marks
@@ -3260,16 +3764,13 @@ function mergeCustomersAction(body) {
     const keeperVal = String(data[keepRow][col] || '').trim();
     const loserVal = String(data[loseRow][col] || '').trim();
     if (!keeperVal && loserVal) {
-      sheet.getRange(keepRow + 1, col + 1).setValue(loserVal);
+      setCustomerCell(sheet, keepRow + 1, col + 1, field, loserVal);
     }
   });
 
-  // ─── Sum Shipment Count across both customers ──────────────────────
-  if (shipmentCountCol >= 0) {
-    const keeperCount = parseInt(data[keepRow][shipmentCountCol], 10) || 0;
-    const loserCount = parseInt(data[loseRow][shipmentCountCol], 10) || 0;
-    sheet.getRange(keepRow + 1, shipmentCountCol + 1).setValue(keeperCount + loserCount);
-  }
+  // Shipment Count is recomputed from the orders after they are repointed
+  // (below), instead of adding the two stored numbers together -- adding
+  // would carry forward any drift already present in either stored value.
 
   // ─── Union aliases (loser's username + loser's own aliases) into the
   //     keeper's Aliases, deduped, with the keeper's own username scrubbed
@@ -3293,19 +3794,30 @@ function mergeCustomersAction(body) {
   const oh = ordersSheet.getRange(1, 1, 1, oLastCol).getValues()[0];
   const oCustCol = oh.indexOf('Customer ID');
   let ordersRepointed = 0;
+  const movedOrderIds = [];
 
-  if (oLastRow > 1) {
-    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
-    oData.forEach((row) => {
-      if (String(row[oCustCol]) === String(loseId)) {
-        row[oCustCol] = keepId;
-        ordersRepointed++;
+  // Reads only the Customer ID and Order ID columns and writes back only
+  // the Customer ID column (plain text, safe to rewrite). It used to read
+  // all ~75 columns and write the whole sheet back. The Order ID of every
+  // order that moves is recorded so undo can move back exactly those.
+  if (oLastRow > 1 && oCustCol >= 0) {
+    const custVals = readColumn(ordersSheet, oCustCol);
+    const idVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+    const changed = [];
+    custVals.forEach((v, i) => {
+      if (String(v) === String(loseId)) {
+        custVals[i] = keepId;
+        changed.push(i);
+        if (idVals[i] !== undefined && idVals[i] !== '') movedOrderIds.push(String(idVals[i]));
       }
     });
-    if (ordersRepointed > 0) {
-      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
-    }
+    ordersRepointed = changed.length;
+    writeColumnChanges(ordersSheet, oCustCol, custVals, changed);
   }
+
+  // The keeper's Shipment Count now reflects the orders it actually owns.
+  SpreadsheetApp.flush();
+  recalculateShipmentCountsFor([keepId]);
 
   if (usernameCol >= 0) {
     sheet.getRange(loseRow + 1, usernameCol + 1).setValue(`${loserUsername} (merged→${keepId})`);
@@ -3315,6 +3827,15 @@ function mergeCustomersAction(body) {
     sheet.getRange(loseRow + 1, notesCol + 1).setValue(
       (existingNotes ? existingNotes + ' | ' : '') + `Merged into ${keepId} on ${nowISO()}`
     );
+  }
+
+  // Keep the exact list of moved orders for undo, as long as it fits in a
+  // single cell (Sheets caps a cell at 50,000 characters). If a customer had
+  // an enormous number of orders, undo falls back to the older heuristic.
+  if (JSON.stringify(movedOrderIds).length <= 40000) {
+    keeperSnapshot.movedOrderIds = movedOrderIds;
+  } else {
+    keeperSnapshot.movedOrderIdsOverflow = movedOrderIds.length;
   }
 
   logMergeHistory(keepId, keeperUsername, loseId, loserUsername, ordersRepointed, keeperSnapshot);
@@ -3487,7 +4008,7 @@ function undoMergeAction(body) {
     }
     const cShopifyIdCol = cHeaders.indexOf('Shopify Customer ID');
     if (cShopifyIdCol >= 0 && snapshot.shopifyCustomerId !== null && snapshot.shopifyCustomerId !== undefined) {
-      custSheet.getRange(keepRow + 1, cShopifyIdCol + 1).setValue(snapshot.shopifyCustomerId);
+      setCustomerCell(custSheet, keepRow + 1, cShopifyIdCol + 1, 'Shopify Customer ID', snapshot.shopifyCustomerId);
     }
     if (cShipmentCountCol >= 0 && snapshot.shipmentCount !== null && snapshot.shipmentCount !== undefined) {
       custSheet.getRange(keepRow + 1, cShipmentCountCol + 1).setValue(snapshot.shipmentCount);
@@ -3496,7 +4017,7 @@ function undoMergeAction(body) {
       MERGE_BACKFILL_FIELDS.forEach(field => {
         const col = cHeaders.indexOf(field);
         if (col >= 0 && snapshot.fields[field] !== undefined) {
-          custSheet.getRange(keepRow + 1, col + 1).setValue(snapshot.fields[field]);
+          setCustomerCell(custSheet, keepRow + 1, col + 1, field, snapshot.fields[field]);
         }
       });
     }
@@ -3517,24 +4038,44 @@ function undoMergeAction(body) {
   const oUsernameCol = oh.indexOf('Primary Username');
   let ordersReverted = 0;
 
-  // NOTE: this is a best-effort revert -- it cannot distinguish orders that
-  // legitimately belonged to the winner already vs. ones moved during this
-  // specific merge, if the winner had other orders before. Given Vel's
-  // current workflow (cleaning customers BEFORE the historical import, with
-  // zero active orders in the system at merge time), this ambiguity does
-  // not arise in practice today.
-  if (oLastRow > 1) {
-    const oData = ordersSheet.getRange(2, 1, oLastRow - 1, oLastCol).getValues();
-    oData.forEach(row => {
-      if (String(row[oCustCol]) === String(keepId) && row[oUsernameCol] === originalLoserUsername) {
-        row[oCustCol] = loseId;
-        ordersReverted++;
-      }
-    });
-    if (ordersReverted > 0) {
-      ordersSheet.getRange(2, 1, oData.length, oLastCol).setValues(oData);
+  if (oLastRow > 1 && oCustCol >= 0) {
+    const custVals = readColumn(ordersSheet, oCustCol);
+    const changed = [];
+
+    if (snapshot && Array.isArray(snapshot.movedOrderIds)) {
+      // Exact revert: ONLY the orders this specific merge moved. The old
+      // approach matched on username, which also pulled back any order
+      // created AFTER the merge under the loser's old TikTok username (those
+      // now correctly belong to the keeper).
+      const moved = new Set(snapshot.movedOrderIds.map(String));
+      const idVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+      custVals.forEach((v, i) => {
+        if (String(v) === String(keepId) && moved.has(String(idVals[i]))) {
+          custVals[i] = loseId;
+          changed.push(i);
+        }
+      });
+    } else {
+      // Merge logged before moved orders were recorded (or too many to
+      // store): best-effort revert by username, as before.
+      const userVals = readColumn(ordersSheet, oUsernameCol);
+      custVals.forEach((v, i) => {
+        if (String(v) === String(keepId) && userVals[i] === originalLoserUsername) {
+          custVals[i] = loseId;
+          changed.push(i);
+        }
+      });
     }
+
+    ordersReverted = changed.length;
+    writeColumnChanges(ordersSheet, oCustCol, custVals, changed);
   }
+
+  // Both customers' Shipment Counts are recomputed from their real orders
+  // (this supersedes the count restored from the snapshot above, which
+  // could be stale).
+  SpreadsheetApp.flush();
+  recalculateShipmentCountsFor([keepId, loseId]);
 
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
   if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
