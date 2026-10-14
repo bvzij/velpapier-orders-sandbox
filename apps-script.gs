@@ -786,7 +786,6 @@ function importTikTokOrders(body) {
 
   const rows = [], results = [], unresolved = [];
   let customersDirty = false;
-  const touchedCustomerCounts = {};  // Customer ID -> new total TikTok count, for the Customers sheet write
 
   (body.shipments || []).forEach(s => {
     const tid = String(s.tracking_id || '');
