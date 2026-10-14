@@ -988,6 +988,14 @@ let ajShopGroups = [];
 
 document.getElementById('aj-open-shopify-matches').addEventListener('click', ajShopOpen);
 
+// Deep link from Pedidos (the "Shopify pendiente" tab's "Abrir herramienta
+// en bloque" button) lands here as ajustes.html?open=shopify-matches and
+// opens the tool immediately, instead of making someone land on a settings
+// page and have to go find the right card themselves.
+if (new URLSearchParams(location.search).get('open') === 'shopify-matches') {
+  ajShopOpen();
+}
+
 function ajShopOpen() {
   const modalRoot = document.getElementById('modal-container');
   modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
