@@ -358,7 +358,7 @@ def annotate_pdf(pdf_bytes: bytes, shipment_meta: dict) -> bytes:
             "label_idx":      label_idx,
             "slip_indices":   slip_indices,
             "username":       username,
-            "shipment_count": meta.get("shipment_count", 0),
+            "shipment_count": meta.get("shipment_count"),  # None if missing/unknown -- do NOT default to 0
             "tracking_id":    tracking_id,
         })
 
@@ -433,9 +433,20 @@ def _insert_logo(page):
         pass
 
 
-def _annotate_packing_slip(page, username: str, shipment_count: int):
+def _annotate_packing_slip(page, username: str, shipment_count):
     if username:
-        count_label = "Nuevo" if not shipment_count else f"{shipment_count} env"
+        if shipment_count is None:
+            # Apps Script couldn't determine a real count for this shipment
+            # (e.g. a reprint/duplicate, or a possible_match awaiting
+            # review that never got a customer_id). Printing "Nuevo" here
+            # would be actively wrong -- show "?" instead so a bad/missing
+            # count is visible on the physical label rather than silently
+            # looking like a legitimate first-time customer.
+            count_label = "? env"
+        elif shipment_count == 0:
+            count_label = "Nuevo"
+        else:
+            count_label = f"{shipment_count} env"
         label = f"{username}  {count_label}"
         point = fitz.Point(10, page.rect.height - 5)
         try:
