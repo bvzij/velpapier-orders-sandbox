@@ -130,6 +130,7 @@ let activeRecords = [];
 let enviadoRecords = [];
 let archivedRecords = [];
 let tabDataLoaded = { enviado: false, archivo: false, qc: false };
+let shopifyPendingGroupsList = [];
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let customersById = {}; // keyed by Customer ID → Primary Username, for backfilling missing order-level usernames
 let pendingMatchesByShopifyOrderId = {}; // keyed by Shopify Order ID → pending match record, for the merge review UI
@@ -643,6 +644,25 @@ async function fetchArchivo() {
   archivedRecords = (data.records || []).map(mapFromApi);
   tabDataLoaded.archivo = true;
   rebuildAllRecords();
+}
+
+// Shopify orders that could not be auto-linked to a customer wait as their
+// own "Pending" rows and never show up in the normal order tabs via Status
+// (they're already real orders, just missing a Customer ID) -- this pulls
+// the SAME grouped-by-person view the Ajustes bulk tool uses, so the count
+// here and the count in the nav badge and the count inside the tool itself
+// can never drift apart; there is exactly one source of truth
+// (action=shopify_matches_review) for "how many people are still pending".
+// Kept deliberately separate from fetchActive/loadRecords: a failure here
+// must never block or slow down loading the main order list.
+async function fetchShopifyPending() {
+  try {
+    const data = await apiGet('action=shopify_matches_review');
+    shopifyPendingGroupsList = data.groups || [];
+  } catch (e) {
+    /* silent: the tab/badge just keep showing their last known value */
+  }
+  renderShopifyPendingTab();
 }
 
 async function loadRecords() {
@@ -1391,11 +1411,53 @@ function renderTikTokTab() {
   }).join('');
 }
 
+// Deliberately visible-but-not-blocking (see the to-do list item this came
+// from): a pending Shopify match means an order exists that isn't yet
+// attached to a real customer, so it's easy to pack and ship without ever
+// noticing the match was never confirmed. This can't be allowed to stop a
+// packer from working -- it just needs to be impossible to miss. The nav
+// badge (common.js) and this tab both read the same endpoint as the
+// Ajustes bulk tool, so all three numbers always agree.
+function renderShopifyPendingTab() {
+  const n = shopifyPendingGroupsList.length;
+  const badge = document.getElementById('badge-shopify-pend');
+  if (badge) {
+    badge.textContent = n;
+    badge.classList.toggle('has-items', n > 0);
+  }
+
+  const container = document.getElementById('shopify-pend-list');
+  if (!container) return;
+
+  if (n === 0) {
+    container.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:1rem 0">Sin pedidos de Shopify pendientes de confirmar. 🎉</div>';
+    return;
+  }
+
+  container.innerHTML = shopifyPendingGroupsList.map(g => {
+    const best = g.candidates && g.candidates[0];
+    const orders = (g.order_names || []).length
+      ? g.order_names.slice(0, 4).join(', ') + (g.order_names.length > 4 ? ` +${g.order_names.length - 4} más` : '')
+      : `${g.match_ids.length} pedido${g.match_ids.length !== 1 ? 's' : ''}`;
+    const suggestion = best
+      ? `Sugerido: <strong>${escapeHtml(best.username || best.name || best.customer_id)}</strong> (${best.same_shopify_id ? 'ID de Shopify coincide' : best.score + '%'})`
+      : 'Sin sugerencia — requiere crear cliente o revisar a mano';
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:13px;margin-bottom:2px">${escapeHtml(g.incoming.name || g.incoming.email || g.incoming.phone || 'Sin datos')}</div>
+          <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(orders)}</div>
+          <div style="font-size:11.5px;color:var(--text-faint);margin-top:2px">${suggestion}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'shopify-pend'].forEach(t => {
     const node = document.getElementById(`tab-${t}`);
     if (!node) return;
     node.style.display = t === tab ? 'block' : 'none';
@@ -1412,7 +1474,9 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
   renderBulkItems();
   updateUndoRedoButtons();
   loadRecords();
+  fetchShopifyPending();
   setInterval(autoRefresh, 10000);
+  setInterval(fetchShopifyPending, 60000);
   setInterval(async () => {
     try {
       const data = await apiGet('action=customers');
