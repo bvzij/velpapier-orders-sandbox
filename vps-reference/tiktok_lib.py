@@ -646,6 +646,30 @@ def build_shipments_csv(shipments: list, fieldnames: list) -> bytes:
         # so a 2nd or 3rd product in a combined shipment was silently
         # dropped from the exported row. Join every raw row's value for
         # each such field instead, same " + " convention as above.
+        # Positional: the Nth value in Product Name always corresponds
+        # to the Nth value in Quantity (and SKU ID, etc.) because every
+        # field below iterates the same raw_rows list in the same order.
+        PER_ITEM_FIELDS = [
+            "SKU ID", "Seller SKU", "Product Name", "Variation", "Quantity",
+        ]
+        missing_fields = [f for f in PER_ITEM_FIELDS if f not in fieldnames]
+        if missing_fields:
+            raise ValueError(
+                "build_shipments_csv: expected TikTok export column(s) not found: "
+                + ", ".join(missing_fields)
+                + ". TikTok likely renamed a column header -- check the raw CSV's "
+                + "header row against PER_ITEM_FIELDS above and update the list to match."
+            )
+        for field in PER_ITEM_FIELDS:
+            values = [(rr.get(field) or "").strip() for rr in raw_rows]
+            values = [v for v in values if v]
+            base[field] = " + ".join(values)
+
+        # Product-level fields are also per-line-item, not per-shipment --
+        # base[raw_rows[0]] only carries the first item's SKU/name/qty,
+        # so a 2nd or 3rd product in a combined shipment was silently
+        # dropped from the exported row. Join every raw row's value for
+        # each such field instead, same " + " convention as above.
         PER_ITEM_FIELDS = [
             "SKU ID", "Seller SKU", "Product Name", "Variation", "Quantity",
         ]
