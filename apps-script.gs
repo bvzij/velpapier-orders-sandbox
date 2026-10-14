@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-14.2';
+const SCRIPT_VERSION = '2026-10-14.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -2597,8 +2597,17 @@ const BACKFILL_FILL_ONLY_FIELDS = [
   'Shipped Time', 'Delivered Time', 'Cancelled Time', 'Cancel By', 'Cancel Reason'
 ];
 
+// order_id is digits-only here, matching the VPS's own cleaning
+// (tiktok_lib.py: re.sub(r"[^\d]", "", ...)) -- previously this only
+// .trim()'d whitespace, which happened to work because TikTok's stray
+// character has so far always been a trailing tab on Order ID, but any
+// other stray non-digit character there would make the VPS-cleaned and
+// Apps-Script-cleaned versions of the same order ID diverge and silently
+// fail to match. sku_id is left as trim-only, same as the VPS -- SKU IDs
+// are not digit-stripped on that side, so stripping them here would
+// break matching for any SKU ID containing non-digit characters.
 function backfillKey(orderId, skuId) {
-  return String(orderId || '').trim() + '||' + String(skuId || '').trim();
+  return String(orderId || '').replace(/\D/g, '') + '||' + String(skuId || '').trim();
 }
 
 // Shared by both preview and commit so the two can never drift apart.
