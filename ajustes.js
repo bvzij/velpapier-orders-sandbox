@@ -1100,9 +1100,14 @@ function ajShopRender(bannerHtml) {
 
 // Default choice for a person, from the slider.
 function ajShopDefaultChoice(g, threshold) {
-  if (g.already_linked) return 'link:' + g.already_linked;                       // certain: the Shopify ID is already on this customer
   const best = g.candidates[0];
-  return best && best.score >= threshold ? 'link:' + best.customer_id : 'skip';
+  if (!best) return 'skip';
+  // A candidate whose Shopify ID already matches this incoming group is
+  // strong evidence (same person ordering under two Shopify accounts), but
+  // NOT a certainty that needs no review -- it is still a suggestion to
+  // confirm, same as a high score. Pre-select it, but never silently.
+  if (best.same_shopify_id) return 'link:' + best.customer_id;
+  return best.score >= threshold ? 'link:' + best.customer_id : 'skip';
 }
 
 function ajShopApplyThreshold() {
@@ -1127,12 +1132,16 @@ function ajShopRefreshRow(row) {
     const c = g.candidates.find(x => x.customer_id === choice.slice(5));
     const lines = [c.name && c.username ? c.name : '', c.phone, c.email, c.city,
       c.shopify_ids ? 'Ya tiene ID(s): ' + c.shopify_ids : 'Sin ID de Shopify todavía'].filter(Boolean);
-    const certain = g.already_linked === c.customer_id;
+    // FIXED 2026-10-14: this pill used to claim certainty ("Seguro") and
+    // imply no review was needed. That was wrong -- it can also mean the
+    // same person simply has two Shopify accounts (a known, legitimate
+    // pattern), which is new information to confirm, not a leftover to
+    // wave through. Shown as corroborating evidence like any other reason.
     target.innerHTML = `<div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">SE VINCULA A</div>
       <div class="aj-dup-username">${VP.esc(ajShopLabel(c))} <span style="font-weight:400;color:var(--text-faint)">${VP.esc(c.customer_id)}</span></div>
       <div class="aj-dup-detail">${lines.map(l => VP.esc(l)).join('<br>')}</div>
-      <div>${certain ? ajShopPill('El ID de Shopify ya está en este cliente', true) : ''}${c.reasons.map(r => ajShopPill(r)).join('')}</div>`;
-    score.textContent = certain ? 'Seguro' : c.score + '%';
+      <div>${c.same_shopify_id ? ajShopPill('Este cliente ya tiene este mismo ID de Shopify', true) : ''}${c.reasons.map(r => ajShopPill(r)).join('')}</div>`;
+    score.textContent = c.same_shopify_id ? 'ID coincide' : c.score + '%';
   } else if (choice === 'new') {
     target.innerHTML = `<div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">SE CREA</div>
       <div class="aj-dup-detail">Un único cliente nuevo con estos datos de Shopify, para ${g.match_ids.length > 1 ? 'los ' + g.match_ids.length + ' pedidos' : 'el pedido'}.</div>`;
