@@ -476,6 +476,27 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .vp-nav-link.is-active { background: var(--text); color: var(--surface); }
 .vp-nav-link:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
 
+/* Persistent "pedidos de Shopify esperando confirmar cliente" count, shown
+   on the Pedidos nav link from every page. Deliberately styled like an
+   urgent notification badge (not the muted grey of .tab-badge) since the
+   whole point is that it should be hard to miss, anywhere in the app. */
+.vp-nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  margin-left: 5px;
+  border-radius: 20px;
+  font-size: 10.5px;
+  font-weight: 700;
+  background: var(--red-bg);
+  color: var(--red-text);
+  border: 0.5px solid var(--red-border);
+  vertical-align: middle;
+}
+
 .vp-nav-theme-toggle {
   margin-left: auto;
   flex-shrink: 0;
