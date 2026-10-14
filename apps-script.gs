@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-12.1';
+const SCRIPT_VERSION = '2026-10-13.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -415,7 +415,14 @@ function updateOrderStatus(body) {
 
 // ─── Recalculate shipment count ────────────────────────────────────────────────
 
-function recalculateShipmentCount(customerID) {
+// Single source of truth for "how many times has this customer shipped
+// before" -- counts TikTok + Shopify orders in Enviado/Archivado only.
+// Used both to recompute the stored Shipment Count (recalculateShipmentCount)
+// and to answer "what was their count BEFORE this order" for the TikTok
+// import label (countPriorShipments). Keeping one counting rule in one
+// place is what the label-count bugs (P8) were about -- three different
+// definitions existed before this fix.
+function countShippedOrders(customerID, excludeOrderID) {
   const ordersSheet = getOrdersSheet();
   const data = ordersSheet.getDataRange().getValues();
   const headers = data[0];
@@ -423,14 +430,21 @@ function recalculateShipmentCount(customerID) {
   const channelCol = headers.indexOf('Channel');
   const statusCol = headers.indexOf('Status');
   const customerIdCol = headers.indexOf('Customer ID');
+  const orderIdCol = headers.indexOf('Order ID');
 
   let count = 0;
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    if (row[customerIdCol] !== customerID) continue;
+    if (String(row[customerIdCol]) !== String(customerID)) continue;
+    if (excludeOrderID && String(row[orderIdCol]) === String(excludeOrderID)) continue;
     if (row[channelCol] !== 'TikTok' && row[channelCol] !== 'Shopify') continue;
     if (row[statusCol] === 'Enviado' || row[statusCol] === 'Archivado') count++;
   }
+  return count;
+}
+
+function recalculateShipmentCount(customerID) {
+  const count = countShippedOrders(customerID);
 
   const customersSheet = getCustomersSheet();
   const custData = customersSheet.getDataRange().getValues();
@@ -439,7 +453,7 @@ function recalculateShipmentCount(customerID) {
   const countCol = custHeaders.indexOf('Shipment Count');
 
   for (let i = 1; i < custData.length; i++) {
-    if (custData[i][custIdCol] === customerID) {
+    if (String(custData[i][custIdCol]) === String(customerID)) {
       customersSheet.getRange(i + 1, countCol + 1).setValue(count);
       break;
     }
@@ -723,13 +737,8 @@ function importTikTokOrders(body) {
   const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
 
   const trackingSet = {};
-  const shipCountMap = {};  // Customer ID -> count of ALL their TikTok orders ever (status-agnostic)
   allOrderData.forEach(r => {
     if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
-    const cid = String(r[iCustO] || '');
-    if (cid && r[iChanO] === 'TikTok') {
-      shipCountMap[cid] = (shipCountMap[cid] || 0) + 1;
-    }
   });
 
   // ─── Read customers sheet ONCE into a 2D array ───────────────────
@@ -791,12 +800,14 @@ function importTikTokOrders(body) {
 
     let customerID = s.customer_id || '';
     let primary    = s.username || '';
-    let shipCount  = 0;
+    // null (not 0) means "unknown" -- duplicates and unresolved shipments
+    // never had a real customer attached at this point, and the VPS/label
+    // code must NOT print "Nuevo" for those; 0 is reserved for a genuine
+    // first-time shipment.
+    let shipCount  = null;
 
     if (customerID) {
-      shipCountMap[customerID] = (shipCountMap[customerID] || 0) + 1;  // this new order counts too
-      shipCount = shipCountMap[customerID];
-      touchedCustomerCounts[customerID] = shipCount;
+      shipCount = countShippedOrders(customerID);  // count BEFORE this order, by design
       const idx = custRowMap[customerID];
       if (idx !== undefined) {
         const addr = s.address || {};
@@ -862,6 +873,13 @@ function importTikTokOrders(body) {
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
   });
 
+  // Duplicates never got a results.push inside the main loop above (they
+  // return early) -- give them an explicit "unknown" count too, so the VPS
+  // never silently defaults a reprint/duplicate to shipCount 0 ("Nuevo").
+  results.forEach(r => {
+    if (r.shipment_count === undefined) r.shipment_count = null;
+  });
+
     // ─── Write orders in ONE batch ────────────────────────────────────
   if (rows.length) {
     const startRow = orders.getLastRow() + 1;
@@ -869,17 +887,13 @@ function importTikTokOrders(body) {
     orders.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
   }
 
-  // ─── Write updated Shipment Counts (TikTok orders per customer) ───
-  const cCountCol = ch.indexOf('Shipment Count');
-  if (cCountCol >= 0) {
-    Object.keys(touchedCustomerCounts).forEach(cid => {
-      const idx = custRowMap[cid];
-      if (idx !== undefined) {
-        custData[idx][cCountCol] = touchedCustomerCounts[cid];
-        customersDirty = true;
-      }
-    });
-  }
+  // Shipment Count on the Customers sheet is NOT touched here anymore --
+  // it only reflects Enviado/Archivado orders (see countShippedOrders),
+  // and a freshly-imported order is still Pagado at this point, so there
+  // is nothing to add yet. It will update naturally the next time this
+  // order's status changes to Enviado, via applyStatusSideEffects ->
+  // recalculateShipmentCount. This removes the second, conflicting
+  // definition of "Shipment Count" that used to live in this function.
 
   // ─── Write modified customers back in ONE batch ───────────────────
   if (customersDirty && custData.length > 0) {
