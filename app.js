@@ -1695,3 +1695,258 @@ function showRelinkPicker(match) {
   renderResults('');
   searchInput.focus();
 }
+
+/* ============================================================================
+   SHOPIFY — revisión en bloque de coincidencias pendientes
+   Agrupa por persona los pedidos de Shopify "pendientes de fusión", muestra por
+   qué se sugiere cada cliente y aplica todo de una vez. Al vincular, el ID de
+   Shopify se guarda en el cliente principal. No cambia nada hasta pulsar Aplicar.
+   ==========================================================================*/
+
+const AJ_SHOP_DEFAULT_THRESHOLD = 80;   // desde qué % se preselecciona "Vincular"
+const AJ_SHOP_BATCH = 12;               // personas por petición (corta, para no bloquear otros guardados)
+let ajShopGroups = [];
+
+
+function ajShopOpen() {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">Coincidencias de Shopify pendientes</div>
+      <div class="aj-dup-threshold-row">
+        <span class="aj-dup-threshold-label" title="Las personas cuya mejor sugerencia llegue a este porcentaje aparecen ya marcadas para vincular. Puedes cambiar cualquiera a mano.">Marcar desde</span>
+        <input type="range" id="aj-shop-threshold" min="0" max="100" step="1" value="${AJ_SHOP_DEFAULT_THRESHOLD}">
+        <span class="aj-dup-threshold-value" id="aj-shop-threshold-value">${AJ_SHOP_DEFAULT_THRESHOLD}%</span>
+        <button class="btn aj-dup-refresh-btn" id="aj-shop-reload" title="Volver a cargar la lista" aria-label="Actualizar">↻</button>
+      </div>
+      <div class="aj-merge-scroll" id="aj-shop-content">
+        <div class="vp-loading">Cargando coincidencias pendientes…</div>
+      </div>
+      <div class="modal-actions">
+        <span id="aj-shop-summary" style="margin-right:auto;font-size:12px;color:var(--text-muted)"></span>
+        <button class="btn" id="aj-shop-close">Cerrar</button>
+        <button class="btn btn-primary" id="aj-shop-apply" disabled>Aplicar</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('aj-shop-close').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+  document.getElementById('aj-shop-reload').addEventListener('click', () => ajShopLoad());
+  document.getElementById('aj-shop-apply').addEventListener('click', ajShopApply);
+
+  const slider = document.getElementById('aj-shop-threshold');
+  slider.addEventListener('input', () => {
+    document.getElementById('aj-shop-threshold-value').textContent = slider.value + '%';
+    ajShopApplyThreshold();
+  });
+  ajShopLoad();
+}
+
+async function ajShopLoad(bannerHtml) {
+  const content = document.getElementById('aj-shop-content');
+  if (!content) return;
+  content.innerHTML = '<div class="vp-loading">Cargando coincidencias pendientes…</div>';
+  try {
+    await VP.ensureToken();
+    const data = await VP.get('action=shopify_matches_review');
+    if (data.error) throw new Error(data.error);
+    ajShopGroups = data.groups || [];
+    ajShopRender(bannerHtml || '');
+  } catch (e) {
+    content.innerHTML = `<div class="vp-empty-sm">Error al cargar: ${VP.esc(e.message)}</div>`;
+  }
+}
+
+function ajShopLabel(c) { return c.username || c.name || c.customer_id; }
+
+function ajShopPill(text, good) {
+  const colors = good ? 'background:var(--green-bg);color:var(--green-text)' : 'background:var(--surface2);color:var(--text-muted)';
+  return `<span style="display:inline-block;font-size:11px;padding:2px 7px;border-radius:999px;margin:3px 4px 0 0;${colors}">${VP.esc(text)}</span>`;
+}
+
+function ajShopIncomingHtml(g) {
+  const i = g.incoming;
+  const lines = [i.email, i.phone, [i.city, i.state].filter(Boolean).join(', '), i.zip ? 'CP ' + i.zip : '',
+    g.shopify_customer_id ? 'ID Shopify: ' + g.shopify_customer_id : 'Sin ID de Shopify (compra como invitado)'].filter(Boolean);
+  return `<div class="aj-dup-username">${VP.esc(i.name || i.email || i.phone || 'Sin datos')}</div>
+    <div class="aj-dup-detail">${lines.map(l => VP.esc(l)).join('<br>')}</div>`;
+}
+
+function ajShopRowHtml(g, idx) {
+  const orders = g.order_names.length
+    ? g.order_names.slice(0, 4).join(', ') + (g.order_names.length > 4 ? ` +${g.order_names.length - 4} más` : '')
+    : `${g.match_ids.length} pedido${g.match_ids.length !== 1 ? 's' : ''}`;
+  const opts = g.candidates.map(c =>
+    `<option value="link:${VP.esc(c.customer_id)}">Vincular a «${VP.esc(ajShopLabel(c))}» (${c.score}%)</option>`).join('');
+  return `<div class="aj-dup-pair" data-idx="${idx}">
+    <div class="aj-dup-header">
+      <span>${VP.esc(orders)} · ${g.match_ids.length} pedido${g.match_ids.length !== 1 ? 's' : ''}</span>
+      <span class="aj-dup-score" data-role="score"></span>
+    </div>
+    <div class="aj-dup-compare">
+      <div class="aj-dup-side">
+        <div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">EN SHOPIFY</div>
+        ${ajShopIncomingHtml(g)}
+      </div>
+      <div class="aj-dup-side" data-role="target"></div>
+    </div>
+    <div class="aj-dup-actions" style="justify-content:stretch">
+      <select data-role="choice" style="flex:1;min-width:0;padding:7px 8px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font:inherit;font-size:13px">
+        ${opts}
+        <option value="new">Crear un cliente nuevo</option>
+        <option value="skip">Dejar pendiente (no cambiar nada)</option>
+      </select>
+    </div>
+  </div>`;
+}
+
+function ajShopRender(bannerHtml) {
+  const content = document.getElementById('aj-shop-content');
+  if (!ajShopGroups.length) {
+    content.innerHTML = (bannerHtml || '') + '<div class="vp-empty-sm">No hay coincidencias pendientes. 🎉</div>';
+    ajShopUpdateSummary();
+    return;
+  }
+  content.innerHTML = (bannerHtml || '') + ajShopGroups.map(ajShopRowHtml).join('');
+  content.querySelectorAll('.aj-dup-pair').forEach(row => {
+    row.querySelector('[data-role="choice"]').addEventListener('change', () => {
+      row.dataset.touched = '1';          // the slider no longer overrides this one
+      ajShopRefreshRow(row);
+      ajShopUpdateSummary();
+    });
+  });
+  ajShopApplyThreshold();
+}
+
+// Default choice for a person, from the slider.
+function ajShopDefaultChoice(g, threshold) {
+  const best = g.candidates[0];
+  if (!best) return 'skip';
+  // A candidate whose Shopify ID already matches this incoming group is
+  // strong evidence (same person ordering under two Shopify accounts), but
+  // NOT a certainty that needs no review -- it is still a suggestion to
+  // confirm, same as a high score. Pre-select it, but never silently.
+  if (best.same_shopify_id) return 'link:' + best.customer_id;
+  return best.score >= threshold ? 'link:' + best.customer_id : 'skip';
+}
+
+function ajShopApplyThreshold() {
+  const threshold = parseInt(document.getElementById('aj-shop-threshold').value, 10);
+  document.querySelectorAll('#aj-shop-content .aj-dup-pair').forEach(row => {
+    if (row.dataset.touched === '1') return;
+    const g = ajShopGroups[parseInt(row.dataset.idx, 10)];
+    row.querySelector('[data-role="choice"]').value = ajShopDefaultChoice(g, threshold);
+    ajShopRefreshRow(row);
+  });
+  ajShopUpdateSummary();
+}
+
+// Redraws the right-hand side + score badge for the current choice.
+function ajShopRefreshRow(row) {
+  const g = ajShopGroups[parseInt(row.dataset.idx, 10)];
+  const choice = row.querySelector('[data-role="choice"]').value;
+  const target = row.querySelector('[data-role="target"]');
+  const score = row.querySelector('[data-role="score"]');
+
+  if (choice.indexOf('link:') === 0) {
+    const c = g.candidates.find(x => x.customer_id === choice.slice(5));
+    const lines = [c.name && c.username ? c.name : '', c.phone, c.email, c.city,
+      c.shopify_ids ? 'Ya tiene ID(s): ' + c.shopify_ids : 'Sin ID de Shopify todavía'].filter(Boolean);
+    // FIXED 2026-10-14: this pill used to claim certainty ("Seguro") and
+    // imply no review was needed. That was wrong -- it can also mean the
+    // same person simply has two Shopify accounts (a known, legitimate
+    // pattern), which is new information to confirm, not a leftover to
+    // wave through. Shown as corroborating evidence like any other reason.
+    target.innerHTML = `<div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">SE VINCULA A</div>
+      <div class="aj-dup-username">${VP.esc(ajShopLabel(c))} <span style="font-weight:400;color:var(--text-faint)">${VP.esc(c.customer_id)}</span></div>
+      <div class="aj-dup-detail">${lines.map(l => VP.esc(l)).join('<br>')}</div>
+      <div>${c.same_shopify_id ? ajShopPill('Este cliente ya tiene este mismo ID de Shopify', true) : ''}${c.reasons.map(r => ajShopPill(r)).join('')}</div>`;
+    score.textContent = c.same_shopify_id ? 'ID coincide' : c.score + '%';
+  } else if (choice === 'new') {
+    target.innerHTML = `<div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">SE CREA</div>
+      <div class="aj-dup-detail">Un único cliente nuevo con estos datos de Shopify, para ${g.match_ids.length > 1 ? 'los ' + g.match_ids.length + ' pedidos' : 'el pedido'}.</div>`;
+    score.textContent = '';
+  } else {
+    target.innerHTML = `<div style="font-size:11px;color:var(--text-faint);margin-bottom:3px">SIN CAMBIOS</div>
+      <div class="aj-dup-detail">Se queda pendiente; podrás decidirlo después.</div>`;
+    score.textContent = '';
+  }
+  row.style.opacity = choice === 'skip' ? '0.75' : '1';
+}
+
+// What would be applied right now.
+function ajShopCollect() {
+  const items = [];
+  document.querySelectorAll('#aj-shop-content .aj-dup-pair').forEach(row => {
+    const g = ajShopGroups[parseInt(row.dataset.idx, 10)];
+    const choice = row.querySelector('[data-role="choice"]').value;
+    if (choice === 'skip') return;
+    items.push(choice === 'new'
+      ? { key: g.key, match_ids: g.match_ids, decision: 'new' }
+      : { key: g.key, match_ids: g.match_ids, decision: 'link', customer_id: choice.slice(5) });
+  });
+  return items;
+}
+
+function ajShopUpdateSummary() {
+  const items = ajShopCollect();
+  const link = items.filter(i => i.decision === 'link').length;
+  const fresh = items.filter(i => i.decision === 'new').length;
+  const total = ajShopGroups.length;
+  const summary = document.getElementById('aj-shop-summary');
+  const btn = document.getElementById('aj-shop-apply');
+  if (!summary || !btn) return;
+  btn.dataset.armed = '';
+  summary.textContent = total
+    ? `${VP.num(total)} persona${total !== 1 ? 's' : ''} · ${VP.num(link)} a vincular` + (fresh ? ` · ${VP.num(fresh)} nuevo${fresh !== 1 ? 's' : ''}` : '')
+    : '';
+  btn.textContent = items.length ? `Aplicar (${VP.num(items.length)})` : 'Aplicar';
+  btn.disabled = !items.length;
+}
+
+async function ajShopApply() {
+  const btn = document.getElementById('aj-shop-apply');
+  const items = ajShopCollect();
+  if (!items.length) return;
+
+  // Two clicks on purpose: the first one only asks "are you sure".
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = `¿Seguro? Aplicar ${VP.num(items.length)} cambio${items.length !== 1 ? 's' : ''}`;
+    setTimeout(() => { if (btn.dataset.armed === '1') ajShopUpdateSummary(); }, 6000);
+    return;
+  }
+
+  const summary = document.getElementById('aj-shop-summary');
+  const content = document.getElementById('aj-shop-content');
+  content.querySelectorAll('select').forEach(s => { s.disabled = true; });
+  document.getElementById('aj-shop-threshold').disabled = true;
+  btn.disabled = true;
+
+  const failed = [];
+  let applied = 0, done = 0, aborted = '';
+  for (let i = 0; i < items.length; i += AJ_SHOP_BATCH) {
+    const batch = items.slice(i, i + AJ_SHOP_BATCH);
+    summary.textContent = `Aplicando… ${VP.num(done)} de ${VP.num(items.length)}`;
+    try {
+      const res = await VP.post({ action: 'resolve_shopify_matches_bulk', items: batch });
+      if (res.error) throw new Error(res.error);        // the server answers HTTP 200 even for errors
+      applied += res.applied || 0;
+      (res.results || []).filter(r => !r.ok).forEach(r => failed.push(r));
+    } catch (e) {
+      aborted = e.message;                              // already-applied batches stay applied; the reload shows what is left
+      break;
+    }
+    done += batch.length;
+  }
+
+  const nameOf = key => { const g = ajShopGroups.find(x => x.key === key); return g ? (g.incoming.name || g.incoming.email || key) : key; };
+  let banner = `<div style="padding:10px 12px;margin-bottom:10px;border-radius:var(--radius-sm);font-size:13px;background:${aborted || failed.length ? 'var(--amber-bg)' : 'var(--green-bg)'};color:${aborted || failed.length ? 'var(--amber-text)' : 'var(--green-text)'}">
+    ✓ ${VP.num(applied)} persona${applied !== 1 ? 's' : ''} aplicada${applied !== 1 ? 's' : ''}.`;
+  if (failed.length) banner += `<br>No se pudo aplicar a ${VP.num(failed.length)}: ` + failed.map(f => `${VP.esc(nameOf(f.key))} (${VP.esc(f.error)})`).join('; ');
+  if (aborted) banner += `<br>Se detuvo: ${VP.esc(aborted.replace(/[.\s]+$/, ''))}. Lo ya aplicado se conserva; la lista de abajo muestra lo que falta.`;
+  banner += '</div>';
+
+  document.getElementById('aj-shop-threshold').disabled = false;
+  await ajShopLoad(banner);
+}
