@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-13.2';
+const SCRIPT_VERSION = '2026-10-13.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -61,6 +61,19 @@ function findOrderRow(sheet, orderID) {
   return found.getRow();
 }
 
+// String.fromCharCode(65 + n) silently produces garbage past column Z
+// (index 26 -> '['). The QC sheet is already wide enough for this to
+// matter if a column is ever inserted.
+function colLetter(index) {
+  let n = index + 1, out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
 function jsonResponse(data, status) {
   const output = ContentService.createTextOutput(JSON.stringify(data));
   output.setMimeType(ContentService.MimeType.JSON);
@@ -69,11 +82,45 @@ function jsonResponse(data, status) {
 
 // ─── Customer ID generator ─────────────────────────────────────────────────────
 
+// Appends one Customers row built BY HEADER NAME, and forces the
+// identifier columns to plain text first so Sheets cannot re-parse a long
+// Shopify ID into scientific notation or strip the leading zero off a
+// CDMX postcode (every ZIP in Mexico City starts with 0).
+const CUSTOMER_ID_COLUMNS = ['Customer ID', 'Shopify Customer ID', 'ZIP', 'Phone Partial', 'Phone Full'];
+
+function appendCustomerRowByHeader(sheet, fieldValues) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const row = headers.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
+  const startRow = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, headers, CUSTOMER_ID_COLUMNS, startRow, 1);
+  sheet.getRange(startRow, 1, 1, row.length).setValues([row]);
+  return startRow;
+}
+
+// One shared rule for "what do we call this customer on screen".
+// Falls back through username -> real name -> email, so a Shopify-created
+// customer with no TikTok username is never rendered as nameless.
+function customerDisplayName(customerId) {
+  if (!customerId) return '';
+  const cust = sheetToObjects(getCustomersSheet())
+    .find(c => String(c['Customer ID']) === String(customerId));
+  if (!cust) return '';
+  const uname = String(cust['Primary Username'] || '').trim();
+  if (uname) return uname;
+  const full = [cust['First Name'], cust['Surname']]
+    .map(v => String(v || '').trim()).filter(Boolean).join(' ');
+  if (full) return full;
+  return String(cust['Email'] || '').trim();
+}
+
 function generateCustomerID(sheet) {
   const data = sheet.getDataRange().getValues();
   if (data.length < 2) return 'CUST-001';
+  // Was hardcoded to column A; now located by header so reordering the
+  // Customers sheet cannot make this silently generate 'CUST-001' forever.
+  const idCol = Math.max(0, (data[0] || []).indexOf('Customer ID'));
   const ids = data.slice(1)
-    .map(r => r[0])
+    .map(r => r[idCol])
     .filter(id => typeof id === 'string' && id.startsWith('CUST-'))
     .map(id => parseInt(id.replace('CUST-', ''), 10))
     .filter(n => !isNaN(n));
@@ -138,10 +185,14 @@ function doGet(e) {
   try {
     const action = e.parameter.action || 'orders';
 
-    if (action === 'ping') return jsonResponse({ ok: true });
-    if (action !== 'version' && !authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
-    if (action === 'shopify_matches') return getShopifyMatches(e);
+    // 'ping' is what the frontend's ensureToken() uses to validate a saved
+    // token. It previously answered OK *before* the auth check, so ANY
+    // token -- wrong, blank, or rotated -- passed validation and the user
+    // was never re-prompted. It must be authenticated like everything else.
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
+    if (!authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
+    if (action === 'ping') return jsonResponse({ ok: true });
+    if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'active_session') return getActiveSession(e);
@@ -223,18 +274,40 @@ function doGet(e) {
 
 // ─── POST handler ──────────────────────────────────────────────────────────────
 
+// Every POST action mutates a sheet. Several of them (QC finalize, the
+// merge/undo actions, the importers) read a whole sheet, change a few
+// rows in memory, then write the WHOLE sheet back -- so two overlapping
+// requests could silently discard each other's work ("last writer wins").
+// The ID generators (CUST-/VAR-/PARENT-/QC-) are "max + 1" scans with the
+// same race. Serialising all writes behind one script lock removes both
+// problems without restructuring the individual functions.
+// 30s is deliberately longer than any single action should take; if it
+// is ever exceeded the caller gets a clean, explicit "busy" error rather
+// than a half-applied write.
+function withWriteLock(fn) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return jsonResponse({ error: 'Servidor ocupado, intenta de nuevo en unos segundos.' });
+  }
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const action = body.action;
     if (!authOk(body.token)) return jsonResponse({ error: 'unauthorized' });
+    return withWriteLock(function () {
 
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
     if (action === 'update_order_status') return updateOrderStatus(body);
     if (action === 'add_alias') return addAlias(body);
     if (action === 'update_packed_date') return updatePackedDate(body);
-    if (action === 'migrate_order') return migrateOrder(body);
     if (action === 'stamp_customer_ids') { stampCustomerIDs(); return jsonResponse({ result: 'done' }); }
     if (action === 'update_order') return updateOrder(body);
     if (action === 'delete_order') return deleteOrder(body);
@@ -255,9 +328,9 @@ function doPost(e) {
     if (action === 'undo_product_merge') return undoProductMergeAction(body);
     if (action === 'backfill_tiktok_preview') return backfillTikTokHistoryPreview(body);
     if (action === 'backfill_tiktok_commit') return backfillTikTokHistoryCommit(body);
-    
 
     return jsonResponse({ error: 'Unknown action' });
+    });
 
   } catch (err) {
     return jsonResponse({ error: err.message });
@@ -296,10 +369,22 @@ function createOrder(body) {
   let primaryUsername = body.username || '';
   let mergeFlag = false;
 
-  if (resolution) {
+  // A 'fuzzy' hit is a GUESS (prefix-minus-one-character), e.g. existing
+  // "maria" captures incoming "mariana.art". Writing that guess into the
+  // order's Customer ID silently attaches one person's order to another
+  // person's record. Only exact/alias matches are trusted here; a fuzzy
+  // hit is returned as a suggestion for the UI to confirm, and the order
+  // is left unlinked so it shows up in the normal review flow.
+  let fuzzySuggestion = null;
+  if (resolution && resolution.confidence !== 'fuzzy') {
     customerID = resolution.customer['Customer ID'];
     primaryUsername = resolution.customer['Primary Username'];
-    if (resolution.confidence === 'fuzzy') mergeFlag = true;
+  } else if (resolution && resolution.confidence === 'fuzzy') {
+    mergeFlag = true;
+    fuzzySuggestion = {
+      customer_id: resolution.customer['Customer ID'],
+      primary_username: resolution.customer['Primary Username'],
+    };
   }
 
     let status = body.status || 'No Pagado';
@@ -497,30 +582,9 @@ function updatePackedDate(body) {
 
 // ─── Migrate order ──────────────────────────────────────────────────────────────
 
-function migrateOrder(body) {
-  const ordersSheet = getOrdersSheet();
-
-  const row = [
-    body.order_id || generateUUID(),
-    body.tracking_id || '',
-    '',
-    body.username || '',
-    body.channel || 'Manual',
-    body.status || 'No Pagado',
-    body.products || '',
-    body.price || 0,
-    body.shopify_order_id || '',
-    body.notes || '',
-    body.created_date || nowISO(),
-    body.packed_date || '',
-    body.shipped_date || '',
-    body.archive_date || '',
-    ''
-  ];
-
-  ordersSheet.appendRow(row);
-  return jsonResponse({ result: 'migrated', order_id: row[0] });
-}
+// migrateOrder() removed: it was dead code (no frontend caller) and
+// built its row by fixed column position, so it would have corrupted
+// the Orders sheet if it had ever been invoked after a column change.
 
 // ─── Stamp customer IDs ──────────────────────────────────────────────────────
 
@@ -536,8 +600,14 @@ function stampCustomerIDs() {
 
   let stamped = 0;
   let notFound = 0;
+  let skippedFuzzy = 0;
   let notFoundList = [];
 
+  // This runs after EVERY alias confirmation and sweeps every unresolved
+  // order in the sheet. It previously accepted 'fuzzy' matches and wrote
+  // them one cell at a time. A fuzzy match is a guess, so writing it
+  // unattended could attach an order to the wrong customer with nothing
+  // on screen to review -- only exact and alias matches are written now.
   orders.forEach(order => {
     if (order['Customer ID']) return;
 
@@ -546,16 +616,18 @@ function stampCustomerIDs() {
 
     const resolution = findCustomerByUsername(customers, username);
 
-    if (resolution) {
+    if (resolution && resolution.confidence !== 'fuzzy') {
       ordersSheet.getRange(order._rowIndex, customerIDCol).setValue(resolution.customer['Customer ID']);
       stamped++;
+    } else if (resolution) {
+      skippedFuzzy++;
     } else {
       notFound++;
       notFoundList.push(username);
     }
   });
 
-  Logger.log(`Stamped: ${stamped} | Not found: ${notFound}`);
+  Logger.log(`Stamped: ${stamped} | Fuzzy skipped: ${skippedFuzzy} | Not found: ${notFound}`);
   Logger.log(`Not found list: ${[...new Set(notFoundList)].join(', ')}`);
 }
 
@@ -723,7 +795,6 @@ function authOk(t) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function importTikTokOrders(body) {
-  Logger.log('DEBUG shipments[0]: ' + JSON.stringify((body.shipments || [])[0]));
   const orders = getOrdersSheet();
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
@@ -936,12 +1007,26 @@ function createCustomersBulk(body) {
     }
   });
 
+  // Merged-away records (Primary Username like "name (merged→CUST-775)")
+  // must be excluded here. normalizeUsername() strips the "(merged→...)"
+  // suffix, so without this filter a new TikTok order for an
+  // already-merged customer silently matches the RETIRED record and
+  // attaches to a customer ID that is no longer in use, instead of the
+  // keeper it was merged into. Same exclusion findCustomerByUsername()
+  // already applies. Aliases are checked too -- a customer whose primary
+  // is "maria_art" with alias "mariaarts" previously got a duplicate
+  // record created when "mariaarts" came in from TikTok.
+  const activeExisting = existing.filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+
   const rows = [], created = [];
   (body.customers || []).forEach(cust => {
     if (cust.primary_username) {
-      const dup = existing.find(c =>
-        normalizeUsername(c['Primary Username']) === normalizeUsername(cust.primary_username)
-      );
+      const incomingName = normalizeUsername(cust.primary_username);
+      const dup = activeExisting.find(c => {
+        if (normalizeUsername(c['Primary Username']) === incomingName) return true;
+        const aliases = (c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim()));
+        return aliases.includes(incomingName);
+      });
       if (dup) {
         created.push({ username: cust.primary_username, customer_id: dup['Customer ID'], existed: true });
         return;
@@ -1030,7 +1115,7 @@ function saveQC(body) {
     if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
   } else {
     const existingRow = findRowByColumn(qcSheet, h.indexOf('Tracking ID') >= 0
-      ? String.fromCharCode(65 + h.indexOf('Tracking ID')) : 'B', body.tracking_id);
+      ? colLetter(h.indexOf('Tracking ID')) : 'B', body.tracking_id);
     if (existingRow) {
       row = existingRow;
       qcId = qcSheet.getRange(existingRow, h.indexOf('QC ID') + 1).getValue();
@@ -1275,8 +1360,10 @@ function getSessions(e) {
 
 // Start a new session. Fails if one is already active (only one at a time).
 function startSession(body) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);  // wait up to 10s for exclusive access — prevents two devices creating duplicate sessions
+  // The script lock is now taken centrally by withWriteLock() in doPost.
+  // Re-acquiring it here would deadlock this execution against its own
+  // outer hold, so the inner lock has been removed. The guarantee it
+  // provided (no two devices creating duplicate sessions) is unchanged.
   try {
     const sheet = getSessionsSheet();
     const rows = sheetToObjects(sheet);
@@ -1297,7 +1384,7 @@ function startSession(body) {
 
     return jsonResponse({ result: 'started', session_id: sessionId });
   } finally {
-    lock.releaseLock();
+    // no-op: the script lock is released by withWriteLock() in doPost.
   }
 }
 
@@ -1486,11 +1573,15 @@ function resolveLineItemsBatch(allLineItems) {
   const iPId = pHeaders.indexOf('Parent ID');
   const iPName = pHeaders.indexOf('Parent Name');
 
+  // Merged-away parents/variants keep their names and their TikTok SKU
+  // IDs, and the SKU lookup below is "last row wins" -- the loser usually
+  // sits lower in the sheet, so future imports were routing straight back
+  // onto the dead variant and quietly re-splitting what was just merged.
   const parents = pData.slice(1).map((r, i) => ({
     rowIndex: i + 2,
     parentId: r[iPId],
     parentName: r[iPName],
-  }));
+  })).filter(p => !String(p.parentName || '').includes('(merged→'));
 
   const vData = variantsSheet.getDataRange().getValues();
   const vHeaders = vData[0] || ['Catalog ID', 'Parent ID', 'Variant Name', 'Your SKU', 'TikTok SKU IDs', 'Notes', 'Created Date'];
@@ -1505,7 +1596,7 @@ function resolveLineItemsBatch(allLineItems) {
     parentId: r[iVParent],
     variantName: r[iVName],
     tiktokSkuIds: String(r[iVSkus] || '').split(',').map(s => s.trim()).filter(Boolean),
-  }));
+  })).filter(v => !String(v.variantName || '').includes('(merged→'));
 
   const sData = suggestionsSheet.getDataRange().getValues();
   const sHeaders = sData[0] || ['New Parent Name Suggested', 'Suggested Parent ID', 'Similarity Score', 'Decision', 'Decided Date'];
@@ -1618,7 +1709,13 @@ function resolveLineItemsBatch(allLineItems) {
       .setValues(newParentRows);
   }
   if (newVariantRows.length) {
-    variantsSheet.getRange(variantsSheet.getLastRow() + 1, 1, newVariantRows.length, newVariantRows[0].length)
+    // 19-digit TikTok SKU IDs land here. Without plain-text format Sheets
+    // rounds them into scientific notation, the next import can no longer
+    // find the SKU by ID, and it falls through to name matching -- which
+    // is how duplicate variants were being created in the first place.
+    const vStart = variantsSheet.getLastRow() + 1;
+    forceTextFormat(variantsSheet, vHeaders, ['Catalog ID', 'Parent ID', 'TikTok SKU IDs'], vStart, newVariantRows.length);
+    variantsSheet.getRange(vStart, 1, newVariantRows.length, newVariantRows[0].length)
       .setValues(newVariantRows);
   }
   if (newSuggestionRows.length) {
@@ -1634,6 +1731,7 @@ function resolveLineItemsBatch(allLineItems) {
       const currentVal = variantsSheet.getRange(rowIndex, iVSkus + 1).getValue();
       const currentList = String(currentVal || '').split(',').map(s => s.trim()).filter(Boolean);
       const merged = currentList.concat(skuAdditions[rowIndexStr]);
+      variantsSheet.getRange(rowIndex, iVSkus + 1).setNumberFormat('@');
       variantsSheet.getRange(rowIndex, iVSkus + 1).setValue(merged.join(', '));
     });
   }
@@ -1770,7 +1868,11 @@ function scoreShopifyMatch(incoming, customer) {
 // Returns: { tier: 'auto'|'review'|'new', customerId, matchRow }
 function resolveShopifyCustomer(incoming) {
   const customersSheet = getCustomersSheet();
-  const customers = sheetToObjects(customersSheet);
+  // A merged-away loser keeps its Shopify Customer ID, so without this
+  // filter Tier 1 below can link a brand new Shopify order straight onto
+  // a retired record. Tier 2 scoring had the same hole.
+  const customers = sheetToObjects(customersSheet)
+    .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
 
   // ─── Tier 1: Shopify Customer ID exact match ──────────────────────
   if (incoming.shopifyCustomerId) {
@@ -1832,20 +1934,10 @@ function logShopifyMatch(incoming, resolution, shopifyOrderId, orderName) {
 }
 
 function importShopifyOrder(body) {
-  const lock = LockService.getScriptLock();
-  const gotLock = lock.tryLock(30000); // wait up to 30s for exclusive access
-  if (!gotLock) {
-    // Another order is mid-write and we waited too long -- fail loudly rather
-    // than risk a silent corrupt write. N8N should retry on a non-2xx-ish
-    // error response, so tell the caller plainly that this needs a retry.
-    return jsonResponse({
-  result: 'error',
-  error: 'busy_try_again',
-  message: 'Server was busy processing another order. Please retry.',
-  _retryCount: body._retryCount || 0,
-});
-  }
-
+  // The script lock is now taken centrally by withWriteLock() in doPost,
+  // which returns its own "servidor ocupado" error if the wait times out.
+  // Re-acquiring the lock here would deadlock this execution against its
+  // own outer hold, so the inner lock and its busy branch were removed.
   try {
     const shopifyOrderId = String(body.shopify_order_id || '');
     const orderName = body.order_name || '';
@@ -1894,26 +1986,25 @@ function importShopifyOrder(body) {
       const surname   = nameParts.slice(1).join(' ');
 
       customerID = generateCustomerID(customersSheet);
-      customersSheet.appendRow([
-        customerID,
-        incoming.username || '',
-        '',
-        incoming.shopifyCustomerId || '',
-        firstName,
-        surname,
-        '',
-        '',
-        incoming.city || '',
-        incoming.state || '',
-        incoming.zip || '',
-        '',
-        incoming.phone || '',
-        incoming.email || '',
-        nowISO(),
-        0,
-        'Auto-created from Shopify order ' + orderName,
-        false,
-      ]);
+      // Built by header name, not a fixed 18-slot array -- the positional
+      // version silently shifted every value one column the moment the
+      // Customers sheet gained or reordered a column.
+      appendCustomerRowByHeader(customersSheet, {
+        'Customer ID': customerID,
+        'Primary Username': incoming.username || '',
+        'Shopify Customer ID': incoming.shopifyCustomerId || '',
+        'First Name': firstName,
+        'Surname': surname,
+        'City': incoming.city || '',
+        'State': incoming.state || '',
+        'ZIP': incoming.zip || '',
+        'Phone Partial': incoming.phone || '',
+        'Email': incoming.email || '',
+        'First Order Date': nowISO(),
+        'Shipment Count': 0,
+        'Notes': 'Auto-created from Shopify order ' + orderName,
+        'Merge Flag': false,
+      });
     }
 
     // ─── Write the Orders row (always, regardless of tier) ────────────
@@ -1922,7 +2013,16 @@ function importShopifyOrder(body) {
     row[oh.indexOf('Shopify Order ID')] = shopifyOrderId;
     row[oh.indexOf('Shopify Order Number')] = orderName;
     row[oh.indexOf('Customer ID')] = customerID;
-    row[oh.indexOf('Primary Username')] = (resolution.tier === 'auto') ? (incoming.username || '') : '';
+    // "SIN NOMBRE" root cause: this used incoming.username, which comes
+    // from Shopify's "company" field and is almost always blank -- so an
+    // order that auto-linked perfectly still showed as nameless in every
+    // list that groups by the order-level username. Pull the matched
+    // customer's real display name instead, with a sensible fallback
+    // chain, and fall back to the Shopify order number as a last resort
+    // so a row is never completely unlabelled.
+    row[oh.indexOf('Primary Username')] = customerID
+      ? (customerDisplayName(customerID) || incoming.username || orderName || '')
+      : (incoming.username || '');
     row[oh.indexOf('Channel')] = 'Shopify';
     row[oh.indexOf('Status')] = 'Pagado';
     row[oh.indexOf('Products')] = body.products || '';
@@ -1959,7 +2059,7 @@ function importShopifyOrder(body) {
     });
 
   } finally {
-    lock.releaseLock();
+    // no-op: the script lock is released by withWriteLock() in doPost.
   }
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1976,6 +2076,12 @@ function resolveShopifyMatchAction(body) {
   const matches = sheetToObjects(matchesSheet);
   const match = matches.find(m => m['Match ID'] === body.match_id);
   if (!match) return jsonResponse({ error: 'Match not found' });
+  // Without this, a double-click (or a retried request) runs the whole
+  // decision twice -- and for decision 'new' that means two customer
+  // records created for the same person.
+  if (String(match['Decision'] || '').trim() !== 'Pending') {
+    return jsonResponse({ error: 'Esta coincidencia ya fue resuelta (' + match['Decision'] + ').' });
+  }
 
   const mh = matchesSheet.getRange(1, 1, 1, matchesSheet.getLastColumn()).getValues()[0];
   const setMatchField = (col, val) => {
@@ -2005,27 +2111,26 @@ function resolveShopifyMatchAction(body) {
     const firstName = nameParts[0] || '';
     const surname = nameParts.slice(1).join(' ');
 
+    const addrParts = String(match['Incoming Address'] || '').split(' / ');
     linkedCustomerId = generateCustomerID(customersSheet);
-    customersSheet.appendRow([
-      linkedCustomerId,
-      match['Incoming Username'] || '',
-      '',
-      match['Shopify Customer ID'] || '',
-      firstName,
-      surname,
-      '',
-      '',
-      (match['Incoming Address'] || '').split(' / ')[0] || '',
-      (match['Incoming Address'] || '').split(' / ')[1] || '',
-      (match['Incoming Address'] || '').split(' / ')[2] || '',
-      '',
-      match['Incoming Phone'] || '',
-      match['Incoming Email'] || '',
-      nowISO(),
-      0,
-      'Created from Shopify match review (' + match['Match ID'] + ')',
-      false,
-    ]);
+    // Built by header name, not a fixed 18-slot array (see the matching
+    // note in importShopifyOrder).
+    appendCustomerRowByHeader(customersSheet, {
+      'Customer ID': linkedCustomerId,
+      'Primary Username': match['Incoming Username'] || '',
+      'Shopify Customer ID': match['Shopify Customer ID'] || '',
+      'First Name': firstName,
+      'Surname': surname,
+      'City': addrParts[0] || '',
+      'State': addrParts[1] || '',
+      'ZIP': addrParts[2] || '',
+      'Phone Partial': match['Incoming Phone'] || '',
+      'Email': match['Incoming Email'] || '',
+      'First Order Date': nowISO(),
+      'Shipment Count': 0,
+      'Notes': 'Created from Shopify match review (' + match['Match ID'] + ')',
+      'Merge Flag': false,
+    });
     setMatchField('Decision', 'Created-New');
 
   } else {
