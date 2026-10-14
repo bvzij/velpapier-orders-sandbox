@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-13.1';
+const SCRIPT_VERSION = '2026-10-13.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -766,13 +766,15 @@ function importTikTokOrders(body) {
   // all incoming shipments; resolving a few extra SKUs for a duplicate
   // shipment that gets skipped below is harmless and still cheap.)
   const allLineItems = [];
-  const allImportHistory = [];
   (body.shipments || []).forEach(s => {
     (s.line_items || []).forEach(li => allLineItems.push(li));
-    (s.import_history || []).forEach(h => allImportHistory.push(h));
   });
   const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
-  appendTikTokImportHistory(allImportHistory);
+  // History collection moved below, AFTER the duplicate-tracking-ID check
+  // in the main shipments loop (was previously collected here, for ALL
+  // incoming shipments regardless of whether they were duplicates -- the
+  // root cause of history rows being re-appended on every re-run of a
+  // CSV that still contains older, already-imported shipments).
 
   // ─── Locate the 30 product slot column pairs ──────────────────────
   const PRODUCT_SLOTS = 30;
@@ -784,7 +786,7 @@ function importTikTokOrders(body) {
     });
   }
 
-  const rows = [], results = [], unresolved = [];
+  const rows = [], results = [], unresolved = [], allImportHistory = [];
   let customersDirty = false;
 
   (body.shipments || []).forEach(s => {
@@ -796,6 +798,7 @@ function importTikTokOrders(body) {
       return;
     }
     trackingSet[tid] = true;
+    (s.import_history || []).forEach(h => allImportHistory.push(h));
 
     let customerID = s.customer_id || '';
     let primary    = s.username || '';
@@ -885,6 +888,14 @@ function importTikTokOrders(body) {
     forceTextFormat(orders, oh, ['Order ID', 'Tracking ID'], startRow, rows.length);
     orders.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
   }
+
+  // ─── Write TikTok Import History, now AFTER duplicate filtering ───
+  // Second layer of protection: even among shipments that passed the
+  // tracking-ID check above, dedupe by Order ID + SKU ID against what's
+  // already on the sheet (same key convention as the backfill tool's
+  // backfillKey()) -- a combined shipment can share an order/SKU with a
+  // row that arrived via a different tracking ID on a previous run.
+  appendTikTokImportHistoryDeduped(allImportHistory);
 
   // Shipment Count on the Customers sheet is NOT touched here anymore --
   // it only reflects Enviado/Archivado orders (see countShippedOrders),
@@ -2219,7 +2230,42 @@ function appendTikTokImportHistory(allHistoryRecords) {
 
   const startRow = sheet.getLastRow() + 1;
   forceTextFormat(sheet, headers, TIKTOK_ID_COLUMNS, startRow, rows.length);
-  sheet.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
+  sheet.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+// Wraps appendTikTokImportHistory() with an Order ID + SKU ID dedupe
+// check against rows already on the sheet, using the same backfillKey()
+// convention as the historical backfill tool. Called by the DAILY import
+// (importTikTokOrders) -- the backfill tool has its own separate,
+// already-correct dedupe logic and does not use this wrapper.
+function appendTikTokImportHistoryDeduped(allHistoryRecords) {
+  if (!allHistoryRecords || !allHistoryRecords.length) return;
+
+  const sheet = getTikTokImportHistorySheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const orderIdCol = headers.indexOf('Order ID');
+  const skuIdCol   = headers.indexOf('SKU ID');
+
+  const existingKeys = {};
+  if (orderIdCol >= 0 && skuIdCol >= 0 && sheet.getLastRow() > 1) {
+    const existing = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
+    existing.forEach(r => {
+      existingKeys[backfillKey(r[orderIdCol], r[skuIdCol])] = true;
+    });
+  }
+
+  // Also guard against duplicates WITHIN this same incoming batch (e.g.
+  // the same order/SKU appearing twice in one CSV payload).
+  const seenThisRun = {};
+  const toWrite = [];
+  allHistoryRecords.forEach(rec => {
+    const key = backfillKey(rec.order_id, rec.sku_id);
+    if (existingKeys[key] || seenThisRun[key]) return;
+    seenThisRun[key] = true;
+    toWrite.push(rec);
+  });
+
+  appendTikTokImportHistory(toWrite);
 }
 
 // ─── HISTORICAL / BACKFILL CSV IMPORT ──────────────────────────────────────
