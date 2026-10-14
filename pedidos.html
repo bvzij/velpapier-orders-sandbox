@@ -136,6 +136,7 @@
         <button class="tab" data-tab="enviado" onclick="switchTab('enviado')">Enviado <span class="tab-badge" id="badge-enviado">0</span></button>
         <button class="tab" data-tab="archivo" onclick="switchTab('archivo')">Archivo <span class="tab-badge" id="badge-archivo">0</span></button>
         <button class="tab" data-tab="tiktok" onclick="switchTab('tiktok')">TikTok <span class="tab-badge" id="badge-tiktok" style="background:#fff0f0;color:#c0392b">0</span></button>
+        <button class="tab" data-tab="shopify-pend" onclick="switchTab('shopify-pend')">Shopify pendiente <span class="tab-badge" id="badge-shopify-pend">0</span></button>
       </div>
 
       <div id="tab-activos"><div class="section-label">Todos los pedidos activos</div><div id="activos-list"></div></div>
@@ -145,6 +146,14 @@
       <div id="tab-archivo" style="display:none"><div class="section-label">Archivados</div><div id="archivo-list"></div></div>
 
       <div id="tab-tiktok" style="display:none"><div class="section-label">Órdenes TikTok · Pendientes de envío</div><div id="tiktok-list"></div></div>
+
+      <div id="tab-shopify-pend" style="display:none">
+        <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <span>Shopify · Esperando confirmar a qué cliente pertenecen</span>
+          <button class="refresh-btn" onclick="location.href='ajustes.html?open=shopify-matches'">Abrir herramienta en bloque →</button>
+        </div>
+        <div id="shopify-pend-list"></div>
+      </div>
 
     </div>
 
