@@ -541,12 +541,22 @@ async function apiPost(data) {
     body: JSON.stringify({ ...data, token: API_TOKEN })
   });
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  const body = await res.json();
+  // Apps Script answers HTTP 200 even for its own errors -- see the
+  // matching fix in VP.post() (common.js).
+  if (body && body.error) throw new Error(body.error);
+  return body;
 }
 
 function apiGet(qs) {
   return fetch(`${API}?${qs}&token=${encodeURIComponent(API_TOKEN)}`)
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(body => {
+      // Apps Script answers HTTP 200 even for its own errors -- see the
+      // matching fix in VP.get() (common.js).
+      if (body && body.error) throw new Error(body.error);
+      return body;
+    });
 }
 
 const CACHE_PREFIX = 'vp_cache_';
@@ -1930,7 +1940,6 @@ async function ajShopApply() {
     summary.textContent = `Aplicando… ${VP.num(done)} de ${VP.num(items.length)}`;
     try {
       const res = await VP.post({ action: 'resolve_shopify_matches_bulk', items: batch });
-      if (res.error) throw new Error(res.error);        // the server answers HTTP 200 even for errors
       applied += res.applied || 0;
       (res.results || []).filter(r => !r.ok).forEach(r => failed.push(r));
     } catch (e) {
