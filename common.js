@@ -34,7 +34,17 @@ window.VP = (function () {
 
   function get(qs) {
     return fetch(`${API}?${qs}&token=${encodeURIComponent(token)}`)
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(body => {
+        // Apps Script answers HTTP 200 even for its own errors -- an error
+        // in the body was previously only caught where a caller happened
+        // to check res.error manually, so most callers silently treated
+        // a failed request as a successful empty-ish response. Throwing
+        // here means every existing try/catch around VP.get() now also
+        // catches this case, with no change needed at the call site.
+        if (body && body.error) throw new Error(body.error);
+        return body;
+      });
   }
 
   const CACHE_PREFIX = 'vp_cache_';
@@ -111,7 +121,13 @@ window.VP = (function () {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ ...data, token }),
-    }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(body => {
+        // Apps Script answers HTTP 200 even for its own errors -- see the
+        // matching comment in VP.get() above.
+        if (body && body.error) throw new Error(body.error);
+        return body;
+      });
   }
 
   // Verifies the API token, prompting once if it's missing or stale.
