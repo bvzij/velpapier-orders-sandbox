@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-14.1';
+const SCRIPT_VERSION = '2026-10-14.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -3822,8 +3822,8 @@ function getShopifyMatchesReview(e) {
         reasons: res.reasons,
         same_shopify_id: fi.shopifyIds.some(id => feats[i].shopifyIds.indexOf(id) >= 0),
       };
-    }).filter(c => c.score >= SMB_MIN_CANDIDATE_SCORE)
-      .sort((a, b) => b.score - a.score)
+    }).filter(c => c.score >= SMB_MIN_CANDIDATE_SCORE || c.same_shopify_id)
+      .sort((a, b) => (b.same_shopify_id - a.same_shopify_id) || (b.score - a.score))
       .slice(0, SMB_MAX_CANDIDATES);
 
     const orderNameKey = Object.keys(g.matches[0]).find(k => /^order name/i.test(k));
@@ -3839,16 +3839,33 @@ function getShopifyMatchesReview(e) {
         email: shopifyGroupField(g, 'Incoming Email'),
         city: incoming['City'], state: incoming['State'], zip: incoming['ZIP'],
       },
-      // The Shopify ID is already on a customer: the pending rows are stale
-      // leftovers from before it was linked, and this is a certainty, not a guess.
-      already_linked: scored.length && scored[0].same_shopify_id ? scored[0].customer_id : '',
+      // BUG FIXED 2026-10-14: this used to mean "the pending rows are stale
+      // leftovers from before this ID was linked" and was treated as a sure
+      // thing needing no review. That reasoning only holds when this
+      // candidate reached the list BECAUSE its Shopify ID matched the
+      // incoming group's ID. It does NOT hold when the candidate instead
+      // reached the list via phone/ZIP/e-mail/name (dupBlockingKeys) and
+      // merely HAPPENS to already carry this exact ID among possibly
+      // several Shopify IDs on file -- that is the same person ordering
+      // under two different Shopify accounts (a known, legitimate pattern:
+      // guest checkout once, logged in another time), and it is new
+      // evidence the reviewer should see, not a leftover to wave through.
+      // same_shopify_id itself is correct; only the wording/certainty was
+      // wrong, so it is kept, just reported honestly as "same_shopify_id"
+      // (frontend shows it as corroborating evidence, not a "no review
+      // needed" badge).
       candidates: scored,
     };
   });
 
   // Certain ones first, then grouped by target customer, best score first.
+  // Groups whose top candidate already carries this exact Shopify ID sort
+  // first (strongest possible evidence), then grouped by target customer,
+  // best score first.
   groups.sort((a, b) => {
-    if (!!a.already_linked !== !!b.already_linked) return a.already_linked ? -1 : 1;
+    const sa = a.candidates[0] && a.candidates[0].same_shopify_id ? 1 : 0;
+    const sb = b.candidates[0] && b.candidates[0].same_shopify_id ? 1 : 0;
+    if (sa !== sb) return sb - sa;
     const ta = a.candidates[0] ? a.candidates[0].customer_id : '~';
     const tb = b.candidates[0] ? b.candidates[0].customer_id : '~';
     if (ta !== tb) return ta < tb ? -1 : 1;
