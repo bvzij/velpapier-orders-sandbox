@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-13.4';
+const SCRIPT_VERSION = '2026-10-14.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -226,6 +226,7 @@ function doGet(e) {
     if (!authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
     if (action === 'ping') return jsonResponse({ ok: true });
     if (action === 'shopify_matches') return getShopifyMatches(e);
+    if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'active_session') return getActiveSession(e);
@@ -352,6 +353,7 @@ function doPost(e) {
     if (action === 'end_session') return endSession(body);
     if (action === 'update_session_participants') return updateSessionParticipants(body);
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
+    if (action === 'resolve_shopify_matches_bulk') return resolveShopifyMatchesBulk(body);
     if (action === 'merge_customers') return mergeCustomersAction(body);
     if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
     if (action === 'undo_merge') return undoMergeAction(body);
@@ -3621,6 +3623,28 @@ function dismissedPairKey(idA, idB) {
   return [String(idA), String(idB)].sort().join('|');
 }
 
+// The keys by which two customers are considered worth comparing. Shared by
+// the duplicate finder and the Shopify bulk-review tool so both look for
+// candidates exactly the same way.
+function dupBlockingKeys(f) {
+  const keys = [];
+  if (f.phone.full10) {
+    keys.push('pf:' + f.phone.full10);
+    keys.push('ps:' + f.phone.full10.slice(-2));
+  } else if (f.phone.suffix.length >= 2) {
+    keys.push('ps:' + f.phone.suffix.slice(-2));
+  }
+  if (f.zip) keys.push('z:' + f.zip);
+  if (f.email) keys.push('e:' + f.email);
+  f.shopifyIds.forEach(id => keys.push('s:' + id));
+  f.names.forEach(n => {
+    keys.push('u:' + n);
+    if (n.length >= 5) keys.push('up:' + n.slice(0, 5));
+  });
+  if (f.fullName.indexOf(' ') > 0) keys.push('n:' + f.fullName);
+  return keys;
+}
+
 function findDuplicateCustomers(e) {
   const threshold = e.parameter.threshold
     ? Math.max(0, Math.min(100, parseInt(e.parameter.threshold, 10) || DUPLICATE_SCORE_THRESHOLD))
@@ -3639,22 +3663,7 @@ function findDuplicateCustomers(e) {
   // Candidate generation: two customers are compared if they share ANY key.
   const buckets = {};
   const addKey = (k, i) => { (buckets[k] || (buckets[k] = [])).push(i); };
-  feats.forEach((f, i) => {
-    if (f.phone.full10) {
-      addKey('pf:' + f.phone.full10, i);
-      addKey('ps:' + f.phone.full10.slice(-2), i);
-    } else if (f.phone.suffix.length >= 2) {
-      addKey('ps:' + f.phone.suffix.slice(-2), i);
-    }
-    if (f.zip) addKey('z:' + f.zip, i);
-    if (f.email) addKey('e:' + f.email, i);
-    f.shopifyIds.forEach(id => addKey('s:' + id, i));
-    f.names.forEach(n => {
-      addKey('u:' + n, i);
-      if (n.length >= 5) addKey('up:' + n.slice(0, 5), i);
-    });
-    if (f.fullName.indexOf(' ') > 0) addKey('n:' + f.fullName, i);
-  });
+  feats.forEach((f, i) => dupBlockingKeys(f).forEach(k => addKey(k, i)));
 
   const seen = new Set();
   const pairs = [];
@@ -3689,6 +3698,344 @@ function findDuplicateCustomers(e) {
     total_matches: pairs.length,
     truncated: pairs.length > DUP_MAX_PAIRS,
     skipped_common_keys: skippedKeys,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHOPIFY PENDING MATCHES — BULK REVIEW (Ajustes page)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// WHY: every Shopify order whose customer can't be matched logs its own
+// "Pending" row. One person with five orders (or the same person arriving
+// under a new Shopify ID) therefore becomes five separate chores in the
+// Pedidos tab. This tool lists the pending rows GROUPED BY PERSON, shows the
+// evidence for each suggested customer, and applies the decisions in bulk.
+//
+// It is a REVIEW tool, never an auto-linker: nothing is written until the
+// user applies it, and the user can change any suggestion first. (Shopify
+// identity matching is suggest-only by design.)
+
+const SMB_MAX_CANDIDATES = 3;          // alternatives offered per person
+const SMB_MIN_CANDIDATE_SCORE = 30;    // below this a candidate is just noise
+const SMB_MAX_ITEMS_PER_REQUEST = 60;  // the page sends smaller batches than this
+
+// Splits the "city / state / zip" text stored in the matches sheet. Fields
+// that were blank when it was written are simply absent, so the postcode is
+// recognised by its shape rather than by position.
+function shopifyParseAddress(text) {
+  const parts = String(text || '').split(' / ').map(s => s.trim()).filter(Boolean);
+  const zip = parts.find(p => /^\d{4,5}$/.test(p)) || '';
+  const rest = parts.filter(p => p !== zip);
+  return { city: rest[0] || '', state: rest[1] || '', zip: zip };
+}
+
+// One entry per PERSON: pending rows sharing a Shopify Customer ID are the
+// same person's orders. Guest checkouts have no Shopify ID, so those are
+// grouped by e-mail, then by phone, otherwise they stay on their own.
+function shopifyPendingGroups(matches) {
+  const groups = {}, order = [];
+  matches.forEach(m => {
+    const sid = String(m['Shopify Customer ID'] || '').trim();
+    const email = String(m['Incoming Email'] || '').trim().toLowerCase();
+    const phone = normalizePhone(m['Incoming Phone']);
+    const key = sid ? 'sid:' + sid
+              : email ? 'em:' + email
+              : phone.length >= 10 ? 'ph:' + phone.slice(-10)
+              : 'm:' + m['Match ID'];
+    if (!groups[key]) { groups[key] = { key: key, shopify_customer_id: sid, matches: [] }; order.push(key); }
+    groups[key].matches.push(m);
+  });
+  return order.map(k => groups[k]);
+}
+
+// Latest non-empty value of a field across a person's pending rows.
+function shopifyGroupField(g, field) {
+  for (let i = g.matches.length - 1; i >= 0; i--) {
+    const v = String(g.matches[i][field] || '').trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+// The incoming person, shaped like a Customers row so the same scoring
+// engine as the duplicate finder can compare it with real customers.
+function shopifyIncomingAsCustomer(g) {
+  const nameParts = shopifyGroupField(g, 'Incoming Name').split(' ').filter(Boolean);
+  const addr = shopifyParseAddress(shopifyGroupField(g, 'Incoming Address'));
+  return {
+    'Primary Username': shopifyGroupField(g, 'Incoming Username'),
+    'First Name': nameParts[0] || '',
+    'Surname': nameParts.slice(1).join(' '),
+    'Phone Full': shopifyGroupField(g, 'Incoming Phone'),
+    'Email': shopifyGroupField(g, 'Incoming Email'),
+    'City': addr.city, 'State': addr.state, 'ZIP': addr.zip,
+    'Shopify Customer ID': g.shopify_customer_id,
+    'Aliases': '', 'Street + Number': '', 'Initials (TT Format)': '', 'Phone Partial': '',
+  };
+}
+
+// GET ?action=shopify_matches_review
+function getShopifyMatchesReview(e) {
+  const matches = sheetToObjects(getShopifyMatchesSheet())
+    .filter(m => String(m['Decision'] || '').trim() === 'Pending');
+  if (!matches.length) return jsonResponse({ groups: [], total_matches: 0 });
+
+  // Merged-away customers must never be offered as a target.
+  const customers = sheetToObjects(getCustomersSheet())
+    .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+  const feats = customers.map(dupFeatures);
+
+  const indexById = {};
+  feats.forEach((f, i) => { indexById[String(f.c['Customer ID'])] = i; });
+  const keyIndex = {};
+  feats.forEach((f, i) => dupBlockingKeys(f).forEach(k => { (keyIndex[k] || (keyIndex[k] = [])).push(i); }));
+
+  const groups = shopifyPendingGroups(matches).map(g => {
+    const incoming = shopifyIncomingAsCustomer(g);
+    const fi = dupFeatures(incoming);
+
+    // Candidates: whatever the original matcher suggested, plus anyone who
+    // shares a phone ending, ZIP, e-mail, Shopify ID or name with the person.
+    const cand = new Set();
+    g.matches.forEach(m => {
+      const id = String(m['Suggested Customer ID'] || '');
+      if (id && indexById[id] !== undefined) cand.add(indexById[id]);
+    });
+    dupBlockingKeys(fi).forEach(k => {
+      const list = keyIndex[k];
+      if (list && list.length <= DUP_MAX_BUCKET) list.forEach(i => cand.add(i));
+    });
+
+    const scored = Array.from(cand).map(i => {
+      const res = dupScorePair(fi, feats[i]);
+      const c = feats[i].c;
+      return {
+        customer_id: String(c['Customer ID']),
+        username: String(c['Primary Username'] || ''),
+        name: [c['First Name'], c['Surname']].filter(Boolean).join(' '),
+        phone: String(c['Phone Full'] || c['Phone Partial'] || ''),
+        email: String(c['Email'] || ''),
+        city: String(c['City'] || ''),
+        shopify_ids: String(c['Shopify Customer ID'] || ''),
+        shipment_count: c['Shipment Count'],
+        score: res.score,
+        reasons: res.reasons,
+        same_shopify_id: fi.shopifyIds.some(id => feats[i].shopifyIds.indexOf(id) >= 0),
+      };
+    }).filter(c => c.score >= SMB_MIN_CANDIDATE_SCORE)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, SMB_MAX_CANDIDATES);
+
+    const orderNameKey = Object.keys(g.matches[0]).find(k => /^order name/i.test(k));
+    return {
+      key: g.key,
+      shopify_customer_id: g.shopify_customer_id,
+      match_ids: g.matches.map(m => String(m['Match ID'])),
+      order_names: g.matches.map(m => String(orderNameKey ? m[orderNameKey] : '')).filter(Boolean),
+      incoming: {
+        name: shopifyGroupField(g, 'Incoming Name'),
+        username: shopifyGroupField(g, 'Incoming Username'),
+        phone: shopifyGroupField(g, 'Incoming Phone'),
+        email: shopifyGroupField(g, 'Incoming Email'),
+        city: incoming['City'], state: incoming['State'], zip: incoming['ZIP'],
+      },
+      // The Shopify ID is already on a customer: the pending rows are stale
+      // leftovers from before it was linked, and this is a certainty, not a guess.
+      already_linked: scored.length && scored[0].same_shopify_id ? scored[0].customer_id : '',
+      candidates: scored,
+    };
+  });
+
+  // Certain ones first, then grouped by target customer, best score first.
+  groups.sort((a, b) => {
+    if (!!a.already_linked !== !!b.already_linked) return a.already_linked ? -1 : 1;
+    const ta = a.candidates[0] ? a.candidates[0].customer_id : '~';
+    const tb = b.candidates[0] ? b.candidates[0].customer_id : '~';
+    if (ta !== tb) return ta < tb ? -1 : 1;
+    return (b.candidates[0] ? b.candidates[0].score : 0) - (a.candidates[0] ? a.candidates[0].score : 0);
+  });
+
+  return jsonResponse({ groups: groups, total_matches: matches.length });
+}
+
+// POST { action:'resolve_shopify_matches_bulk',
+//        items:[{ key, match_ids:[...], decision:'link'|'new', customer_id }] }
+// 'link' = these orders belong to customer_id: the Shopify ID(s) are added to
+// that customer, their blank fields are enriched, and the orders are re-pointed.
+// 'new'  = create ONE new customer for the whole group.
+// Reads each sheet once and writes only the cells that change, so a batch of
+// dozens of people takes seconds instead of re-reading every sheet per order.
+function resolveShopifyMatchesBulk(body) {
+  const items = body.items || [];
+  if (!items.length) return jsonResponse({ error: 'No hay nada que aplicar.' });
+  if (items.length > SMB_MAX_ITEMS_PER_REQUEST) {
+    return jsonResponse({ error: 'Demasiados elementos en una sola petición (máximo ' + SMB_MAX_ITEMS_PER_REQUEST + ').' });
+  }
+
+  // ── matches sheet ──
+  const mSheet = getShopifyMatchesSheet();
+  const mData = mSheet.getDataRange().getValues();
+  const mh = mData[0];
+  const M = {
+    id: mh.indexOf('Match ID'), shopOrder: mh.indexOf('Shopify Order ID'), shopCust: mh.indexOf('Shopify Customer ID'),
+    name: mh.indexOf('Incoming Name'), phone: mh.indexOf('Incoming Phone'), user: mh.indexOf('Incoming Username'),
+    email: mh.indexOf('Incoming Email'), addr: mh.indexOf('Incoming Address'), sugg: mh.indexOf('Suggested Customer ID'),
+    decision: mh.indexOf('Decision'), linked: mh.indexOf('Linked Customer ID'), decided: mh.indexOf('Decided Date'),
+  };
+  const matchRowById = {};
+  for (let i = 1; i < mData.length; i++) matchRowById[String(mData[i][M.id])] = i;
+
+  // ── customers sheet (read once; edits tracked cell by cell) ──
+  const cSheet = getCustomersSheet();
+  const cData = cSheet.getDataRange().getValues();
+  const ch = cData[0];
+  const C = {
+    id: ch.indexOf('Customer ID'), user: ch.indexOf('Primary Username'), shop: ch.indexOf('Shopify Customer ID'),
+    first: ch.indexOf('First Name'), sur: ch.indexOf('Surname'), phoneFull: ch.indexOf('Phone Full'), email: ch.indexOf('Email'),
+  };
+  const cTrack = makeCellTracker(cData, 1);          // cData includes the header row
+  const custRowById = {};
+  let maxNum = 0;
+  for (let i = 1; i < cData.length; i++) {
+    const id = String(cData[i][C.id]);
+    const n = parseInt(id.replace('CUST-', ''), 10);
+    if (id.indexOf('CUST-') === 0 && !isNaN(n) && n > maxNum) maxNum = n;
+    if (!String(cData[i][C.user] || '').includes('(merged→')) custRowById[id] = i;
+  }
+
+  // ── orders: only the four columns needed ──
+  const oSheet = getOrdersSheet();
+  const oh = oSheet.getRange(1, 1, 1, oSheet.getLastColumn()).getValues()[0];
+  const O = { shop: oh.indexOf('Shopify Order ID'), cust: oh.indexOf('Customer ID'), user: oh.indexOf('Primary Username') };
+  const oShop = readColumn(oSheet, O.shop);
+  const ordersByShopId = {};
+  oShop.forEach((v, i) => { if (v !== '') (ordersByShopId[String(v)] || (ordersByShopId[String(v)] = [])).push(i); });
+
+  const displayName = (ci) => {
+    const row = cData[ci];
+    const u = String(row[C.user] || '').trim();
+    if (u) return u;
+    const full = [row[C.first], row[C.sur]].map(v => String(v || '').trim()).filter(Boolean).join(' ');
+    return full || String(row[C.email] || '').trim();
+  };
+
+  const matchChanges = [];            // { r, decision, linked }
+  const orderChanges = {};            // 'custId|name' -> { cust, name, rows:[] }
+  const recount = [];
+  const results = [];
+  const now = nowISO();
+
+  items.forEach(item => {
+    const key = item.key;
+    const rows = (item.match_ids || []).map(id => matchRowById[String(id)]).filter(r => r !== undefined);
+    const pending = rows.filter(r => String(mData[r][M.decision] || '').trim() === 'Pending');
+    if (!pending.length) { results.push({ key: key, ok: false, error: 'Ya estaba resuelto o no existe.' }); return; }
+    const latest = mData[pending[pending.length - 1]];
+
+    let targetId = '', ci;
+    if (item.decision === 'link') {
+      targetId = String(item.customer_id || '');
+      ci = custRowById[targetId];
+      if (ci === undefined) { results.push({ key: key, ok: false, error: 'El cliente ' + targetId + ' no existe o ya fue fusionado.' }); return; }
+
+      // Shopify ID(s) of this person -> the customer's list ("/"-separated, as text)
+      const have = String(cData[ci][C.shop] || '').split('/').map(s => s.trim()).filter(Boolean);
+      const add = Array.from(new Set(pending.map(r => String(mData[r][M.shopCust] || '').trim()).filter(Boolean)))
+        .filter(id => have.indexOf(id) < 0);
+      if (add.length && C.shop >= 0) cTrack.set(ci, C.shop, have.concat(add).join('/'));
+
+      // Fill blank fields only (never overwrite what is already on file)
+      const fill = (col, val) => { if (col >= 0 && val && !String(cData[ci][col] || '').trim()) cTrack.set(ci, col, val); };
+      fill(C.phoneFull, String(latest[M.phone] || '').trim());
+      fill(C.email, String(latest[M.email] || '').trim());
+      const np = String(latest[M.name] || '').split(' ').filter(Boolean);
+      if (np.length) { fill(C.first, np[0]); fill(C.sur, np.slice(1).join(' ')); }
+
+    } else if (item.decision === 'new') {
+      const np = String(latest[M.name] || '').split(' ').filter(Boolean);
+      const addr = shopifyParseAddress(latest[M.addr]);
+      maxNum++;
+      targetId = 'CUST-' + String(maxNum).padStart(3, '0');
+      const shopIds = Array.from(new Set(pending.map(r => String(mData[r][M.shopCust] || '').trim()).filter(Boolean)));
+      const newRowNum = appendCustomerRowByHeader(cSheet, {
+        'Customer ID': targetId,
+        'Primary Username': String(latest[M.user] || ''),
+        'Shopify Customer ID': shopIds.join('/'),
+        'First Name': np[0] || '', 'Surname': np.slice(1).join(' '),
+        'City': addr.city, 'State': addr.state, 'ZIP': addr.zip,
+        'Phone Full': String(latest[M.phone] || ''), 'Email': String(latest[M.email] || ''),
+        'First Order Date': nowISO(), 'Shipment Count': 0,
+        'Notes': 'Created from Shopify bulk review (' + pending.length + ' pending order(s))',
+        'Merge Flag': false,
+      });
+      // make the new row visible to displayName()
+      cData[newRowNum - 1] = ch.map(h => ({ 'Customer ID': targetId, 'Primary Username': String(latest[M.user] || ''),
+        'First Name': np[0] || '', 'Surname': np.slice(1).join(' '), 'Email': String(latest[M.email] || '') }[h] || ''));
+      ci = newRowNum - 1;
+      custRowById[targetId] = ci;
+    } else {
+      results.push({ key: key, ok: false, error: 'Decisión desconocida: ' + item.decision }); return;
+    }
+
+    // matches + orders
+    const name = displayName(ci);
+    let ordersUpdated = 0;
+    pending.forEach(r => {
+      const decision = item.decision === 'new' ? 'Created-New'
+        : (String(mData[r][M.sugg] || '') === targetId ? 'Confirmed-Suggested' : 'Confirmed-Different');
+      matchChanges.push({ r: r, decision: decision, linked: targetId });
+      (ordersByShopId[String(mData[r][M.shopOrder])] || []).forEach(oi => {
+        const k = targetId + '|' + name;
+        (orderChanges[k] || (orderChanges[k] = { cust: targetId, name: name, rows: [] })).rows.push(oi);
+        ordersUpdated++;
+      });
+    });
+    recount.push(targetId);
+    results.push({ key: key, ok: true, customer_id: targetId, matches_resolved: pending.length, orders_updated: ordersUpdated });
+  });
+
+  // ── write phase: only the cells that changed ──
+  cTrack.flush(cSheet, [C.shop, C.phoneFull]);
+
+  // Each API call has a fixed round-trip cost, and this whole request runs
+  // while holding the write lock (other people's saves wait for it). So the
+  // writes are few and wide instead of many and tiny:
+  //  - matches sheet: Decision / Linked Customer ID / Decided Date are small
+  //    plain-text columns -> one write each (3 calls in total)
+  //  - orders: the Customer ID column holds plain-text IDs -> one write
+  //  - orders: Primary Username can hold numeric-looking handles, so it is
+  //    written only for the cells that change, one call per distinct name
+  matchChanges.forEach(c => {
+    mData[c.r][M.decision] = c.decision;
+    mData[c.r][M.linked] = c.linked;
+    mData[c.r][M.decided] = now;
+  });
+  if (matchChanges.length) {
+    [M.decision, M.linked, M.decided].forEach(col => {
+      if (col >= 0) mSheet.getRange(2, col + 1, mData.length - 1, 1).setValues(mData.slice(1).map(r => [r[col]]));
+    });
+  }
+
+  const oCustVals = readColumn(oSheet, O.cust);
+  const oCustChanged = [];
+  Object.keys(orderChanges).forEach(k => {
+    orderChanges[k].rows.forEach(oi => { oCustVals[oi] = orderChanges[k].cust; oCustChanged.push(oi); });
+  });
+  writeColumnChanges(oSheet, O.cust, oCustVals, oCustChanged);
+  Object.keys(orderChanges).forEach(k => {
+    const oc = orderChanges[k];
+    if (oc.name) setCellsToValue(oSheet, O.user, oc.rows, oc.name, /^\d+$/.test(oc.name));
+  });
+
+  // The orders may already be shipped, so the customers' counts can change.
+  SpreadsheetApp.flush();
+  recalculateShipmentCountsFor(recount);
+
+  return jsonResponse({
+    result: 'bulk_resolved',
+    applied: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+    results: results,
   });
 }
 
