@@ -641,6 +641,21 @@ def build_shipments_csv(shipments: list, fieldnames: list) -> bytes:
                 messages.append(msg)
         base["Buyer Message"] = " + ".join(messages)
 
+        # Product-level fields are also per-line-item, not per-shipment --
+        # base[raw_rows[0]] only carries the first item's SKU/name/qty,
+        # so a 2nd or 3rd product in a combined shipment was silently
+        # dropped from the exported row. Join every raw row's value for
+        # each such field instead, same " + " convention as above.
+        PER_ITEM_FIELDS = [
+            "SKU ID", "Seller SKU", "Product Name", "Variation", "Quantity",
+        ]
+        for field in PER_ITEM_FIELDS:
+            if field not in fieldnames:
+                continue
+            values = [(rr.get(field) or "").strip() for rr in raw_rows]
+            values = [v for v in values if v]
+            base[field] = " + ".join(values)
+
         writer.writerow(base)
 
     return out.getvalue().encode("utf-8-sig")
