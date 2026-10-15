@@ -4,8 +4,6 @@
    results render as tiles or as a compact list.
    ==========================================================================*/
 
-VP.mountNav('calidad');
-
 const CONTENT_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5'];
 const BOX_COLS     = ['Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
 
@@ -31,6 +29,7 @@ function applyQcData(q, o) {
   applyViewMode(viewMode);
   try {
     await VP.ensureToken();
+    VP.mountNav('calidad');
 
     // Cache-first: show instantly if we have a prior snapshot, refresh
     // quietly in the background, re-render when fresh data lands.
