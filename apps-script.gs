@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-14.3';
+const SCRIPT_VERSION = '2026-10-14.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1001,19 +1001,23 @@ function getRolesAction(e) {
   });
 }
 
+// Only the staff password can be changed from the website. The admin
+// password is intentionally NOT changeable here -- it can only be
+// updated directly in the Apps Script editor's Script Properties, so a
+// compromised admin session (or a mistake in this modal) can never be
+// used to lock the real admin out or reset their own password.
 function updateRolePasswordAction(body) {
   const roleId = String(body.role_id || '');
   const newPassword = String(body.new_password || '').trim();
 
-  if (roleId !== 'admin' && roleId !== 'staff') {
-    return jsonResponse({ error: 'Rol desconocido: ' + roleId });
+  if (roleId !== 'staff') {
+    return jsonResponse({ error: 'La contraseña de administrador solo se puede cambiar directamente en Apps Script.' });
   }
   if (!newPassword) {
     return jsonResponse({ error: 'La contraseña no puede estar vacía.' });
   }
 
-  const propKey = roleId === 'admin' ? 'API_TOKEN_ADMIN' : 'API_TOKEN_STAFF';
-  PropertiesService.getScriptProperties().setProperty(propKey, newPassword);
+  PropertiesService.getScriptProperties().setProperty('API_TOKEN_STAFF', newPassword);
   return jsonResponse({ result: 'done' });
 }
 // ═══════════════════════════════════════════════════════════════════════════
