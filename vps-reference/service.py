@@ -79,20 +79,23 @@ async def process(
 
 
 async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes):
+    warnings = []
 
-    rows = safe(lambda: parse_csv(csv_bytes), [])
+    rows = safe(lambda: parse_csv(csv_bytes), [], "CSV parsing", warnings)
     if not rows:
         raise HTTPException(400, "CSV parse failed or empty")
 
     csv_fieldnames = safe(
         lambda: _csv.DictReader(_io.StringIO(csv_bytes.decode("utf-8-sig", errors="replace"))).fieldnames,
         [],
+        "CSV header read",
+        warnings,
     ) or []
 
     shipments = group_shipments(rows)
     log.info(f"CSV: {len(rows)} rows -> {len(shipments)} shipments")
 
-    pdf_addresses = safe(lambda: parse_pdf_addresses(pdf_bytes), {})
+    pdf_addresses = safe(lambda: parse_pdf_addresses(pdf_bytes), {}, "PDF address extraction", warnings)
     log.info(f"PDF: extracted addresses for {len(pdf_addresses)} tracking IDs")
     for s in shipments:
         s["address"] = pdf_addresses.get(s["tracking_id"], {})
@@ -133,7 +136,7 @@ async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes):
     username_to_custid = {}
     new_customers_created = []
     if new_customer_payloads:
-        result = safe(lambda: _create_customers_bulk(new_customer_payloads), {"created": []})
+        result = safe(lambda: _create_customers_bulk(new_customer_payloads), {"created": []}, "Creating new customers", warnings)
         for c in result.get("created", []):
             username_to_custid[c["username"]] = c["customer_id"]
             if not c.get("existed"):
@@ -184,8 +187,8 @@ async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes):
         for s in shipments
     }
 
-    annotated_pdf = safe(lambda: annotate_pdf(pdf_bytes, annotation_meta), pdf_bytes)
-    export_csv    = safe(lambda: build_shipments_csv(shipments_in_pdf, csv_fieldnames), b"")
+    annotated_pdf = safe(lambda: annotate_pdf(pdf_bytes, annotation_meta), pdf_bytes, "PDF annotation (tracking labels / address whiteout)", warnings)
+    export_csv    = safe(lambda: build_shipments_csv(shipments_in_pdf, csv_fieldnames), b"", "Packing CSV export", warnings)
 
     possible_matches = [
         {
@@ -213,6 +216,7 @@ async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes):
         "new_customers":    new_customers_created,
         "pdf_base64":       base64.b64encode(annotated_pdf).decode(),
         "csv_base64":       base64.b64encode(export_csv).decode(),
+        "warnings":         warnings,
     }
 
 
@@ -279,9 +283,16 @@ def _create_customers_bulk(customers):
     return resp.json()
 
 
-def safe(fn, fallback):
+# warnings, if given a list, gets a human-readable entry appended whenever
+# fn() fails -- so a caller can still return the safe fallback (never crash
+# the whole import over one failed step) while making sure the failure
+# isn't silently invisible to whoever reads the response. label identifies
+# which step failed (e.g. "PDF address extraction").
+def safe(fn, fallback, label=None, warnings=None):
     try:
         return fn()
     except Exception as e:
-        log.warning(f"safe() caught: {e}")
+        log.warning(f"safe() caught [{label or 'unknown step'}]: {e}")
+        if warnings is not None:
+            warnings.append(f"{label or 'Unknown step'} failed: {e}")
         return fallback
