@@ -974,6 +974,48 @@ function authOk(t) {
 function requireAdmin(role) {
   return role === 'admin';
 }
+
+// ─── Roles modal (Ajustes, admin-only) ─────────────────────────────────
+
+// Never returns the actual password values -- only which roles exist and
+// whether each one's password is currently set. The modal's "change
+// password" action writes a new value but this read side never echoes
+// it back, so a password can't leak just by opening the modal.
+function getRolesAction(e) {
+  const props = PropertiesService.getScriptProperties();
+  return jsonResponse({
+    roles: [
+      {
+        id: 'admin',
+        label: 'Administrador (tú)',
+        description: 'Acceso completo: Inicio, Análisis, Ajustes, y todo lo demás.',
+        password_set: !!props.getProperty('API_TOKEN_ADMIN'),
+      },
+      {
+        id: 'staff',
+        label: 'Equipo',
+        description: 'Pedidos, Empacar, Calidad, Importar. Sin acceso a Inicio, Análisis ni Ajustes.',
+        password_set: !!props.getProperty('API_TOKEN_STAFF'),
+      },
+    ],
+  });
+}
+
+function updateRolePasswordAction(body) {
+  const roleId = String(body.role_id || '');
+  const newPassword = String(body.new_password || '').trim();
+
+  if (roleId !== 'admin' && roleId !== 'staff') {
+    return jsonResponse({ error: 'Rol desconocido: ' + roleId });
+  }
+  if (!newPassword) {
+    return jsonResponse({ error: 'La contraseña no puede estar vacía.' });
+  }
+
+  const propKey = roleId === 'admin' ? 'API_TOKEN_ADMIN' : 'API_TOKEN_STAFF';
+  PropertiesService.getScriptProperties().setProperty(propKey, newPassword);
+  return jsonResponse({ result: 'done' });
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // TIKTOK IMPORT
 // ═══════════════════════════════════════════════════════════════════════════
