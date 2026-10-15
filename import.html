@@ -621,7 +621,12 @@
 <div class="toast" id="toast"></div>
 
 <script src="common.js"></script>
-<script>VP.mountNav('importar');</script>
+<script>
+  (async function () {
+    await VP.ensureToken();
+    VP.mountNav('importar');
+  })();
+</script>
 <script src="import.js"></script>
 </body>
 </html>
