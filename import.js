@@ -181,6 +181,15 @@ function handleResult(data) {
   lastCsvBase64 = data.csv_base64 || null;
   lastMatches   = data.possible_matches || [];
 
+  // Some processing steps (PDF annotation, address extraction, CSV export)
+  // fail soft on the VPS -- the import still completes, but the step's
+  // result silently falls back to empty/unmodified rather than crashing
+  // the whole import. Surface those here so a failure is never invisible.
+  const warnings = data.warnings || [];
+  if (warnings.length > 0) {
+    showError('⚠ ' + warnings.join(' · '));
+  }
+
   // Summary card
   document.getElementById('s-inserted').textContent = s.inserted ?? 0;
   document.getElementById('s-dupes').textContent    = s.duplicates ?? 0;
