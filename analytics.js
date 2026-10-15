@@ -4,8 +4,6 @@
    so "September revenue" means orders placed in September.
    ==========================================================================*/
 
-VP.mountNav('analisis');
-
 const PAID = ['Pagado', 'Enviado', 'Archivado'];
 const SHIPPED = ['Enviado', 'Archivado'];
 
@@ -94,6 +92,8 @@ function ensureFullOrders() {
   wirePeriod();
   try {
     await VP.ensureToken();
+    VP.requireAdminPage(); // Análisis shows financial/revenue data -- staff never reaches this page
+    VP.mountNav('analisis');
 
     // Fast path: only the last 30 days of orders, small payload, so the
     // first paint is quick and never shows a stale/wrong total. Full
