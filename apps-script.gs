@@ -223,20 +223,26 @@ function doGet(e) {
     // token -- wrong, blank, or rotated -- passed validation and the user
     // was never re-prompted. It must be authenticated like everything else.
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
-    if (!authOk(e.parameter.token)) return jsonResponse({ error: 'unauthorized' });
-    if (action === 'ping') return jsonResponse({ ok: true });
+    const role = getRole(e.parameter.token);
+    if (!role) return jsonResponse({ error: 'unauthorized' });
+    if (action === 'ping') return jsonResponse({ ok: true, role: role });
+    if (action === 'whoami') return jsonResponse({ role: role });
     if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'active_session') return getActiveSession(e);
     if (action === 'sessions') return getSessions(e);
-    if (action === 'find_duplicate_customers') return findDuplicateCustomers(e);
-    if (action === 'find_duplicate_products') return findDuplicateProducts(e);
-    if (action === 'search_products_for_merge') return searchProductsForMerge(e);
-    if (action === 'manual_product_pair') return getManualProductPair(e);
-    if (action === 'product_merge_history') return getProductMergeHistory(e);
-    if (action === 'merge_history') return getMergeHistory(e);
+
+    // Ajustes-only tools -- duplicate finders/mergers, product merge
+    // search/history. Staff role is a valid token but not allowed here.
+    if (action === 'find_duplicate_customers') return requireAdmin(role) ? findDuplicateCustomers(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'find_duplicate_products') return requireAdmin(role) ? findDuplicateProducts(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'search_products_for_merge') return requireAdmin(role) ? searchProductsForMerge(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'manual_product_pair') return requireAdmin(role) ? getManualProductPair(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'product_merge_history') return requireAdmin(role) ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -334,7 +340,8 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const action = body.action;
-    if (!authOk(body.token)) return jsonResponse({ error: 'unauthorized' });
+    const role = getRole(body.token);
+    if (!role) return jsonResponse({ error: 'unauthorized' });
     return withWriteLock(function () {
 
     if (action === 'create_order') return createOrder(body);
@@ -354,15 +361,18 @@ function doPost(e) {
     if (action === 'update_session_participants') return updateSessionParticipants(body);
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     if (action === 'resolve_shopify_matches_bulk') return resolveShopifyMatchesBulk(body);
-    if (action === 'merge_customers') return mergeCustomersAction(body);
-    if (action === 'dismiss_duplicate_pair') return dismissDuplicatePairAction(body);
-    if (action === 'undo_merge') return undoMergeAction(body);
-    if (action === 'delete_merged_customer') return deleteMergedCustomerAction(body);
-    if (action === 'dismiss_product_pair') return dismissProductPairAction(body);
-    if (action === 'merge_products') return mergeProductsAction(body);
-    if (action === 'undo_product_merge') return undoProductMergeAction(body);
-    if (action === 'backfill_tiktok_preview') return backfillTikTokHistoryPreview(body);
-    if (action === 'backfill_tiktok_commit') return backfillTikTokHistoryCommit(body);
+
+    // Ajustes-only tools -- same admin-only boundary as the GET side above.
+    if (action === 'merge_customers') return requireAdmin(role) ? mergeCustomersAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'dismiss_duplicate_pair') return requireAdmin(role) ? dismissDuplicatePairAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'undo_merge') return requireAdmin(role) ? undoMergeAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'delete_merged_customer') return requireAdmin(role) ? deleteMergedCustomerAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'dismiss_product_pair') return requireAdmin(role) ? dismissProductPairAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'merge_products') return requireAdmin(role) ? mergeProductsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'undo_product_merge') return requireAdmin(role) ? undoProductMergeAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'backfill_tiktok_preview') return requireAdmin(role) ? backfillTikTokHistoryPreview(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'backfill_tiktok_commit') return requireAdmin(role) ? backfillTikTokHistoryCommit(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'update_role_password') return requireAdmin(role) ? updateRolePasswordAction(body) : jsonResponse({ error: 'unauthorized' });
 
     return jsonResponse({ error: 'Unknown action' });
     });
@@ -939,9 +949,30 @@ function nightlyBackup() {
   Logger.log('Backup complete: ' + stamp);
 }
 
+// Returns 'admin', 'staff', or null (invalid/missing token). Replaces the
+// old single-secret authOk() -- there are now two valid tokens, each
+// mapping to a role, so every call site can tell not just "is this
+// allowed in at all" but "allowed to do THIS specific thing".
+function getRole(t) {
+  const props = PropertiesService.getScriptProperties();
+  const admin = props.getProperty('API_TOKEN_ADMIN');
+  const staff = props.getProperty('API_TOKEN_STAFF');
+  if (t && admin && t === admin) return 'admin';
+  if (t && staff && t === staff) return 'staff';
+  return null;
+}
+
+// Kept for any call site not yet migrated to getRole() -- true for any
+// valid token of either role, same behavior as before this change.
 function authOk(t) {
-  const want = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
-  return !!want && t === want;
+  return !!getRole(t);
+}
+
+// Admin-only actions (duplicate finders/mergers, product merge tools,
+// backfill tool) call this instead of / in addition to authOk(). A staff
+// token is a VALID token (authOk passes) but not allowed to reach these.
+function requireAdmin(role) {
+  return role === 'admin';
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // TIKTOK IMPORT
