@@ -298,7 +298,11 @@ function toggleAssignDropdown(i) {
 async function fetchCustomersForModal() {
   try {
     const r = await fetch(`${API}?action=customers&token=${encodeURIComponent(API_TOKEN)}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
+    // Apps Script answers HTTP 200 even for its own errors -- see the
+    // matching fix in VP.get() (common.js).
+    if (data && data.error) throw new Error(data.error);
     allCustomers = data.records || [];
   } catch (e) {
     allCustomers = [];
@@ -366,11 +370,12 @@ async function doAddAlias(username, customerId, cardIdx) {
         alias:       username,
       }),
     });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     if (data.error) throw new Error(data.error);
 
     // Stamp the customer ID on the unresolved orders
-    await fetch(API, {
+    const stampR = await fetch(API, {
       method:  'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body:    JSON.stringify({
@@ -378,6 +383,9 @@ async function doAddAlias(username, customerId, cardIdx) {
         token:  API_TOKEN,
       }),
     });
+    if (!stampR.ok) throw new Error('HTTP ' + stampR.status);
+    const stampData = await stampR.json();
+    if (stampData && stampData.error) throw new Error(stampData.error);
 
     // Mark card as done
     const assigned = document.getElementById(`match-assigned-${cardIdx}`);
