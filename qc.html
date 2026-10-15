@@ -304,7 +304,12 @@
 <div class="toast" id="toast"></div>
 
 <script src="common.js"></script>
-<script>VP.mountNav('empacar');</script>
+<script>
+  (async function () {
+    await VP.ensureToken();
+    VP.mountNav('empacar');
+  })();
+</script>
 <script src="uploader.js"></script>
 <script src="qc.js"></script>
 </body>
