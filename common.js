@@ -169,7 +169,7 @@ window.VP = (function () {
       </a>
       <div class="vp-nav-links">
         ${NAV.map(n => `
-          <a href="${n.href}" class="vp-nav-link${n.id === active ? ' is-active' : ''}">${n.label}${n.id === 'pedidos' ? ' <span class="vp-nav-badge" id="vp-nav-shopify-badge" style="display:none" title="Pedidos de Shopify esperando confirmar a qué cliente pertenecen"></span>' : ''}</a>
+          <a href="${n.href}" class="vp-nav-link${n.id === active ? ' is-active' : ''}">${n.label}</a>
         `).join('')}
       </div>
       <button class="vp-nav-theme-toggle" id="vp-nav-theme-toggle" type="button" aria-label="Cambiar tema">
@@ -190,26 +190,6 @@ window.VP = (function () {
       reflectToggle();
     });
     reflectToggle();
-
-    // Persistent "pending Shopify matches" count on the Pedidos nav link,
-    // visible from every page, not just when Pedidos is open -- the whole
-    // point is that it is impossible to miss, not that you have to go
-    // looking for it. Refreshes itself every 60s; failures are silent
-    // (the badge just doesn't update that cycle, same as everything else
-    // on this nav).
-    refreshShopifyPendingBadge();
-    setInterval(refreshShopifyPendingBadge, 60000);
-  }
-
-  async function refreshShopifyPendingBadge() {
-    const badge = document.getElementById('vp-nav-shopify-badge');
-    if (!badge || !token) return;
-    try {
-      const data = await get('action=shopify_matches_review');
-      const n = (data.groups || []).length;
-      badge.textContent = n > 0 ? num(n) : '';
-      badge.style.display = n > 0 ? 'inline-flex' : 'none';
-    } catch (e) { /* silent: badge just keeps its last known value */ }
   }
 
   /* ── Formatting ─────────────────────────────────────────────────────── */
