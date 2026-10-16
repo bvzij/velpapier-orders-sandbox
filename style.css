@@ -1920,3 +1920,7 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .bulk-order-product { flex: none; }
 .bulk-order-meta { font-size: 11px; opacity: 0.6; }
 .bulk-row-status { font-size: 12px; padding: 3px 6px; flex: 0 0 auto; }
+
+/* ── Search: Enviado/Archivado tiers, greyed but still interactive ── */
+.customer-group--faded { opacity: 0.55; }
+.customer-group--faded:hover { opacity: 0.85; }
