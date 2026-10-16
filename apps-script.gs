@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.3';
+const SCRIPT_VERSION = '2026-10-15.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -641,32 +641,22 @@ function createCustomer(body) {
 
 // ─── Update order status ───────────────────────────────────────────────────────
 
-function updateOrder(body) {
+function updateOrderStatus(body) {
   const sheet = getOrdersSheet();
   const rowIndex = findOrderRow(sheet, body.order_id);
   if (!rowIndex) return jsonResponse({ error: 'Order not found' });
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const statusCol = headers.indexOf('Status') + 1;
 
-  // One read per changed field before its write, so the log shows a real
-  // before/after. A handful of fields per call (this is a manual edit
-  // form, not a bulk loop), so the extra reads are cheap here.
-  Object.entries(body.fields || {}).forEach(([key, value]) => {
-    const col = headers.indexOf(key) + 1;
-    if (col > 0) {
-      const oldValue = sheet.getRange(rowIndex, col).getValue();
-      sheet.getRange(rowIndex, col).setValue(value);
-      if (String(oldValue) !== String(value)) {
-        logAudit('update_order', 'Order', body.order_id, key, oldValue, value);
-      }
-    }
-  });
-
-  if (body.fields && body.fields['Status']) {
-    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
+  const oldStatus = sheet.getRange(rowIndex, statusCol).getValue();
+  sheet.getRange(rowIndex, statusCol).setValue(body.status);
+  applyStatusSideEffects(sheet, rowIndex, body.status, headers);
+  if (String(oldStatus) !== String(body.status)) {
+    logAudit('update_order_status', 'Order', body.order_id, 'Status', oldStatus, body.status);
   }
 
-  return jsonResponse({ result: 'updated', order_id: body.order_id });
+  return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
 }
 
 // ─── Recalculate shipment count ────────────────────────────────────────────────
@@ -882,10 +872,17 @@ function updateOrder(body) {
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
+  // One read per changed field before its write, so the log shows a real
+  // before/after. A handful of fields per call (this is a manual edit
+  // form, not a bulk loop), so the extra reads are cheap here.
   Object.entries(body.fields || {}).forEach(([key, value]) => {
     const col = headers.indexOf(key) + 1;
     if (col > 0) {
+      const oldValue = sheet.getRange(rowIndex, col).getValue();
       sheet.getRange(rowIndex, col).setValue(value);
+      if (String(oldValue) !== String(value)) {
+        logAudit('update_order', 'Order', body.order_id, key, oldValue, value);
+      }
     }
   });
 
