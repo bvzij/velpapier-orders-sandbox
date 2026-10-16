@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.2';
+const SCRIPT_VERSION = '2026-10-15.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -450,6 +450,7 @@ function doPost(e) {
       flushAudit(); // after the real write already succeeded -- never blocks it
       return result;
     });
+
   } catch (err) {
     return jsonResponse({ error: err.message });
   }
@@ -640,18 +641,32 @@ function createCustomer(body) {
 
 // ─── Update order status ───────────────────────────────────────────────────────
 
-function updateOrderStatus(body) {
+function updateOrder(body) {
   const sheet = getOrdersSheet();
   const rowIndex = findOrderRow(sheet, body.order_id);
   if (!rowIndex) return jsonResponse({ error: 'Order not found' });
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const statusCol = headers.indexOf('Status') + 1;
 
-  sheet.getRange(rowIndex, statusCol).setValue(body.status);
-  applyStatusSideEffects(sheet, rowIndex, body.status, headers);
+  // One read per changed field before its write, so the log shows a real
+  // before/after. A handful of fields per call (this is a manual edit
+  // form, not a bulk loop), so the extra reads are cheap here.
+  Object.entries(body.fields || {}).forEach(([key, value]) => {
+    const col = headers.indexOf(key) + 1;
+    if (col > 0) {
+      const oldValue = sheet.getRange(rowIndex, col).getValue();
+      sheet.getRange(rowIndex, col).setValue(value);
+      if (String(oldValue) !== String(value)) {
+        logAudit('update_order', 'Order', body.order_id, key, oldValue, value);
+      }
+    }
+  });
 
-  return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
+  if (body.fields && body.fields['Status']) {
+    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
+  }
+
+  return jsonResponse({ result: 'updated', order_id: body.order_id });
 }
 
 // ─── Recalculate shipment count ────────────────────────────────────────────────
@@ -787,6 +802,7 @@ function addAlias(body) {
   const updated = existing ? existing + ', ' + newAlias : newAlias;
 
   sheet.getRange(customer._rowIndex, aliasCol).setValue(updated);
+  logAudit('add_alias', 'Customer', body.customer_id, 'Aliases', existing, updated);
 
   return jsonResponse({ result: 'alias_added', customer_id: body.customer_id, aliases: updated });
 }
@@ -885,10 +901,20 @@ function deleteOrder(body) {
   const rowIndex = findOrderRow(sheet, body.order_id);
   if (!rowIndex) return jsonResponse({ error: 'Order not found' });
 
+  // Snapshot the whole row as {header: value} before it's gone -- this is
+  // the only record of a deleted order's contents afterward. Not a
+  // restore/undo button yet (Phase 1 is logging only), but the full row
+  // lives in the log's Details column if one is built later, or for
+  // manual recovery by reading the JSON.
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rowValues = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  const snapshot = {};
+  headers.forEach((h, i) => { snapshot[h] = rowValues[i]; });
+
   sheet.deleteRow(rowIndex);
+  logAuditEvent('delete_order', 'Order', body.order_id, { deleted_row: snapshot });
   return jsonResponse({ result: 'deleted', order_id: body.order_id });
 }
-
 // ─── Auto-archive ───────────────────────────────────────────────────────────────
 
 function autoArchiveOldOrders() {
@@ -2546,6 +2572,11 @@ function resolveShopifyMatchAction(body) {
 
   setMatchField('Linked Customer ID', linkedCustomerId);
   setMatchField('Decided Date', nowISO());
+  logAuditEvent('resolve_shopify_match', 'ShopifyMatch', body.match_id, {
+    decision: body.decision,
+    linked_customer_id: linkedCustomerId,
+    shopify_customer_id: match['Shopify Customer ID'] || '',
+  });
 
   // ─── Backfill the Orders row that was waiting on this match ───────
   const ordersSheet = getOrdersSheet();
