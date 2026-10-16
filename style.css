@@ -1887,3 +1887,36 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
   margin: 10px 0 4px;
   line-height: 1.5;
 }
+
+/* ── Clickable group header name (history moved here from each row) ── */
+.customer-name--clickable { cursor: pointer; }
+.customer-name--clickable:hover { text-decoration: underline; }
+
+/* ── TikTok shipment link picker ── */
+.link-picker {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; margin-bottom: 0.75rem;
+  border: 0.5px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 12px; cursor: pointer;
+}
+.link-picker-label { white-space: nowrap; }
+.link-picker-select { flex: 1; min-width: 0; font-size: 12px; padding: 3px 6px; }
+.link-picker--compact {
+  margin-bottom: 0; padding: 4px 6px; gap: 5px;
+  font-size: 11px; border: none; flex: 0 0 auto; max-width: 210px;
+}
+.link-picker--compact .link-picker-label { display: none; }
+.link-picker--compact .link-picker-select { font-size: 11px; max-width: 160px; }
+
+/* ── Bulk modal: wider, per-row status + link ── */
+.bulk-status-modal { width: 720px; max-width: 95vw; }
+.bulk-section-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.4px; opacity: 0.6; margin: 0 0 6px;
+}
+.bulk-order-list { max-height: 340px; }
+.bulk-order-item { align-items: center; gap: 10px; cursor: default; }
+.bulk-order-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bulk-order-product { flex: none; }
+.bulk-order-meta { font-size: 11px; opacity: 0.6; }
+.bulk-row-status { font-size: 12px; padding: 3px 6px; flex: 0 0 auto; }
