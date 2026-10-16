@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.7';
+const SCRIPT_VERSION = '2026-10-15.8';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1118,6 +1118,13 @@ function getIdentity(t) {
   const serviceStaff = props['API_TOKEN_SERVICE_STAFF'];
   if (serviceStaff && t === serviceStaff) return { name: 'Sistema (staff)', role: 'staff' };
 
+  // The n8n workflow that receives Shopify's order webhook and calls
+  // import_shopify_order -- a separate machine identity from the VPS, so
+  // the audit log can tell "a Shopify order came in automatically" apart
+  // from "the VPS ran a TikTok import."
+  const serviceShopify = props['API_TOKEN_SERVICE_SHOPIFY'];
+  if (serviceShopify && t === serviceShopify) return { name: 'Sistema (Shopify webhook)', role: 'admin' };
+
   return null;
 }
 
@@ -1170,18 +1177,30 @@ function getRolesAction(e) {
 // updated directly in the Apps Script editor's Script Properties, so a
 // compromised admin session (or a mistake in this modal) can never be
 // used to lock the real admin out or reset their own password.
+// body.person_name must match a USER_<NAME> Script Property exactly (the
+// part after "USER_"). Only ever updates a staff-role person's password --
+// admin passwords stay locked to the Apps Script editor itself, same
+// restriction as before, now enforced per-person rather than per-role.
+// Never logs the password value, only that a change happened.
 function updateRolePasswordAction(body) {
-  const roleId = String(body.role_id || '');
+  const personName = String(body.person_name || '').trim().toUpperCase();
   const newPassword = String(body.new_password || '').trim();
 
-  if (roleId !== 'staff') {
+  if (!personName) return jsonResponse({ error: 'person_name es obligatorio.' });
+  if (!newPassword) return jsonResponse({ error: 'La contraseña no puede estar vacía.' });
+
+  const props = PropertiesService.getScriptProperties();
+  const propKey = 'USER_' + personName;
+  const existing = props.getProperty(propKey);
+  if (!existing) return jsonResponse({ error: 'No existe ningún usuario llamado ' + personName + '.' });
+
+  const existingRole = existing.split('|')[1] === 'admin' ? 'admin' : 'staff';
+  if (existingRole === 'admin') {
     return jsonResponse({ error: 'La contraseña de administrador solo se puede cambiar directamente en Apps Script.' });
   }
-  if (!newPassword) {
-    return jsonResponse({ error: 'La contraseña no puede estar vacía.' });
-  }
 
-  PropertiesService.getScriptProperties().setProperty('API_TOKEN_STAFF', newPassword);
+  props.setProperty(propKey, newPassword + '|' + existingRole);
+  logAuditEvent('update_role_password', 'User', personName, {});
   return jsonResponse({ result: 'done' });
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1354,6 +1373,7 @@ function importTikTokOrders(body) {
 
     rows.push(row);
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
+    logAuditEvent('import_tiktok_order', 'Order', row[oh.indexOf('Order ID')], { tracking_id: tid, channel: 'TikTok' });
   });
 
   // Duplicates never got a results.push inside the main loop above (they
@@ -1474,6 +1494,9 @@ function createCustomersBulk(body) {
   if (rows.length) {
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
   }
+  created.filter(c => !c.existed).forEach(c => {
+    logAuditEvent('create_customer', 'Customer', c.customer_id, { primary_username: c.username || '', source: 'bulk_import' });
+  });
 
   return jsonResponse({ result: 'bulk_created', created: created });
 }
@@ -2509,7 +2532,10 @@ function importShopifyOrder(body) {
       if (qtyCol >= 0) row[qtyCol] = Number(li.qty) || 0;
     }
 
-    ordersSheet.appendRow(row);
+      ordersSheet.appendRow(row);
+    logAuditEvent('import_shopify_order', 'Order', row[oh.indexOf('Order ID')], {
+      shopify_order_id: shopifyOrderId, order_name: orderName, tier: resolution.tier,
+    });
 
     return jsonResponse({
       result: 'imported',
@@ -2984,6 +3010,7 @@ function backfillTikTokHistoryPreview(body) {
 
 function backfillTikTokHistoryCommit(body) {
   const result = runTikTokBackfill(body.records || [], false);
+  logAuditEvent('backfill_tiktok_commit', 'TikTokImportHistory', '', result);
   return jsonResponse(result);
 }
 
@@ -4294,6 +4321,9 @@ function resolveShopifyMatchesBulk(body) {
     });
     recount.push(targetId);
     results.push({ key: key, ok: true, customer_id: targetId, matches_resolved: pending.length, orders_updated: ordersUpdated });
+    logAuditEvent('resolve_shopify_match', 'Customer', targetId, {
+      decision: item.decision, matches_resolved: pending.length, orders_updated: ordersUpdated, bulk: true,
+    });
   });
 
   // ── write phase: only the cells that changed ──
