@@ -115,6 +115,13 @@ function mapFromApi(r) {
     Channel: r['Channel'] || 'Manual',
     CustomerId: r['Customer ID'] || '',
     ShopifyOrderId: r['Shopify Order ID'] || '',
+    // Was never mapped in, so shopifyOrderLine() always fell back to the
+    // bare "Shopify" label instead of "Shopify #1234".
+    ShopifyOrderNumber: r['Shopify Order Number'] || '',
+    // Needed so a non-TikTok order can be linked to the TikTok shipment it
+    // physically travels with -- Linked Shipment stores the tracking ID.
+    TrackingId: r['Tracking ID'] || '',
+    LinkedShipment: r['Linked Shipment'] || '',
     ArchiveDate: r['Archive Date'] || '',
     'Fecha Creación': r['Created Date']
   };
@@ -146,8 +153,19 @@ let bulkItems = [{ producto: '', precio: '', notas: '' }];
 function daysSince(dateStr) { if (!dateStr) return 0; return Math.floor((new Date() - new Date(dateStr)) / 86400000); }
 function formatMXN(n) { if (n === undefined || n === null || n === '') return '—'; return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 }); }
 function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'America/Mexico_City' }); }
-function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
-function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
+// Date + time, Mexico City. Created Date has always stored a full ISO
+// timestamp -- only the display was truncating it to the date.
+function formatDateTime(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('es-MX', {
+    day: '2-digit', month: '2-digit', year: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    timeZone: 'America/Mexico_City',
+  });
+}
+function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -182,6 +200,11 @@ function shopifyOrderLine(r) {
     );
     return `${links.join(' + ')} · ${count}`;
   }
+
+  // Manual entries have no order number and no parsable product list --
+  // the Products field is one free-text line typed by hand. Summarising it
+  // as "1 producto" hid the only information the entry actually carries.
+  if (r.Producto) return escapeHtml(r.Producto);
 
   return count;
 }
@@ -296,7 +319,10 @@ function runSearch(name) {
     groupByCliente(records).forEach(grp => {
       const cliente = grp.name;
       const group = document.createElement('div'); group.className = 'customer-group';
-      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}</div></div>`;
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}</div></div>`;
+      const searchCustId = (grp.items[0] && grp.items[0].CustomerId) || '';
+      const searchNameEl = group.querySelector('.customer-name');
+      if (searchNameEl && searchCustId) searchNameEl.addEventListener('click', () => openCustomerHistory(searchCustId, cliente));
       grp.items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
       results.appendChild(group);
     });
@@ -436,81 +462,194 @@ async function submitNewOrder() {
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
+// ── TikTok shipment linking ─────────────────────────────────
+// A Shopify or manual order often travels inside a TikTok shipment's
+// package. Linked Shipment records that, storing the TikTok order's
+// TRACKING ID -- the same convention saveQC's finalize step already uses.
+//
+// "Active" = the customer has a TikTok order still in Pagado: imported
+// with its shipping label but not yet shipped through QC. Same test the
+// "Tiene Pedido de TikTok" badge uses.
+const LINK_CANDIDATE_LIMIT = 5;
+
+function getTikTokLinkCandidates(customerId) {
+  if (!customerId) return { candidates: [], active: null };
+  const all = allRecords
+    .filter(r => r.CustomerId === customerId && r.Channel === 'TikTok' && r.TrackingId)
+    .sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
+  return { candidates: all.slice(0, LINK_CANDIDATE_LIMIT), active: all.find(r => r.Status === 'Pagado') || null };
+}
+
+// idPrefix keeps ids unique when several pickers live in one modal (the
+// bulk modal has one shared picker plus one per row).
+function renderLinkPicker(idPrefix, customerId, compact) {
+  const { candidates, active } = getTikTokLinkCandidates(customerId);
+  if (!candidates.length) return '';
+  const options = candidates.map(r =>
+    `<option value="${escapeHtml(r.TrackingId)}"${active && r.ID === active.ID ? ' selected' : ''}>${escapeHtml(r.ID + ' — ' + formatDateTime(r['Fecha Creación']))}</option>`
+  ).join('');
+  return `<label class="link-picker${compact ? ' link-picker--compact' : ''}">
+    <input type="checkbox" class="link-picker-check" id="${idPrefix}-check"${active ? ' checked' : ''} />
+    <span class="link-picker-label">Enviar con TikTok</span>
+    <select class="link-picker-select" id="${idPrefix}-select">${options}</select>
+  </label>`;
+}
+
+function readLinkPicker(idPrefix) {
+  const chk = document.getElementById(idPrefix + '-check');
+  const sel = document.getElementById(idPrefix + '-select');
+  if (!chk || !sel || !chk.checked) return '';
+  return sel.value || '';
+}
+
+// Writes any combination of fields on one order. update_order_status only
+// handles Status; linking needs Linked Shipment written in the SAME call
+// so status and link can never half-apply.
+async function performOrderUpdate(orderId, fields) {
+  return apiPost({ action: 'update_order', order_id: orderId, fields: fields });
+}
+
 function showStatusModal(id, currentStatus) {
   const next = nextStatuses(currentStatus);
   if (!next.length) { showToast('Sin siguiente estado'); return; }
+  const rec0 = allRecords.find(r => String(r.ID) === String(id));
+  // A TikTok order IS the shipment -- it is never linked into another one.
+  const linkHtml = (rec0 && rec0.Channel !== 'TikTok') ? renderLinkPicker('single-link', rec0.CustomerId, false) : '';
   const c = document.getElementById('modal-container');
-  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div><div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
-  c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => { updateOrderStatusNew(id, btn.dataset.status); closeModal(); }));
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>${linkHtml}<div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
+  c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => {
+    const link = readLinkPicker('single-link');
+    updateOrderStatusNew(id, btn.dataset.status, link);
+    closeModal();
+  }));
   document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
 }
 
-async function updateOrderStatusNew(id, status) {
+async function updateOrderStatusNew(id, status, linkTrackingId) {
   try {
     const rec = allRecords.find(r => r.ID === id);
-    const fromStatus = rec ? rec.Status : null;
-    const result = await performStatusUpdate(id, status);
+    const fields = { Status: status };
+    if (linkTrackingId) fields['Linked Shipment'] = linkTrackingId;
+    const result = await performOrderUpdate(id, fields);
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
-    if (rec) rec.Status = status;
+    if (rec) {
+      rec.Status = status;
+      if (linkTrackingId) rec.LinkedShipment = linkTrackingId;
+    }
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`✓ Estado actualizado a ${status}`);
+    showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
 let bulkModalSelectedStatus = null;
+let bulkCurrentOrders = [];
 
+// Two ways to set a status here, deliberately: the pills at the top apply
+// to every CHECKED row at once (the common case), while each row's own
+// dropdown overrides that for just that row. "No cambiar" is the row
+// default, so a row only moves if you explicitly ask it to or it's checked
+// under a pill. Same shape for linking: one shared picker at the top, plus
+// a per-row picker that wins when set.
 function showBulkStatusModal(group) {
   bulkModalSelectedStatus = null;
   const cliente = group.name;
   const orders = group.items.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
   if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
+  bulkCurrentOrders = orders;
+  const custId = (orders[0] && orders[0].CustomerId) || '';
+  const statusOpts = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
+
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
     <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
+    <div class="bulk-section-label">Aplicar a los seleccionados</div>
     <div class="status-pills">${['No Pagado', 'Pagado', 'Enviado'].map(s => `<button class="status-pill-toggle" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
-    <div class="bulk-order-list">${orders.map(r => `<label class="bulk-order-item"><input type="checkbox" class="bulk-order-check" data-id="${escapeHtml(String(r.ID))}" checked /><span class="bulk-order-product">${escapeHtml(r.Producto) || '—'}</span><span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span></label>`).join('')}</div>
+    ${renderLinkPicker('bulk-link', custId, false)}
+    <div class="bulk-section-label">Pedidos</div>
+    <div class="bulk-order-list">${orders.map((r, i) => `<div class="bulk-order-item">
+        <input type="checkbox" class="bulk-order-check" data-row="${i}" checked />
+        <div class="bulk-order-main">
+          <span class="bulk-order-product">${shopifyOrderLine(r)}</span>
+          <span class="bulk-order-meta">${escapeHtml(formatDateTime(r['Fecha Creación']))}</span>
+        </div>
+        <span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span>
+        <select class="bulk-row-status" data-row="${i}">
+          <option value="">No cambiar</option>
+          ${statusOpts.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
+        </select>
+        ${r.Channel !== 'TikTok' ? renderLinkPicker('bulk-row-' + i + '-link', r.CustomerId, true) : ''}
+      </div>`).join('')}</div>
     <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button><button class="btn btn-primary" id="bulk-status-confirm-btn" disabled>Confirmar</button></div>
   </div></div>`;
+
   document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
   c.querySelectorAll('.status-pill-toggle').forEach(btn => btn.addEventListener('click', () => {
-    bulkModalSelectedStatus = btn.dataset.status;
-    c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b === btn));
+    // Clicking the active pill again clears it, so you can go back to
+    // "per-row only" without closing the modal.
+    bulkModalSelectedStatus = bulkModalSelectedStatus === btn.dataset.status ? null : btn.dataset.status;
+    c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b.dataset.status === bulkModalSelectedStatus));
     updateBulkConfirmState();
   }));
-  c.querySelectorAll('.bulk-order-check').forEach(chk => chk.addEventListener('change', updateBulkConfirmState));
-  document.getElementById('bulk-status-confirm-btn').addEventListener('click', () => { if (bulkModalSelectedStatus) applyBulkStatus(bulkModalSelectedStatus); });
+  c.querySelectorAll('.bulk-order-check, .bulk-row-status, .link-picker-check, .link-picker-select')
+    .forEach(el => el.addEventListener('change', updateBulkConfirmState));
+  document.getElementById('bulk-status-confirm-btn').addEventListener('click', applyBulkStatus);
+  updateBulkConfirmState();
+}
+
+// Resolves what each row would actually do, so the Confirmar button and
+// the save path can never disagree about it.
+function bulkRowPlan() {
+  const sharedLink = readLinkPicker('bulk-link');
+  const plan = [];
+  bulkCurrentOrders.forEach((r, i) => {
+    const chk = document.querySelector(`.bulk-order-check[data-row="${i}"]`);
+    const sel = document.querySelector(`.bulk-row-status[data-row="${i}"]`);
+    const checked = chk ? chk.checked : false;
+    const rowStatus = sel ? sel.value : '';
+    const rowLink = readLinkPicker('bulk-row-' + i + '-link');
+
+    const status = rowStatus || (checked && bulkModalSelectedStatus ? bulkModalSelectedStatus : '');
+    const link = rowLink || (checked ? sharedLink : '');
+    const statusChanges = status && status !== r.Status;
+    const linkChanges = link && link !== r.LinkedShipment;
+    if (!statusChanges && !linkChanges) return;
+    plan.push({ id: String(r.ID), status: statusChanges ? status : '', link: linkChanges ? link : '' });
+  });
+  return plan;
 }
 
 function updateBulkConfirmState() {
-  const anyChecked = document.querySelectorAll('.bulk-order-check:checked').length > 0;
   const btn = document.getElementById('bulk-status-confirm-btn');
-  if (btn) btn.disabled = !(anyChecked && bulkModalSelectedStatus);
+  if (btn) btn.disabled = bulkRowPlan().length === 0;
 }
 
-async function applyBulkStatus(status) {
-  const ids = Array.from(document.querySelectorAll('.bulk-order-check:checked')).map(ch => ch.dataset.id);
-  if (!ids.length) { showToast('Selecciona al menos un pedido'); return; }
+async function applyBulkStatus() {
+  const plan = bulkRowPlan();
+  if (!plan.length) { showToast('Nada que cambiar'); return; }
+  let done = 0;
   try {
-    const entries = [];
-    for (const id of ids) {
-      const rec = allRecords.find(r => String(r.ID) === id);
-      const fromStatus = rec ? rec.Status : null;
-      const result = await performStatusUpdate(id, status);
-      if (result.result === 'updated') {
-        if (rec) rec.Status = status;
-        entries.push({ order_id: id, from_status: fromStatus, to_status: status });
+    for (const p of plan) {
+      const fields = {};
+      if (p.status) fields.Status = p.status;
+      if (p.link) fields['Linked Shipment'] = p.link;
+      const result = await performOrderUpdate(p.id, fields);
+      if (result.result !== 'updated') continue;
+      const rec = allRecords.find(r => String(r.ID) === p.id);
+      if (rec) {
+        if (p.status) rec.Status = p.status;
+        if (p.link) rec.LinkedShipment = p.link;
       }
+      done++;
     }
-    entries.forEach(pushUndoEntry);
     closeModal();
+    updateUndoRedoButtons();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`✓ ${entries.length} pedidos actualizados a ${status}`);
+    showToast(`✓ ${done} pedido${done !== 1 ? 's' : ''} actualizado${done !== 1 ? 's' : ''}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
-
 function openCustomerHistory(customerId, displayName) {
   if (!customerId) { showToast('Cliente sin ID asociado'); return; }
   showCustomerHistoryModal(customerId, displayName);
@@ -1105,7 +1244,7 @@ function renderOrderRow(r, showActions) {
 
   let pillClass = statusPillClass(status), pillText = status === 'No Pagado' ? `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}` : status === 'Pagado' ? `Pagado${isOverduePaid ? ' ⚠' : ''}` : status;
 
-  const metaParts = [formatDate(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
+  const metaParts = [formatDateTime(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
   const notasHtml = renderNotas(r.Notas);
   const id = r.ID;
 
@@ -1113,10 +1252,10 @@ function renderOrderRow(r, showActions) {
   row.className = rowClass;
 
   const info = document.createElement('div');
-  const displayName = (customersById[r.CustomerId] || r.Cliente || '').replace(/^@/, '');
-  info.innerHTML = `<div class="order-userline"><span class="order-username">${escapeHtml(displayName) || '—'}</span>${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
-  const usernameEl = info.querySelector('.order-username');
-  if (usernameEl) usernameEl.addEventListener('click', () => openCustomerHistory(r.CustomerId, r.Cliente));
+  // The username used to repeat on every row even though the group header
+  // directly above already shows it once. Only the channel tag stays here;
+  // opening the customer's history moved onto that header name.
+  info.innerHTML = `<div class="order-userline">${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
 
   const hoverZone = document.createElement('div');
   hoverZone.className = 'row-hover-zone';
@@ -1229,7 +1368,9 @@ function renderGrouped(records, containerId, showActions) {
       ? `<div class="pending-match-hint">Posible cliente: <strong>${escapeHtml(grp.pendingMatch['Suggested Customer Name'] || '—')}</strong> (${grp.pendingMatch['Match Score']}%)</div>`
       : '';
 
-    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+    header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
+    const headerNameEl = header.querySelector('.customer-name');
+    if (headerNameEl && custId) headerNameEl.addEventListener('click', () => openCustomerHistory(custId, cliente));
 
     if (suggestionHtml) {
       const hintEl = document.createElement('div');
