@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.6';
+const SCRIPT_VERSION = '2026-10-15.7';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -3213,6 +3213,7 @@ function dismissProductPairAction(body) {
   if (!idA || !idB) return jsonResponse({ error: 'parent_id_a and parent_id_b are required' });
 
   getDismissedProductPairsSheet().appendRow([idA, idB, nowISO()]);
+  logAuditEvent('dismiss_product_pair', 'Product', idA, { other_id: idB });
   return jsonResponse({ result: 'dismissed' });
 }
 
@@ -3400,6 +3401,10 @@ function mergeProductsAction(body) {
     variantPairs, ordersRepointed,
     mergeSnapshot
   );
+  logAuditEvent('merge_products', 'Product', keepParentId, {
+    merged_id: loseParentId, merged_name: loseParentName,
+    variants_merged: variantPairs.length, orders_repointed: ordersRepointed,
+  });
 
   return jsonResponse({
     result: 'merged',
@@ -3595,6 +3600,7 @@ function undoProductMergeAction(body) {
 
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
   if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
+  logAuditEvent('undo_product_merge', 'Product', keepId, { merge_id: mergeId, restored_id: loseId, orders_reverted: ordersReverted });
 
   return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
 }
@@ -4482,6 +4488,9 @@ function mergeCustomersAction(body) {
   }
 
   logMergeHistory(keepId, keeperUsername, loseId, loserUsername, ordersRepointed, keeperSnapshot);
+  logAuditEvent('merge_customers', 'Customer', keepId, {
+    merged_id: loseId, merged_username: loserUsername, orders_repointed: ordersRepointed,
+  });
 
   return jsonResponse({
     result: 'merged',
@@ -4500,6 +4509,7 @@ function dismissDuplicatePairAction(body) {
 
   const sheet = getDismissedDuplicatesSheet();
   sheet.appendRow([idA, idB, nowISO()]);
+  logAuditEvent('dismiss_duplicate_pair', 'Customer', idA, { other_id: idB });
 
   return jsonResponse({ result: 'dismissed' });
 }
@@ -4722,6 +4732,7 @@ function undoMergeAction(body) {
 
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
   if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
+  logAuditEvent('undo_merge', 'Customer', keepId, { merge_id: mergeId, restored_id: loseId, orders_reverted: ordersReverted });
 
   return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
 }
@@ -4765,9 +4776,13 @@ function deleteMergedCustomerAction(body) {
   if (loseRow === -1) return jsonResponse({ error: 'Merged customer row not found (already deleted?)' });
 
   const deletedUsername = String(cData[loseRow][cUsernameCol] || '');
-  custSheet.deleteRow(loseRow + 1);
+  const cHeaders = cData[0];
+  const deletedSnapshot = {};
+  cHeaders.forEach((h, i) => { deletedSnapshot[h] = cData[loseRow][i]; });
 
+  custSheet.deleteRow(loseRow + 1);
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Limpiado');
+  logAuditEvent('delete_merged_customer', 'Customer', loseId, { merge_id: mergeId, deleted_row: deletedSnapshot });
 
   return jsonResponse({ result: 'deleted', merge_id: mergeId, customer_id: loseId, username: deletedUsername });
 }
