@@ -98,7 +98,13 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="common.js"></script>
-<script>VP.mountNav('ajustes');</script>
+<script>
+  (async function () {
+    await VP.ensureToken();
+    VP.requireAdminPage();
+    VP.mountNav('ajustes');
+  })();
+</script>
 <script src="ajustes.js"></script>
 </body>
 </html>
