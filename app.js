@@ -365,12 +365,22 @@ async function runSearch(name) {
     groupByCliente(records).forEach(grp => {
       const cliente = grp.name;
       const group = document.createElement('div'); group.className = 'customer-group' + (greyedOut ? ' customer-group--faded' : '');
-      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}</div></div>`;
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}</div><div class="customer-bulk-actions"></div></div>`;
       const searchCustId = (grp.items[0] && grp.items[0].CustomerId) || '';
       const searchNameEl = group.querySelector('.customer-name');
       if (searchNameEl && searchCustId) searchNameEl.addEventListener('click', () => openCustomerHistory(searchCustId, cliente));
-      // showActions stays true in every tier -- Enviado/Archivado rows are
-      // greyed out visually, not disabled; Editar/Eliminar/Estado still work.
+
+      // Bulk "Cambiar estado" only for the active tier -- never shown
+      // alongside greyed-out Enviado/Archivado groups, so there's no way
+      // to bulk-change an order that's already shipped or archived.
+      if (!greyedOut) {
+        const bulk = group.querySelector('.customer-bulk-actions');
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Cambiar estado';
+        btn.addEventListener('click', () => showBulkStatusModal(grp));
+        bulk.appendChild(btn);
+      }
+
       grp.items.forEach(r => group.appendChild(renderOrderRow(r, true)));
       results.appendChild(group);
     });
