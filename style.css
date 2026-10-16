@@ -1928,8 +1928,10 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 /* ── Search results filter bar ── */
 .search-filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0.5rem 0 1rem; }
 .search-filter-btn {
-  font-size: 12px; padding: 4px 11px; border-radius: 99px;
-  border: 0.5px solid var(--border); background: var(--surface);
-  cursor: pointer; white-space: nowrap;
+  font-family: inherit; font-size: 12px; font-weight: 500;
+  padding: 7px 12px; border-radius: 20px;
+  border: 0.5px solid var(--border-strong); background: var(--surface); color: var(--text-muted);
+  cursor: pointer; white-space: nowrap; transition: all 0.15s;
 }
+.search-filter-btn:hover { background: var(--surface2); }
 .search-filter-btn.active { background: var(--text); color: var(--surface); border-color: var(--text); }
