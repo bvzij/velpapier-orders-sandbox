@@ -193,10 +193,11 @@ function shopifyOrderLine(r) {
 
   if (r.Channel === 'TikTok' && r.ID) {
     // TikTok orders can combine multiple Order IDs (e.g. "123 + 456") when
-    // several TikTok orders ship together. Link each one separately.
+    // several TikTok orders ship together. Link each one separately, using
+    // its own ID as the label instead of the generic word "TikTok".
     const ids = String(r.ID).split('+').map(s => s.trim()).filter(Boolean);
     const links = ids.map(id =>
-      `<a href="https://seller-mx.tiktok.com/order/detail?order_no=${encodeURIComponent(id)}&shop_region=MX" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en TikTok" onclick="event.stopPropagation()">TikTok</a>`
+      `<a href="https://seller-mx.tiktok.com/order/detail?order_no=${encodeURIComponent(id)}&shop_region=MX" target="_blank" rel="noopener noreferrer" class="notas-link" title="Ver pedido en TikTok">${escapeHtml(id)}</a>`
     );
     return `${links.join(' + ')} · ${count}`;
   }
@@ -304,34 +305,46 @@ function clearSearch() {
 
 function updateClearBtn() { document.getElementById('search-clear-btn').style.display = document.getElementById('global-search').value ? 'flex' : 'none'; }
 
+// Known limitation, unchanged by this edit: matching is still by the raw
+// Cliente text, not Customer ID, so an order stored under a slightly
+// different username string for the same customer won't appear here.
 function runSearch(name) {
   const val = name.toLowerCase();
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
-  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
-  const archived = allRecords.filter(r => ['Enviado', 'Archivado'].includes(r.Status) && (r.Cliente || '').toLowerCase() === val);
+  const byDateDesc = (a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0);
+  const matches = r => (r.Cliente || '').toLowerCase() === val;
+
+  const active   = allRecords.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado' ? matches(r) : false).sort(byDateDesc);
+  const shipped  = allRecords.filter(r => r.Status === 'Enviado' && matches(r)).sort(byDateDesc);
+  const archived = allRecords.filter(r => r.Status === 'Archivado' && matches(r)).sort(byDateDesc);
+
   const results = document.getElementById('search-results');
   results.innerHTML = '';
-  if (!active.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
-  function appendGroup(records, labelText, showActs) {
+  if (!active.length && !shipped.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
+
+  function appendGroup(records, labelText, greyedOut) {
     if (!records.length) return;
     if (labelText) { const l = document.createElement('div'); l.className = 'section-label'; l.textContent = labelText; results.appendChild(l); }
     groupByCliente(records).forEach(grp => {
       const cliente = grp.name;
-      const group = document.createElement('div'); group.className = 'customer-group';
+      const group = document.createElement('div'); group.className = 'customer-group' + (greyedOut ? ' customer-group--faded' : '');
       group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}</div></div>`;
       const searchCustId = (grp.items[0] && grp.items[0].CustomerId) || '';
       const searchNameEl = group.querySelector('.customer-name');
       if (searchNameEl && searchCustId) searchNameEl.addEventListener('click', () => openCustomerHistory(searchCustId, cliente));
-      grp.items.forEach(r => group.appendChild(renderOrderRow(r, showActs)));
+      // showActions stays true in every tier -- Enviado/Archivado rows are
+      // greyed out visually, not disabled; Editar/Eliminar/Estado still work.
+      grp.items.forEach(r => group.appendChild(renderOrderRow(r, true)));
       results.appendChild(group);
     });
   }
-  if (active.length) appendGroup(active, 'Activos', true);
-  if (archived.length) {
-    if (active.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivo'; results.appendChild(d); }
-    appendGroup(archived, active.length ? '' : 'Archivo', false);
-  }
+
+  appendGroup(active, 'Activos', false);
+  if (shipped.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Enviado'; results.appendChild(d); }
+  appendGroup(shipped, '', true);
+  if (archived.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivado'; results.appendChild(d); }
+  appendGroup(archived, '', true);
 }
 
 // ── CLIENT AUTOCOMPLETE ──────────────────────────────────────
