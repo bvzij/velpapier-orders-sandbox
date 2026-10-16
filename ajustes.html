@@ -47,19 +47,6 @@
   </div>
 
   <div class="aj-section">
-<div class="aj-section-title">Coincidencias de Shopify</div>
-    <div class="aj-card">
-      <div class="aj-row" style="margin-bottom:0">
-        <div>
-          <div class="aj-row-label">Revisar pendientes en bloque</div>
-          <div class="aj-row-hint">Agrupa por persona los pedidos de Shopify «pendientes de fusión», muestra por qué se sugiere cada cliente y aplica todo de una vez, guardando el nuevo ID de Shopify en el cliente principal</div>
-        </div>
-        <button class="refresh-btn" id="aj-open-shopify-matches">Revisar pendientes</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="aj-section">
     <div class="aj-section-title">Historial de pedidos TikTok</div>
     <div class="aj-card">
       <div class="aj-row" style="margin-bottom:0">
@@ -98,16 +85,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="common.js"></script>
-<script>
-  // Ajustes is admin-only (duplicate/merge tools, backfill, role passwords).
-  // ensureToken() must run here -- before mountNav() -- so the role is
-  // known before the nav (and the redirect check) decide anything.
-  (async function () {
-    await VP.ensureToken();
-    VP.requireAdminPage();
-    VP.mountNav('ajustes');
-  })();
-</script>
+<script>VP.mountNav('ajustes');</script>
 <script src="ajustes.js"></script>
 </body>
 </html>
