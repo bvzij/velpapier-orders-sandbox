@@ -1924,3 +1924,12 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 /* ── Search: Enviado/Archivado tiers, greyed but still interactive ── */
 .customer-group--faded { opacity: 0.55; }
 .customer-group--faded:hover { opacity: 0.85; }
+
+/* ── Search results filter bar ── */
+.search-filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0.5rem 0 1rem; }
+.search-filter-btn {
+  font-size: 12px; padding: 4px 11px; border-radius: 99px;
+  border: 0.5px solid var(--border); background: var(--surface);
+  cursor: pointer; white-space: nowrap;
+}
+.search-filter-btn.active { background: var(--text); color: var(--surface); border-color: var(--text); }
