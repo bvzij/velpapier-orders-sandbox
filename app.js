@@ -44,50 +44,59 @@ function pushUndoEntry(entry) {
   updateUndoRedoButtons();
 }
 
-function updateUndoRedoButtons() {
+// Button state now reflects the server's one undo/redo slot (per
+// logged-in person), not a local array -- fetched once on load and
+// refreshed after every undo/redo, rather than guessed from local state
+// that could be stale across tabs/devices.
+async function updateUndoRedoButtons() {
   const undoBtn = document.getElementById('undo-btn');
   const redoBtn = document.getElementById('redo-btn');
-  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
-  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
-}
-
-async function performStatusUpdate(orderId, status) {
-  const payload = { action: 'update_order_status', order_id: orderId, status: status };
-  return apiPost(payload);
-}
-
-async function performUndo() {
-  if (!undoStack.length) return;
-  const entry = undoStack.pop();
   try {
-    const result = await performStatusUpdate(entry.order_id, entry.from_status);
-    if (result.result !== 'updated') throw new Error(result.error || 'Error');
-    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
-    if (rec) rec.Status = entry.from_status;
-    redoStack.push(entry);
-    if (redoStack.length > MAX_UNDO_DEPTH) redoStack.shift();
+    const status = await apiGet('action=undo_redo_status');
+    if (undoBtn) undoBtn.disabled = !status.can_undo;
+    if (redoBtn) redoBtn.disabled = !status.can_redo;
+  } catch (e) {
+    // Fail safe: if the status check itself fails, disable both rather
+    // than leave stale enabled buttons that might 'No hay nada que...'
+    // on click.
+    if (undoBtn) undoBtn.disabled = true;
+    if (redoBtn) redoBtn.disabled = true;
+  }
+}
+
+// Delegates to the server's own one-slot-per-person undo/redo (see
+// undo_last_action / redo_last_action in apps-script.gs). The server
+// looks up the real logged Before/After value itself -- this no longer
+// trusts a locally-remembered from_status/to_status, so it stays correct
+// even across devices/tabs for the same logged-in person.
+async function performUndo() {
+  try {
+    const result = await apiPost({ action: 'undo_last_action' });
+    if (result.error) throw new Error(result.error);
+    if (result.record_type === 'Order') {
+      const rec = allRecords.find(r => String(r.ID) === String(result.record_id));
+      if (rec && result.field === 'Status') rec.Status = result.restored_value;
+    }
     updateUndoRedoButtons();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`↩ Deshecho: ${entry.to_status} → ${entry.from_status}`);
-  } catch (e) { undoStack.push(entry); showToast('Error: ' + e.message); }
+    showToast(`↩ Deshecho: ${result.field} → ${result.restored_value}`);
+  } catch (e) { showToast('Error: ' + e.message); }
 }
 
 async function performRedo() {
-  if (!redoStack.length) return;
-  const entry = redoStack.pop();
   try {
-    const result = await performStatusUpdate(entry.order_id, entry.to_status);
-    if (result.result !== 'updated') throw new Error(result.error || 'Error');
-    const rec = allRecords.find(r => String(r.ID) === String(entry.order_id));
-    if (rec) rec.Status = entry.to_status;
-    undoStack.push(entry);
-    if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
+    const result = await apiPost({ action: 'redo_last_action' });
+    if (result.error) throw new Error(result.error);
+    if (result.record_type === 'Order') {
+      const rec = allRecords.find(r => String(r.ID) === String(result.record_id));
+      if (rec && result.field === 'Status') rec.Status = result.restored_value;
+    }
     updateUndoRedoButtons();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`↪ Rehecho: ${entry.from_status} → ${entry.to_status}`);
-  } catch (e) { redoStack.push(entry); showToast('Error: ' + e.message); }
+    showToast(`↪ Rehecho: ${result.field} → ${result.restored_value}`);
+  } catch (e) { showToast('Error: ' + e.message); }
 }
 
 function statusPillClass(status) {
