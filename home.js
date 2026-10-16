@@ -3,8 +3,6 @@
    One question per block: how are we doing, what needs me, where do I go.
    ==========================================================================*/
 
-VP.mountNav('inicio');
-
 const PAID_STATES = ['Pagado', 'Enviado', 'Archivado'];
 const isPaid  = r => PAID_STATES.includes(r['Status']);
 const price   = r => Number(r['Price']) || 0;
@@ -46,6 +44,8 @@ function paintAll(session) {
   paintDateline();
   try {
     await VP.ensureToken();
+    VP.requireAdminPage(); // Inicio shows financial figures -- staff never reaches this page
+    VP.mountNav('inicio');
 
     // Cache-first, same stale-while-revalidate pattern as the analytics
     // page: a fresh (<2min) cache entry paints instantly, then a quiet
