@@ -311,20 +311,45 @@ function updateClearBtn() { document.getElementById('search-clear-btn').style.di
 // Known limitation, unchanged by this edit: matching is still by the raw
 // Cliente text, not Customer ID, so an order stored under a slightly
 // different username string for the same customer won't appear here.
+let searchFilter = 'Todos';
+
+// Matches by Customer ID when we have one (the correct, reliable way --
+// different channels often store a different raw username string for the
+// same real person). Falls back to the typed text only for orders with no
+// Customer ID at all (genuinely unresolved orders).
 function runSearch(name) {
   const val = name.toLowerCase();
+  const custId = searchSelectedCustomerId;
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
   const byDateDesc = (a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0);
-  const matches = r => (r.Cliente || '').toLowerCase() === val;
+  const matches = r => custId ? r.CustomerId === custId : (r.Cliente || '').toLowerCase() === val;
 
-  const active   = allRecords.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado' ? matches(r) : false).sort(byDateDesc);
-  const shipped  = allRecords.filter(r => r.Status === 'Enviado' && matches(r)).sort(byDateDesc);
-  const archived = allRecords.filter(r => r.Status === 'Archivado' && matches(r)).sort(byDateDesc);
+  let all = allRecords.filter(matches).sort(byDateDesc);
+  if (!all.length) {
+    document.getElementById('search-results').innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`;
+    renderSearchFilterBar(0);
+    return;
+  }
+
+  renderSearchFilterBar(all.length);
+
+  if (searchFilter === 'Por cobrar') all = all.filter(r => r.Status === 'No Pagado');
+  else if (searchFilter === 'Por enviar') all = all.filter(r => r.Status === 'Pagado');
+  else if (searchFilter === 'Enviado') all = all.filter(r => r.Status === 'Enviado');
+  else if (searchFilter === 'Archivo') all = all.filter(r => r.Status === 'Archivado');
+  else if (searchFilter === 'Activos') all = all.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado');
+  else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
+  else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
+  // 'Todos' -- no filter
 
   const results = document.getElementById('search-results');
   results.innerHTML = '';
-  if (!active.length && !shipped.length && !archived.length) { results.innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`; return; }
+  if (!all.length) { results.innerHTML = `<div class="empty-state">Sin resultados en este filtro</div>`; return; }
+
+  const active   = all.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado');
+  const shipped  = all.filter(r => r.Status === 'Enviado');
+  const archived = all.filter(r => r.Status === 'Archivado');
 
   function appendGroup(records, labelText, greyedOut) {
     if (!records.length) return;
@@ -343,11 +368,25 @@ function runSearch(name) {
     });
   }
 
-  appendGroup(active, 'Activos', false);
-  if (shipped.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Enviado'; results.appendChild(d); }
+  appendGroup(active, searchFilter === 'Todos' ? 'Activos' : '', false);
+  if (shipped.length && searchFilter === 'Todos') { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Enviado'; results.appendChild(d); }
   appendGroup(shipped, '', true);
-  if (archived.length) { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivado'; results.appendChild(d); }
+  if (archived.length && searchFilter === 'Todos') { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivado'; results.appendChild(d); }
   appendGroup(archived, '', true);
+}
+
+function renderSearchFilterBar(totalCount) {
+  const bar = document.getElementById('search-filter-bar');
+  if (!bar) return;
+  if (!totalCount) { bar.innerHTML = ''; return; }
+  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Enviado', 'Archivo', 'TikTok', 'Shopify'];
+  bar.innerHTML = options.map(o =>
+    `<button class="search-filter-btn${o === searchFilter ? ' active' : ''}" data-filter="${escapeHtml(o)}">${escapeHtml(o)}</button>`
+  ).join('');
+  bar.querySelectorAll('.search-filter-btn').forEach(btn => btn.addEventListener('click', () => {
+    searchFilter = btn.dataset.filter;
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  }));
 }
 
 // ── CLIENT AUTOCOMPLETE ──────────────────────────────────────
