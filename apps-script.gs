@@ -1,12 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════════════════════════
+// 15-10 MAKING MAJOR CHANGES BY ADDING A AUDIT SHEET
 
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
+const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-14.4';
+const SCRIPT_VERSION = '2026-10-15.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -18,6 +20,25 @@ const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
 function getOrdersSheet() {
   return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheetByName('Orders');
+}
+
+// Finds the current year's log tab ("Log 2026", "Log 2027", ...) by name.
+// When a new year starts, create the next tab with the same header row --
+// nothing in the code needs to change. If that tab doesn't exist yet
+// (e.g. right at midnight on Jan 1 before anyone's made it), falls back to
+// the most recent "Log <year>" tab that does exist, so logging never hard
+// fails for a missing tab -- it just lands in last year's until the new
+// one is created.
+function getAuditLogSheet() {
+  const ss = SpreadsheetApp.openById(AUDIT_LOG_SHEET_ID);
+  const year = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy');
+  const current = ss.getSheetByName('Log ' + year);
+  if (current) return current;
+
+  const fallback = ss.getSheets()
+    .filter(sh => /^Log \d{4}$/.test(sh.getName()))
+    .sort((a, b) => b.getName().localeCompare(a.getName()))[0];
+  return fallback || null;
 }
 
 function getShopifyMatchesSheet() {
@@ -953,17 +974,44 @@ function nightlyBackup() {
 // old single-secret authOk() -- there are now two valid tokens, each
 // mapping to a role, so every call site can tell not just "is this
 // allowed in at all" but "allowed to do THIS specific thing".
-function getRole(t) {
-  const props = PropertiesService.getScriptProperties();
-  const admin = props.getProperty('API_TOKEN_ADMIN');
-  const staff = props.getProperty('API_TOKEN_STAFF');
-  if (t && admin && t === admin) return 'admin';
-  if (t && staff && t === staff) return 'staff';
+// Per-person credentials. Property name encodes the person: USER_<NAME>,
+// value is "<password>|<role>". Adding/removing a person, or changing
+// anyone's password, is a one-line edit in Script Properties -- no
+// redeploy needed. API_TOKEN_SERVICE (the VPS's own credential, admin-
+// equivalent) and API_TOKEN_SERVICE_STAFF (reserved for a future
+// staff-level automated tool) are unaffected by this and checked
+// separately below, since those aren't a human's personal password.
+function getIdentity(t) {
+  if (!t) return null;
+  const props = PropertiesService.getScriptProperties().getProperties();
+
+  for (const key in props) {
+    if (key.indexOf('USER_') !== 0) continue;
+    const parts = String(props[key] || '').split('|');
+    const password = parts[0];
+    const role = parts[1];
+    if (password && t === password) {
+      const name = key.slice('USER_'.length);
+      return { name: name, role: role === 'admin' ? 'admin' : 'staff' };
+    }
+  }
+
+  const serviceAdmin = props['API_TOKEN_SERVICE'];
+  if (serviceAdmin && t === serviceAdmin) return { name: 'Sistema (VPS)', role: 'admin' };
+
+  const serviceStaff = props['API_TOKEN_SERVICE_STAFF'];
+  if (serviceStaff && t === serviceStaff) return { name: 'Sistema (staff)', role: 'staff' };
+
   return null;
 }
 
-// Kept for any call site not yet migrated to getRole() -- true for any
-// valid token of either role, same behavior as before this change.
+// Old role-only shape, kept so every existing doGet/doPost action check
+// (if (!role) / requireAdmin(role)) keeps working unchanged.
+function getRole(t) {
+  const identity = getIdentity(t);
+  return identity ? identity.role : null;
+}
+
 function authOk(t) {
   return !!getRole(t);
 }
