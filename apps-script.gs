@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.8';
+const SCRIPT_VERSION = '2026-10-15.9';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -389,10 +389,11 @@ function logAudit(action, recordType, recordId, field, before, after) {
   });
 }
 
-function logAuditEvent(action, recordType, recordId, details) {
+function logAuditEvent(action, recordType, recordId, details, redoOf) {
   _auditBuffer.push({
     action: action, recordType: recordType, recordId: recordId,
     field: '', before: '', after: '', details: details || null,
+    redoOf: redoOf || '',
   });
 }
 
@@ -430,11 +431,152 @@ function flushAudit() {
       en.before === undefined || en.before === null ? '' : String(en.before),
       en.after === undefined || en.after === null ? '' : String(en.after),
       en.details ? JSON.stringify(en.details) : '',
+      '', // Undone
+      en.redoOf || '', // Redo Of
     ]);
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
   } catch (err) {
     Logger.log('flushAudit failed: ' + err.message + ' -- ' + entries.length + ' entries dropped');
   }
+}
+
+// ─── Undo / redo (one slot per person, diff-style actions only) ───────────
+//
+// Only these action types are reversible: each is a single field change
+// with a real before/after already captured by logAudit(). Event-style
+// actions (deletes, merges, imports, photos) are NOT in this list --
+// deletes already have their own explicit, deliberate button (the
+// failsafe), and the others have no single-field reversal that's safe to
+// automate. "Last action" is scoped to the calling person's own rows only
+// -- _currentIdentity.name, never anyone else's.
+const UNDOABLE_ACTIONS = ['update_order_status', 'update_order', 'add_alias', 'update_packed_date', 'save_qc'];
+
+function getAuditSheetCols(sheet) {
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  return {
+    id: h.indexOf('Audit ID'), ts: h.indexOf('Timestamp'), person: h.indexOf('Person'),
+    action: h.indexOf('Action'), recordType: h.indexOf('Record Type'), recordId: h.indexOf('Record ID'),
+    field: h.indexOf('Field'), before: h.indexOf('Before'), after: h.indexOf('After'),
+    undone: h.indexOf('Undone'), redoOf: h.indexOf('Redo Of'),
+  };
+}
+
+// Writes `value` into `field` on the sheet/row that owns `recordType` +
+// `recordId`. One switch, shared by both undo (writes Before) and redo
+// (writes After) -- same routing either direction.
+function writeFieldForRecord(recordType, recordId, field, value) {
+  if (recordType === 'Order') {
+    const sheet = getOrdersSheet();
+    const rowIndex = findOrderRow(sheet, recordId);
+    if (!rowIndex) return false;
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const col = headers.indexOf(field) + 1;
+    if (col <= 0) return false;
+    sheet.getRange(rowIndex, col).setValue(value);
+    if (field === 'Status') applyStatusSideEffects(sheet, rowIndex, value, headers);
+    return true;
+  }
+  if (recordType === 'Customer') {
+    const sheet = getCustomersSheet();
+    const customers = sheetToObjects(sheet);
+    const customer = customers.find(c => c['Customer ID'] === recordId);
+    if (!customer) return false;
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const col = headers.indexOf(field) + 1;
+    if (col <= 0) return false;
+    sheet.getRange(customer._rowIndex, col).setValue(value);
+    return true;
+  }
+  if (recordType === 'QC') {
+    const sheet = getQCSheet();
+    const row = findRowByColumn(sheet, 'A', recordId);
+    if (!row) return false;
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const col = headers.indexOf(field) + 1;
+    if (col <= 0) return false;
+    sheet.getRange(row, col).setValue(value);
+    return true;
+  }
+  return false;
+}
+
+function undoLastActionAction(body) {
+  const identity = _currentIdentity;
+  if (!identity) return jsonResponse({ error: 'unauthorized' });
+
+  const sheet = getAuditLogSheet();
+  if (!sheet) return jsonResponse({ error: 'No se encontró la hoja de registro.' });
+  const data = sheet.getDataRange().getValues();
+  const C = getAuditSheetCols(sheet);
+
+  // Most recent (bottom-most) row by this person, of an undoable action
+  // type, not already undone.
+  let target = -1;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const row = data[i];
+    if (row[C.person] !== identity.name) continue;
+    if (UNDOABLE_ACTIONS.indexOf(row[C.action]) === -1) continue;
+    if (row[C.undone]) continue;
+    target = i;
+    break;
+  }
+  if (target === -1) return jsonResponse({ error: 'No hay nada que deshacer.' });
+
+  const row = data[target];
+  const ok = writeFieldForRecord(row[C.recordType], row[C.recordId], row[C.field], row[C.before]);
+  if (!ok) return jsonResponse({ error: 'No se pudo deshacer: el registro ya no existe.' });
+
+  sheet.getRange(target + 1, C.undone + 1).setValue(nowISO());
+  logAuditEvent('undo_last_action', row[C.recordType], row[C.recordId], {
+    undone_audit_id: row[C.id], field: row[C.field], restored_value: row[C.before],
+  });
+
+  return jsonResponse({
+    result: 'undone', record_type: row[C.recordType], record_id: row[C.recordId],
+    field: row[C.field], restored_value: row[C.before],
+  });
+}
+
+function redoLastActionAction(body) {
+  const identity = _currentIdentity;
+  if (!identity) return jsonResponse({ error: 'unauthorized' });
+
+  const sheet = getAuditLogSheet();
+  if (!sheet) return jsonResponse({ error: 'No se encontró la hoja de registro.' });
+  const data = sheet.getDataRange().getValues();
+  const C = getAuditSheetCols(sheet);
+
+  // Most recent row this person undid that hasn't already been redone.
+  // "Already redone" = a later log row whose Redo Of points at it.
+  const undoneIds = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[C.person] === identity.name && row[C.redoOf]) undoneIds.add(String(row[C.redoOf]));
+  }
+
+  let target = -1;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const row = data[i];
+    if (row[C.person] !== identity.name) continue;
+    if (!row[C.undone]) continue;
+    if (undoneIds.has(String(row[C.id]))) continue; // already redone once
+    target = i;
+    break;
+  }
+  if (target === -1) return jsonResponse({ error: 'No hay nada que rehacer.' });
+
+  const row = data[target];
+  const ok = writeFieldForRecord(row[C.recordType], row[C.recordId], row[C.field], row[C.after]);
+  if (!ok) return jsonResponse({ error: 'No se pudo rehacer: el registro ya no existe.' });
+
+  logAuditEvent('redo_last_action', row[C.recordType], row[C.recordId], {
+    redo_of_audit_id: row[C.id], field: row[C.field], restored_value: row[C.after],
+  }, row[C.id]);
+
+  return jsonResponse({
+    result: 'redone', record_type: row[C.recordType], record_id: row[C.recordId],
+    field: row[C.field], restored_value: row[C.after],
+  });
 }
 
 function doPost(e) {
@@ -486,6 +628,8 @@ function dispatchPostAction(action, body, role) {
     if (action === 'backfill_tiktok_preview') return requireAdmin(role) ? backfillTikTokHistoryPreview(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'backfill_tiktok_commit') return requireAdmin(role) ? backfillTikTokHistoryCommit(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'update_role_password') return requireAdmin(role) ? updateRolePasswordAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'undo_last_action') return undoLastActionAction(body);
+    if (action === 'redo_last_action') return redoLastActionAction(body);
 
     return jsonResponse({ error: 'Unknown action' });
 }
