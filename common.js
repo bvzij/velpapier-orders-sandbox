@@ -9,8 +9,10 @@ window.VP = (function () {
   const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
   const TOKEN_KEY = 'vp_token';
   const THEME_KEY = 'vp_theme';
+  const ROLE_KEY  = 'vp_role';
 
   let token = localStorage.getItem(TOKEN_KEY) || '';
+  let role  = sessionStorage.getItem(ROLE_KEY) || '';
 
   /* ── Theme ──────────────────────────────────────────────────────────── */
   // Applied immediately (synchronously, at script-load time, before the
@@ -34,7 +36,17 @@ window.VP = (function () {
 
   function get(qs) {
     return fetch(`${API}?${qs}&token=${encodeURIComponent(token)}`)
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(body => {
+        // Apps Script answers HTTP 200 even for its own errors -- an error
+        // in the body was previously only caught where a caller happened
+        // to check res.error manually, so most callers silently treated
+        // a failed request as a successful empty-ish response. Throwing
+        // here means every existing try/catch around VP.get() now also
+        // catches this case, with no change needed at the call site.
+        if (body && body.error) throw new Error(body.error);
+        return body;
+      });
   }
 
   const CACHE_PREFIX = 'vp_cache_';
@@ -111,7 +123,13 @@ window.VP = (function () {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ ...data, token }),
-    }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(body => {
+        // Apps Script answers HTTP 200 even for its own errors -- see the
+        // matching comment in VP.get() above.
+        if (body && body.error) throw new Error(body.error);
+        return body;
+      });
   }
 
   // Verifies the API token, prompting once if it's missing or stale.
@@ -131,8 +149,11 @@ window.VP = (function () {
         if (Date.now() - lastVerified < TOKEN_PING_TTL_MS) return;
         try {
           const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(token)}`);
-          if ((await r.json()).ok) {
+          const body = await r.json();
+          if (body.ok) {
             sessionStorage.setItem(TOKEN_PING_KEY, String(Date.now()));
+            role = body.role || '';
+            sessionStorage.setItem(ROLE_KEY, role);
             return;
           }
         } catch (e) { /* fall through to prompt */ }
@@ -144,32 +165,53 @@ window.VP = (function () {
       }
       token = input.trim();
       localStorage.setItem(TOKEN_KEY, token);
+      sessionStorage.removeItem(TOKEN_PING_KEY); // force a real ping with the new token next loop
     }
+  }
+
+  // Pages that are admin-only call this right after ensureToken() to
+  // redirect staff away before any page content loads. Role comes from
+  // the cached ping result -- no extra request needed on the common path.
+  function requireAdminPage() {
+    if (role !== 'admin') {
+      window.location.href = 'pedidos.html';
+      throw new Error('not authorized for this page');
+    }
+  }
+
+  function getRole() {
+    return role;
   }
   /* ── Navigation ─────────────────────────────────────────────────────── */
 
   const NAV = [
-    { id: 'inicio',    href: 'index.html',     label: 'Inicio' },
+    { id: 'inicio',    href: 'index.html',     label: 'Inicio',    adminOnly: true },
     { id: 'pedidos',   href: 'pedidos.html',   label: 'Pedidos' },
     { id: 'empacar',   href: 'qc.html',        label: 'Empacar' },
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
-    { id: 'analisis',  href: 'analytics.html', label: 'Análisis' },
-    { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes' },
+    { id: 'analisis',  href: 'analytics.html', label: 'Análisis',  adminOnly: true },
+    { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes',   adminOnly: true },
   ];
 
     // Injects the persistent top bar. `active` is one of the NAV ids.
+  // Only shows adminOnly links (Inicio, Análisis, Ajustes) when the
+  // logged-in role is admin -- staff never sees them in the nav at all,
+  // on top of the pages themselves redirecting staff away if reached
+  // directly (requireAdminPage()).
   function mountNav(active) {
+    const visibleNav = NAV.filter(n => !n.adminOnly || role === 'admin');
+    const homeHref = role === 'admin' ? 'index.html' : 'pedidos.html';
     const el = document.createElement('nav');
     el.className = 'vp-nav';
     el.innerHTML = `
-      <a class="vp-nav-mark" href="index.html" aria-label="Vel Papier — inicio">
+      <a class="vp-nav-mark" href="${homeHref}" aria-label="Vel Papier — inicio">
         <span class="vp-nav-mark-name">Vel Papier</span>
         <span class="vp-nav-mark-sub">Operaciones</span>
       </a>
       <div class="vp-nav-links">
-        ${NAV.map(n => `
-          <a href="${n.href}" class="vp-nav-link${n.id === active ? ' is-active' : ''}">${n.label}</a>
+        ${visibleNav.map(n => `
+          <a href="${n.href}" class="vp-nav-link${n.id === active ? ' is-active' : ''}">${n.label}${n.id === 'pedidos' ? ' <span class="vp-nav-badge" id="vp-nav-shopify-badge" style="display:none" title="Pedidos de Shopify esperando confirmar a qué cliente pertenecen"></span>' : ''}</a>
         `).join('')}
       </div>
       <button class="vp-nav-theme-toggle" id="vp-nav-theme-toggle" type="button" aria-label="Cambiar tema">
@@ -190,6 +232,26 @@ window.VP = (function () {
       reflectToggle();
     });
     reflectToggle();
+
+    // Persistent "pending Shopify matches" count on the Pedidos nav link,
+    // visible from every page, not just when Pedidos is open -- the whole
+    // point is that it is impossible to miss, not that you have to go
+    // looking for it. Refreshes itself every 60s; failures are silent
+    // (the badge just doesn't update that cycle, same as everything else
+    // on this nav).
+    refreshShopifyPendingBadge();
+    setInterval(refreshShopifyPendingBadge, 60000);
+  }
+
+  async function refreshShopifyPendingBadge() {
+    const badge = document.getElementById('vp-nav-shopify-badge');
+    if (!badge || !token) return;
+    try {
+      const data = await get('action=shopify_matches_review');
+      const n = (data.groups || []).length;
+      badge.textContent = n > 0 ? num(n) : '';
+      badge.style.display = n > 0 ? 'inline-flex' : 'none';
+    } catch (e) { /* silent: badge just keeps its last known value */ }
   }
 
   /* ── Formatting ─────────────────────────────────────────────────────── */
@@ -847,5 +909,6 @@ window.VP = (function () {
     chartSlot, paintCharts, resetCharts,
     window_, pctChange, bucketBy, bucketByMonth, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
     get token() { return token; },
+    requireAdminPage, getRole,
   };
 })();
