@@ -33,8 +33,6 @@ function nextStatuses(current) {
 }
 
 // ── UNDO / REDO (status changes only) ───────────────────────
-function updateUndoRedoButtons() {
-
 // Button state now reflects the server's one undo/redo slot (per
 // logged-in person), not a local array -- fetched once on load and
 // refreshed after every undo/redo, rather than guessed from local state
