@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.5';
+const SCRIPT_VERSION = '2026-10-15.6';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1600,11 +1600,21 @@ function saveQC(body) {
     }
     cols.forEach((c, i) => set(c, vals[i]));
   }
-  if (body.add_content || body.remove_content) {
-    applyDelta('Content', body.add_content, body.remove_content);
+  if (body.add_content) {
+    applyDelta('Content', body.add_content, null);
+    logAuditEvent('qc_photo_added', 'QC', qcId, { group: 'Content', url: body.add_content });
   }
-  if (body.add_box || body.remove_box) {
-    applyDelta('Box', body.add_box, body.remove_box);
+  if (body.remove_content) {
+    applyDelta('Content', null, body.remove_content);
+    logAuditEvent('qc_photo_removed', 'QC', qcId, { group: 'Content', url: body.remove_content });
+  }
+  if (body.add_box) {
+    applyDelta('Box', body.add_box, null);
+    logAuditEvent('qc_photo_added', 'QC', qcId, { group: 'Box', url: body.add_box });
+  }
+  if (body.remove_box) {
+    applyDelta('Box', null, body.remove_box);
+    logAuditEvent('qc_photo_removed', 'QC', qcId, { group: 'Box', url: body.remove_box });
   }
 
   // ─── Full-array legacy path (still used by finalize, which submits the
@@ -1616,8 +1626,14 @@ function saveQC(body) {
     for (let i = 0; i < 5; i++) set('Box' + (i + 1), body.box_urls[i] || '');
   }
 
-  if (body.notes !== undefined) set('Notes', body.notes);
-  if (body.packer) set('Packer', body.packer);
+  if (body.notes !== undefined && body.notes !== get('Notes')) {
+    logAudit('save_qc', 'QC', qcId, 'Notes', get('Notes'), body.notes);
+    set('Notes', body.notes);
+  }
+  if (body.packer && body.packer !== get('Packer')) {
+    logAudit('save_qc', 'QC', qcId, 'Packer', get('Packer'), body.packer);
+    set('Packer', body.packer);
+  }
   // Finalizing marks the QC row itself, so other devices polling QC rows can
   // drop this shipment from their pending list without refetching all orders.
   if (body.finalize) {
@@ -1694,7 +1710,11 @@ function saveQC(body) {
     // Status directly (it does not go through applyStatusSideEffects), so
     // refresh the count here, for just the customers involved.
     SpreadsheetApp.flush();
+    SpreadsheetApp.flush();
     recalculateShipmentCountsFor(customersToRecount);
+    logAuditEvent('finalize_shipment', 'QC', qcId, {
+      tracking_id: body.tracking_id, order_ids: allOrderIds, shipped: shipResults,
+    });
 
     result.result = 'created';
     result.orders = shipResults;
