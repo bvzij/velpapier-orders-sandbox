@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.4';
+const SCRIPT_VERSION = '2026-10-15.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -573,6 +573,7 @@ function createOrder(body) {
   const newRowNum = ordersSheet.getLastRow() + 1;
   forceTextFormat(ordersSheet, oh, ['Order ID', 'Tracking ID'], newRowNum, 1);
   ordersSheet.appendRow(row);
+  logAuditEvent('create_order', 'Order', orderID, { customer_id: customerID, channel: body.channel || '', status: status });
 
   return jsonResponse({
     result: 'created',
@@ -586,6 +587,8 @@ function createOrder(body) {
     status: status
   });
 }
+
+// ─── Create customer ───────────────────────────────────────────────────────────
 
 // ─── Create customer ───────────────────────────────────────────────────────────
 
@@ -632,6 +635,7 @@ function createCustomer(body) {
 
   const row = headers.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
   sheet.appendRow(row);
+  logAuditEvent('create_customer', 'Customer', customerID, { primary_username: body.primary_username || '' });
 
   return jsonResponse({
     result: 'created',
@@ -807,7 +811,10 @@ function updatePackedDate(body) {
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const packedCol = headers.indexOf('Packed Date') + 1;
 
-  sheet.getRange(rowIndex, packedCol).setValue(body.packed_date || nowISO());
+  const newValue = body.packed_date || nowISO();
+  const oldValue = sheet.getRange(rowIndex, packedCol).getValue();
+  sheet.getRange(rowIndex, packedCol).setValue(newValue);
+  logAudit('update_packed_date', 'Order', body.order_id, 'Packed Date', oldValue, newValue);
 
   return jsonResponse({ result: 'packed_date_updated', order_id: body.order_id });
 }
@@ -1811,6 +1818,7 @@ function startSession(body) {
     const sessionId = 'SES-' + todayStr + '-' + (todayCount + 1);
 
     sheet.appendRow([sessionId, nowISO(), '', 'Activa', '', '', '']);
+    logAuditEvent('start_session', 'Session', sessionId, {});
 
     return jsonResponse({ result: 'started', session_id: sessionId });
   } finally {
@@ -1901,6 +1909,9 @@ function endSession(body) {
     set('Duration (min)', Math.round((Date.now() - startMs) / 60000));
   }
   sheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
+  logAuditEvent('end_session', 'Session', body.session_id, {
+    participants: allParticipants, total_packages: totalPackages, total_items: totalItems,
+  });
 
   return jsonResponse({
     result: 'ended',
