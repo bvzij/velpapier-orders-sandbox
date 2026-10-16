@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.10';
+const SCRIPT_VERSION = '2026-10-15.11';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -264,6 +264,7 @@ function doGet(e) {
     if (action === 'product_merge_history') return requireAdmin(role) ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'undo_redo_status') return undoRedoStatusAction(e);
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -584,6 +585,43 @@ function redoLastActionAction(body) {
     result: 'redone', record_type: row[C.recordType], record_id: row[C.recordId],
     field: row[C.field], restored_value: row[C.after],
   });
+}
+
+function undoRedoStatusAction(e) {
+  const identity = getIdentity(e.parameter.token);
+  if (!identity) return jsonResponse({ error: 'unauthorized' });
+
+  const sheet = getAuditLogSheet();
+  if (!sheet) return jsonResponse({ can_undo: false, can_redo: false });
+  const data = sheet.getDataRange().getValues();
+  const C = getAuditSheetCols(sheet);
+
+  let canUndo = false;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const row = data[i];
+    if (row[C.person] !== identity.name) continue;
+    if (UNDOABLE_ACTIONS.indexOf(row[C.action]) === -1) continue;
+    if (row[C.undone]) continue;
+    canUndo = true;
+    break;
+  }
+
+  const undoneIds = new Set();
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[C.person] === identity.name && row[C.redoOf]) undoneIds.add(String(row[C.redoOf]));
+  }
+  let canRedo = false;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const row = data[i];
+    if (row[C.person] !== identity.name) continue;
+    if (!row[C.undone]) continue;
+    if (undoneIds.has(String(row[C.id]))) continue;
+    canRedo = true;
+    break;
+  }
+
+  return jsonResponse({ can_undo: canUndo, can_redo: canRedo });
 }
 
 function doPost(e) {
