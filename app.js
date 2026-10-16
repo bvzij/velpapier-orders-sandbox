@@ -278,14 +278,17 @@ function handleSearchInput() {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
     item.innerHTML = `<span>${c.name}</span>`;
-    item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name); });
+    item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name, c.customerId); });
     list.appendChild(item);
   });
   list.style.display = 'block';
 }
 
-function selectSearchCliente(name) {
+let searchSelectedCustomerId = null;
+
+function selectSearchCliente(name, customerId) {
   searchSelectedCliente = name;
+  searchSelectedCustomerId = customerId || null;
   document.getElementById('global-search').value = name;
   document.getElementById('search-autocomplete-list').style.display = 'none';
   updateClearBtn();
@@ -408,7 +411,7 @@ function getUniqueClientes() {
     const primary = (c.name || '').trim();
     if (!primary) return;
     const k = primary.toLowerCase();
-    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [] };
+    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [], customerId: c.customerId || '' };
   });
   return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 }
@@ -750,7 +753,7 @@ function applyActiveData(activeData, customersData, matchesData) {
     if (custId) customersById[custId] = primary;
     if (!primary) return;
     const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
-    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases, customerId: custId };
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
   pendingMatchesByShopifyOrderId = {};
@@ -1655,7 +1658,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
         if (custId) customersById[custId] = primary;
         if (!primary) return;
         const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
-        const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases };
+        const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases, customerId: custId };
         [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
       });
     } catch (e) { /* silent */ }
