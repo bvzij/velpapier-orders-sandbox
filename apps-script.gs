@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.1';
+const SCRIPT_VERSION = '2026-10-15.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -357,14 +357,105 @@ function withWriteLock(fn) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// AUDIT LOG — who changed what, when
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Phase 1. Two ways to log:
+//   logAudit(action, recordType, recordId, field, before, after) -- one
+//     field changed. Used inside update-style actions.
+//   logAuditEvent(action, recordType, recordId, details) -- something
+//     happened with no single before/after to show (a create, a delete
+//     snapshot, an import summary). `details` is a plain object, stored
+//     as JSON in the Details column.
+//
+// Both just push an in-memory row; nothing touches the sheet until
+// flushAudit() runs. doPost calls flushAudit() once, after the action
+// has already returned its result, so a slow or failed log write can
+// never block or break the real operation, and the dashboard write
+// itself never waits on a cross-spreadsheet call mid-request.
+//
+// _currentIdentity is set once per request by doPost (see above) and
+// read here rather than threaded as a parameter through every one of
+// the ~20 mutation functions -- each Apps Script execution handles
+// exactly one request, so this is safe.
+let _currentIdentity = null;
+let _auditBuffer = [];
+
+function logAudit(action, recordType, recordId, field, before, after) {
+  _auditBuffer.push({
+    action: action, recordType: recordType, recordId: recordId,
+    field: field, before: before, after: after, details: null,
+  });
+}
+
+function logAuditEvent(action, recordType, recordId, details) {
+  _auditBuffer.push({
+    action: action, recordType: recordType, recordId: recordId,
+    field: '', before: '', after: '', details: details || null,
+  });
+}
+
+// Writes every buffered entry in ONE setValues() call, so an action that
+// changes several fields (or an import logging per-order) costs the
+// audit log exactly one extra write, not one per field. Wrapped so a
+// failure here (sheet renamed, tab missing, quota) is logged and
+// swallowed -- it must never surface as an error on the real operation
+// that already succeeded.
+function flushAudit() {
+  if (!_auditBuffer.length) return;
+  const entries = _auditBuffer;
+  _auditBuffer = [];
+  const identity = _currentIdentity;
+
+  try {
+    const sheet = getAuditLogSheet();
+    if (!sheet) {
+      Logger.log('flushAudit: no "Log <year>" tab found, ' + entries.length + ' entries dropped');
+      return;
+    }
+    const ts = nowISO();
+    const person = identity ? identity.name : 'Desconocido';
+    const role = identity ? identity.role : '';
+
+    const rows = entries.map(en => [
+      'LOG-' + Utilities.getUuid().slice(0, 8),
+      ts,
+      person,
+      role,
+      en.action,
+      en.recordType,
+      en.recordId,
+      en.field,
+      en.before === undefined || en.before === null ? '' : String(en.before),
+      en.after === undefined || en.after === null ? '' : String(en.after),
+      en.details ? JSON.stringify(en.details) : '',
+    ]);
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  } catch (err) {
+    Logger.log('flushAudit failed: ' + err.message + ' -- ' + entries.length + ' entries dropped');
+  }
+}
+
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const action = body.action;
-    const role = getRole(body.token);
-    if (!role) return jsonResponse({ error: 'unauthorized' });
+    const identity = getIdentity(body.token);
+    if (!identity) return jsonResponse({ error: 'unauthorized' });
+    const role = identity.role;
+    _currentIdentity = identity; // read by logAudit() -- see audit log section
     return withWriteLock(function () {
+      const result = dispatchPostAction(action, body, role);
+      flushAudit(); // after the real write already succeeded -- never blocks it
+      return result;
+    });
+  } catch (err) {
+    return jsonResponse({ error: err.message });
+  }
+}
 
+function dispatchPostAction(action, body, role) {
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
     if (action === 'update_order_status') return updateOrderStatus(body);
@@ -396,11 +487,6 @@ function doPost(e) {
     if (action === 'update_role_password') return requireAdmin(role) ? updateRolePasswordAction(body) : jsonResponse({ error: 'unauthorized' });
 
     return jsonResponse({ error: 'Unknown action' });
-    });
-
-  } catch (err) {
-    return jsonResponse({ error: err.message });
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
