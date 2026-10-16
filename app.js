@@ -33,16 +33,7 @@ function nextStatuses(current) {
 }
 
 // ── UNDO / REDO (status changes only) ───────────────────────
-let undoStack = [];
-let redoStack = [];
-const MAX_UNDO_DEPTH = 20;
-
-function pushUndoEntry(entry) {
-  undoStack.push(entry);
-  if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
-  redoStack = [];
-  updateUndoRedoButtons();
-}
+function updateUndoRedoButtons() {
 
 // Button state now reflects the server's one undo/redo slot (per
 // logged-in person), not a local array -- fetched once on load and
@@ -62,6 +53,11 @@ async function updateUndoRedoButtons() {
     if (undoBtn) undoBtn.disabled = true;
     if (redoBtn) redoBtn.disabled = true;
   }
+}
+
+async function performStatusUpdate(orderId, status) {
+  const payload = { action: 'update_order_status', order_id: orderId, status: status };
+  return apiPost(payload);
 }
 
 // Delegates to the server's own one-slot-per-person undo/redo (see
@@ -458,7 +454,7 @@ async function updateOrderStatusNew(id, status) {
     const result = await performStatusUpdate(id, status);
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) rec.Status = status;
-    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
+    updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast(`✓ Estado actualizado a ${status}`);
@@ -869,7 +865,7 @@ async function updateStatus(id, status) {
     const result = await performStatusUpdate(id, status);
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) rec.Status = status;
-    pushUndoEntry({ order_id: id, from_status: fromStatus, to_status: status });
+    updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     const msgs = { 'Pagado': '✓ Marcado como pagado', 'Enviado': '✓ Marcado como enviado', 'No Pagado': '↩ Revertido a No Pagado' };
