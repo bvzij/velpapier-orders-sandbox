@@ -6,7 +6,7 @@ const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 
-const SCRIPT_VERSION = '2026-10-15.1';
+const SCRIPT_VERSION = '2026-10-14.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -955,20 +955,10 @@ function nightlyBackup() {
 // allowed in at all" but "allowed to do THIS specific thing".
 function getRole(t) {
   const props = PropertiesService.getScriptProperties();
-  const admin        = props.getProperty('API_TOKEN_ADMIN');
-  const staff        = props.getProperty('API_TOKEN_STAFF');
-  const serviceAdmin = props.getProperty('API_TOKEN_SERVICE');
-  const serviceStaff = props.getProperty('API_TOKEN_SERVICE_STAFF');
+  const admin = props.getProperty('API_TOKEN_ADMIN');
+  const staff = props.getProperty('API_TOKEN_STAFF');
   if (t && admin && t === admin) return 'admin';
   if (t && staff && t === staff) return 'staff';
-  // Dedicated machine credentials, set once and never touched again --
-  // so rotating a human password (admin or staff) never breaks whatever
-  // backend service uses these. API_TOKEN_SERVICE is today's VPS
-  // (tiktok-import), full access. API_TOKEN_SERVICE_STAFF is reserved
-  // for a future staff-level automated tool; unset today, so this line
-  // is inert until a value is actually added in Script Properties.
-  if (t && serviceAdmin && t === serviceAdmin) return 'admin';
-  if (t && serviceStaff && t === serviceStaff) return 'staff';
   return null;
 }
 
