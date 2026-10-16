@@ -2142,7 +2142,7 @@ async function ajShopApply() {
       applied += res.applied || 0;
       (res.results || []).filter(r => !r.ok).forEach(r => failed.push(r));
     } catch (e) {
-      aborted = e.message;                              // already-applied batches stay applied; the reload shows what is left
+      aborted = e.message;                              //Bob// already-applied batches stay applied; the reload shows what is left
       break;
     }
     done += batch.length;
