@@ -1,14 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════════════════════════
-// 15-10 MAKING MAJOR CHANGES BY ADDING A AUDIT SHEET
 
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.11';
+const SCRIPT_VERSION = '2026-10-15.12';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -3197,10 +3196,91 @@ function backfillTikTokHistoryPreview(body) {
   return jsonResponse(result);
 }
 
+// Maps a TikTok Order Substatus to the dashboard's own Status, for orders
+// that were never packed through this dashboard (pre-migration backlog,
+// or any future backfill of historical data). Status only ever moves
+// FORWARD along STATUS_FLOW order (No Pagado -> Pagado -> Enviado ->
+// Archivado) -- never backward, so a record that's behind an order's
+// current real status can't accidentally downgrade it.
+const BACKFILL_SUBSTATUS_TO_STATUS = {
+  'Delivered':  'Enviado',
+  'In transit': 'Enviado',
+  'Completed':  'Archivado',
+};
+const STATUS_RANK = { 'No Pagado': 0, 'Pagado': 1, 'Enviado': 2, 'Archivado': 3 };
+
+// Combined shipments store a " + "-joined Order ID (see importTikTokOrders).
+// One component order having a given substatus means the whole physical
+// shipment has it, so this maps every individual TikTok order_id to the
+// Orders row that contains it, however that row's Order ID is joined.
+function buildOrderIdComponentIndex(ordersSheet, oh) {
+  const iOrderId = oh.indexOf('Order ID');
+  const lastRow = ordersSheet.getLastRow();
+  if (lastRow < 2 || iOrderId < 0) return {};
+  const idVals = readColumn(ordersSheet, iOrderId);
+  const index = {};
+  idVals.forEach((v, i) => {
+    String(v || '').split(' + ').forEach(part => {
+      const p = part.trim();
+      if (p) index[p] = i; // 0-based data row index
+    });
+  });
+  return index;
+}
+
+// Called once per backfill commit, after runTikTokBackfill. Separate pass
+// over the SAME records, writing only to Orders' Status column -- the
+// import history write above is unaffected either way.
+function syncOrderStatusFromBackfill(records) {
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  const iStatus = oh.indexOf('Status');
+  if (iStatus < 0) return { status_updated: 0 };
+
+  const componentIndex = buildOrderIdComponentIndex(ordersSheet, oh);
+  const statusVals = readColumn(ordersSheet, iStatus);
+  const changed = [];
+  const changeLog = []; // { rowIdx, orderId, before, after }
+
+  records.forEach(rec => {
+    const substatus = String(rec.order_substatus || '').trim();
+    const targetStatus = BACKFILL_SUBSTATUS_TO_STATUS[substatus];
+    if (!targetStatus) return; // Unpaid / Awaiting* / Canceled / unmapped -- do nothing
+
+    const orderId = String(rec.order_id || '').trim();
+    if (!orderId) return;
+    const rowIdx = componentIndex[orderId];
+    if (rowIdx === undefined) return; // not in Orders at all -- nothing to sync
+
+    const current = String(statusVals[rowIdx] || 'No Pagado');
+    const currentRank = STATUS_RANK[current] !== undefined ? STATUS_RANK[current] : 0;
+    const targetRank = STATUS_RANK[targetStatus];
+    if (targetRank <= currentRank) return; // never move backward, never a no-op write
+
+    statusVals[rowIdx] = targetStatus;
+    changed.push(rowIdx);
+    changeLog.push({ rowIdx: rowIdx, before: current, after: targetStatus });
+  });
+
+  if (changed.length) {
+    writeColumnChanges(ordersSheet, iStatus, statusVals, changed);
+    // Order ID column re-read only for the rows that actually changed, to
+    // log real IDs rather than row indexes.
+    const idVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+    changeLog.forEach(c => {
+      logAudit('backfill_status_sync', 'Order', idVals[c.rowIdx], 'Status', c.before, c.after);
+    });
+  }
+
+  return { status_updated: changed.length };
+}
+
 function backfillTikTokHistoryCommit(body) {
   const result = runTikTokBackfill(body.records || [], false);
-  logAuditEvent('backfill_tiktok_commit', 'TikTokImportHistory', '', result);
-  return jsonResponse(result);
+  const statusResult = syncOrderStatusFromBackfill(body.records || []);
+  const combined = Object.assign({}, result, statusResult);
+  logAuditEvent('backfill_tiktok_commit', 'TikTokImportHistory', '', combined);
+  return jsonResponse(combined);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
