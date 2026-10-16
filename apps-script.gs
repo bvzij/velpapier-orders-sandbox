@@ -8,7 +8,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.9';
+const SCRIPT_VERSION = '2026-10-15.10';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -418,22 +418,29 @@ function flushAudit() {
     const ts = nowISO();
     const person = identity ? identity.name : 'Desconocido';
     const role = identity ? identity.role : '';
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-    const rows = entries.map(en => [
-      'LOG-' + Utilities.getUuid().slice(0, 8),
-      ts,
-      person,
-      role,
-      en.action,
-      en.recordType,
-      en.recordId,
-      en.field,
-      en.before === undefined || en.before === null ? '' : String(en.before),
-      en.after === undefined || en.after === null ? '' : String(en.after),
-      en.details ? JSON.stringify(en.details) : '',
-      '', // Undone
-      en.redoOf || '', // Redo Of
-    ]);
+    // Written by header name, not fixed position -- same convention as
+    // the rest of this file -- so this still lands correctly even if
+    // someone reorders or inserts a column on the Log sheet later.
+    const rows = entries.map(en => {
+      const byHeader = {
+        'Audit ID': 'LOG-' + Utilities.getUuid().slice(0, 8),
+        'Timestamp': ts,
+        'Person': person,
+        'Role': role,
+        'Action': en.action,
+        'Record Type': en.recordType,
+        'Record ID': en.recordId,
+        'Field': en.field,
+        'Before': en.before === undefined || en.before === null ? '' : String(en.before),
+        'After': en.after === undefined || en.after === null ? '' : String(en.after),
+        'Details': en.details ? JSON.stringify(en.details) : '',
+        'Undone': '',
+        'Redo Of': en.redoOf || '',
+      };
+      return headers.map(h => (byHeader[h] !== undefined ? byHeader[h] : ''));
+    });
     sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
   } catch (err) {
     Logger.log('flushAudit failed: ' + err.message + ' -- ' + entries.length + ' entries dropped');
