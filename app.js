@@ -317,7 +317,15 @@ let searchFilter = 'Todos';
 // different channels often store a different raw username string for the
 // same real person). Falls back to the typed text only for orders with no
 // Customer ID at all (genuinely unresolved orders).
-function runSearch(name) {
+async function runSearch(name) {
+  // Enviado/Archivado are only fetched lazily when their tab is opened --
+  // search needs the full history regardless of which tabs have been
+  // visited this session, so make sure both are in before filtering.
+  const loads = [];
+  if (!tabDataLoaded.enviado) loads.push(fetchEnviado());
+  if (!tabDataLoaded.archivo) loads.push(fetchArchivo());
+  if (loads.length) await Promise.all(loads);
+
   const val = name.toLowerCase();
   const custId = searchSelectedCustomerId;
   document.getElementById('search-panel').style.display = 'block';
