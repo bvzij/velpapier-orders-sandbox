@@ -126,6 +126,11 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes pulse-rec { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
     #capture-editable-area.locked { opacity: 0.35; pointer-events: none; user-select: none; }
+    /* Viewing a photo is harmless even on a locked (already-shipped) order
+       -- only adding/removing should require the explicit "Editar de todos
+       modos" confirmation. Re-enables just the image itself; the delete
+       button and add buttons, also inside this container, stay blocked. */
+    #capture-editable-area.locked .photo-thumb img { pointer-events: auto; cursor: pointer; opacity: 1; }
 
     .photo-thumb-delete {
       position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%;
@@ -209,6 +214,13 @@
       </div>
 
       <div id="tab-history" style="display:none">
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <div style="flex:1;min-width:0;position:relative">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--text-faint);pointer-events:none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="history-search-input" placeholder="Usuario, guía u orden…" oninput="runHistorySearch()" style="width:100%;padding:7px 8px 7px 28px;font-size:12px;border:0.5px solid var(--border-strong);border-radius:var(--radius-md);font-family:inherit;background:var(--bg);color:var(--text)">
+          </div>
+          <button id="history-sort-btn" onclick="toggleHistorySort()" style="padding:7px 10px;font-size:11px;font-weight:600;font-family:inherit;border:0.5px solid var(--border-strong);border-radius:var(--radius-md);background:var(--surface);color:var(--text);cursor:pointer;white-space:nowrap">Más reciente primero</button>
+        </div>
         <div id="history-list-tab"></div>
       </div>
     </div>
