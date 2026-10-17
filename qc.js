@@ -213,9 +213,12 @@ let localFinalizeInProgress = false;
 
 // ── Pending list ─────────────────────────────────────────────────────────
 
+let hasLoadedOnce = false;
+
 function applyPendingData(ordersData, qcData) {
   allActiveOrders = ordersData.records || [];
   allQcRows = qcData.records || [];
+  hasLoadedOnce = true;
 }
 
 // Manual refresh button -- bypasses the sessionStorage cache so a stuck or
@@ -226,13 +229,15 @@ async function manualRefresh() {
   if (icon) icon.classList.add('spinning');
   try {
     if (currentTab === 'history') { historyPage = 0; await refreshQcBadges(); }
-    else await loadPending();
+    else await loadPending(true); // forceFresh -- a manual refresh must never be a silent no-op served from cache
+  } catch (e) {
+    console.warn('[manualRefresh] failed:', e);
   } finally {
     if (icon) icon.classList.remove('spinning');
   }
 }
 
-async function loadPending() {
+async function loadPending(forceFresh) {
   document.getElementById('view-pending').style.display = 'block';
   const list = document.getElementById('pending-list');
 
@@ -241,27 +246,32 @@ async function loadPending() {
   // in the background. A 20s auto-refresh timer (see below) keeps this
   // page from ever drifting far out of date during active packing, since
   // stale pack-status here risks a real double-pack mistake.
-  let gotCache = false;
-  let cachedOrdersData = { records: [] }, cachedQcData = { records: [] };
+  // forceFresh (set only by the manual refresh button) skips this entirely
+  // -- previously a hit here made the button finish instantly with no
+  // real network call, which looked exactly like "the button doesn't work."
+  if (!forceFresh) {
+    let gotCache = false;
+    let cachedOrdersData = { records: [] }, cachedQcData = { records: [] };
 
-  const freshOrders = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
-    cachedOrdersData = fresh;
-    applyPendingData(cachedOrdersData, cachedQcData);
-    renderPendingList();
-  });
-  const freshQc = VP.getCached('action=qc', fresh => {
-    cachedQcData = fresh;
-    applyPendingData(cachedOrdersData, cachedQcData);
-    renderPendingList();
-  });
+    const freshOrders = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
+      cachedOrdersData = fresh;
+      applyPendingData(cachedOrdersData, cachedQcData);
+      renderPendingList();
+    });
+    const freshQc = VP.getCached('action=qc', fresh => {
+      cachedQcData = fresh;
+      applyPendingData(cachedOrdersData, cachedQcData);
+      renderPendingList();
+    });
 
-  if (freshOrders) { cachedOrdersData = freshOrders; gotCache = true; }
-  if (freshQc)     { cachedQcData = freshQc; gotCache = true; }
+    if (freshOrders) { cachedOrdersData = freshOrders; gotCache = true; }
+    if (freshQc)     { cachedQcData = freshQc; gotCache = true; }
 
-  if (gotCache) {
-    applyPendingData(cachedOrdersData, cachedQcData);
-    renderPendingList();
-    return;
+    if (gotCache) {
+      applyPendingData(cachedOrdersData, cachedQcData);
+      renderPendingList();
+      return;
+    }
   }
 
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
@@ -311,6 +321,12 @@ function renderCurrentTab() {
 
 function switchTab(tab) {
   currentTab = tab;
+  // view-pending itself must also be shown here -- it used to be turned
+  // back on by checkSessionAndRoute() (now removed along with sessions),
+  // and nothing replaced that responsibility. Without this line, leaving
+  // an order via Volver left view-pending stuck at display:none forever,
+  // which looked exactly like "the whole list disappeared."
+  document.getElementById('view-pending').style.display = 'block';
   const tabs = { pending: 'tab-pending', history: 'tab-history' };
   Object.entries(tabs).forEach(([key, id]) => {
     document.getElementById(id).style.display = key === tab ? 'block' : 'none';
@@ -321,26 +337,54 @@ function switchTab(tab) {
   if (tab === 'history') { historyPage = 0; renderHistoryList(); }
 }
 
+function toggleHistorySort() {
+  historySortMode = historySortMode === 'new-old' ? 'old-new' : 'new-old';
+  const btn = document.getElementById('history-sort-btn');
+  if (btn) btn.textContent = historySortMode === 'new-old' ? 'Más reciente primero' : 'Más antiguo primero';
+  historyPage = 0;
+  renderHistoryList();
+}
+
+function runHistorySearch() {
+  historyPage = 0;
+  renderHistoryList();
+}
+
 // Flat, paginated list of everything ever packed -- no session grouping.
 // allQcRows is already loaded for the pending view; Historial reuses it
 // instead of a separate fetch, filtered to Enviado and sorted newest-first.
 const HISTORY_PAGE_SIZE = 20;
 let historyPage = 0;
 
+// Same multi-field match as Calidad's search (searchBlob in calidad.js):
+// username, tracking ID, and every TikTok/Shopify/Manual order ID in one
+// box. Product names are left out here -- unlike Calidad, QC rows don't
+// carry the full Orders data needed to resolve a product name, and
+// fetching the whole Orders sheet just for this search isn't worth it.
+function historySearchBlob(r) {
+  const ids = [
+    ...String(r['TikTok Order IDs'] || '').split(' + ').filter(Boolean),
+    ...String(r['Shopify Order IDs'] || '').split(' + ').filter(Boolean),
+    ...String(r['Manual Order IDs'] || '').split(' + ').filter(Boolean),
+  ];
+  return [r['Primary Username'] || '', r['Tracking ID'] || '', ...ids].join(' ').toLowerCase();
+}
+
+let historySortMode = 'new-old';
+
 function renderHistoryList() {
   const list = document.getElementById('history-list-tab');
-  let rows = allQcRows
-    .filter(r => r['Status'] === 'Enviado')
-    .sort((a, b) => String(b['Shipped Date'] || b['Created Date'] || '').localeCompare(String(a['Shipped Date'] || a['Created Date'] || '')));
+  let rows = allQcRows.filter(r => r['Status'] === 'Enviado');
 
-  const searchInput = document.getElementById('search-input');
-  const query = currentTab === 'history' && searchInput ? searchInput.value.trim().toLowerCase() : '';
-  if (query) {
-    rows = rows.filter(r =>
-      (r['Primary Username'] || '').toLowerCase().includes(query) ||
-      (r['Tracking ID'] || '').toLowerCase().includes(query)
-    );
-  }
+  const searchInput = document.getElementById('history-search-input');
+  const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  if (query) rows = rows.filter(r => historySearchBlob(r).includes(query));
+
+  rows = rows.slice().sort((a, b) => {
+    const aT = String(a['Shipped Date'] || a['Created Date'] || '');
+    const bT = String(b['Shipped Date'] || b['Created Date'] || '');
+    return historySortMode === 'old-new' ? aT.localeCompare(bT) : bT.localeCompare(aT);
+  });
 
   if (rows.length === 0) {
     list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Nada empacado todav\u00eda'}</div>`;
@@ -385,7 +429,13 @@ function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
   if (tikTokOrders.length === 0) {
-    list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
+    // "Nothing pending" and "nothing has loaded yet" look identical from
+    // this filter alone -- hasLoadedOnce (set in loadPending) tells them
+    // apart, so a failed/incomplete load is never mistaken for a real
+    // empty queue.
+    list.innerHTML = hasLoadedOnce
+      ? '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>'
+      : '<div class="empty-state">⚠ La lista no cargó correctamente. Toca el botón de actualizar.</div>';
     return;
   }
 
