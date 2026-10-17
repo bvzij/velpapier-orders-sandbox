@@ -13,13 +13,38 @@ const PER_PAGE = 100;
 let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
+let hasLoadedOnce = false; // tells a genuinely empty result apart from a load that hasn't finished/succeeded yet
 
 function applyQcData(q, o) {
   QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
-  QC.sort((a, b) => String(b['Timestamp'] || '').localeCompare(String(a['Timestamp'] || '')));
+  // QC rows have no Timestamp column -- this sort was comparing '' to ''
+  // and doing nothing. QC ID is 'QC-<zero-padded row>-<rand>', so it
+  // sorts reliably by creation order (same fix as Historial in qc.js).
+  QC.sort((a, b) => String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || '')));
   ORDERS_BY_ID = {};
   (o.records || []).forEach(r => { ORDERS_BY_ID[r['Order ID']] = r; });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
+  hasLoadedOnce = true;
+}
+
+/* ── Manual refresh ─────────────────────────────────────────────────── */
+// Bypasses the sessionStorage cache entirely, same as QC's manualRefresh --
+// always a real network call, never a silent no-op served from cache.
+async function manualRefresh() {
+  const icon = document.getElementById('cal-refresh-icon');
+  if (icon) icon.classList.add('spinning');
+  try {
+    const [q, o] = await Promise.all([
+      VP.get('action=qc'),
+      VP.get('action=orders').catch(() => ({ records: [] })),
+    ]);
+    applyQcData(q, o);
+    render();
+  } catch (e) {
+    console.error('[calidad:manualRefresh]', e);
+  } finally {
+    if (icon) icon.classList.remove('spinning');
+  }
 }
 
 /* ── Boot ───────────────────────────────────────────────────────────── */
@@ -33,14 +58,19 @@ function applyQcData(q, o) {
 
     // Cache-first: show instantly if we have a prior snapshot, refresh
     // quietly in the background, re-render when fresh data lands.
+    // VP.getCached returns { data, pending } -- always truthy, even with
+    // nothing cached. Treating it as the payload itself (the bug this
+    // replaces) meant gotCache was always true and the real fetch below
+    // never ran, which is why the page needed the slow background
+    // callback to eventually paint anything.
     let gotCache = false;
     let cq = { records: [] }, co = { records: [] };
 
-    const cachedQ = VP.getCached('action=qc', fresh => { cq = fresh; applyQcData(fresh, co); render(); });
-    const cachedO = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, fresh); render(); });
+    const qRes = VP.getCached('action=qc', fresh => { cq = fresh; applyQcData(fresh, co); render(); });
+    const oRes = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, fresh); render(); });
 
-    if (cachedQ) { cq = cachedQ; gotCache = true; }
-    if (cachedO) { co = cachedO; gotCache = true; }
+    if (qRes.data) { cq = qRes.data; gotCache = true; }
+    if (oRes.data) { co = oRes.data; gotCache = true; }
 
     if (gotCache) {
       applyQcData(cq, co);
@@ -241,9 +271,11 @@ function render() {
   const el = document.getElementById('cal-content');
 
   if (!rows.length) {
-    el.innerHTML = `<div class="vp-empty-sm">${anyFilterActive()
-      ? 'Ningún envío coincide con esos filtros.'
-      : 'Todavía no hay envíos registrados.'}</div>`;
+    let msg;
+    if (!hasLoadedOnce) msg = '⚠ No se pudo cargar. Toca el botón de actualizar.';
+    else if (anyFilterActive()) msg = 'Ningún envío coincide con esos filtros.';
+    else msg = 'Todavía no hay envíos registrados.';
+    el.innerHTML = `<div class="vp-empty-sm">${msg}</div>`;
     document.getElementById('cal-pagination-top').innerHTML = '';
     document.getElementById('cal-pagination-bottom').innerHTML = '';
     return;
