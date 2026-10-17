@@ -253,19 +253,25 @@ async function loadPending(forceFresh) {
     let gotCache = false;
     let cachedOrdersData = { records: [] }, cachedQcData = { records: [] };
 
-    const freshOrders = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
+    // VP.getCached returns { data, pending } -- an object that is ALWAYS
+    // truthy, even with nothing cached. Treating it as the payload meant
+    // gotCache was always true and applyPendingData read `.records` off
+    // the wrapper (undefined), wiping allActiveOrders to [] on every call
+    // and returning before the real fetch. That is what emptied the
+    // pending list every 20s, and why only the manual refresh fixed it.
+    const ordersRes = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
       cachedOrdersData = fresh;
       applyPendingData(cachedOrdersData, cachedQcData);
       renderPendingList();
     });
-    const freshQc = VP.getCached('action=qc', fresh => {
+    const qcRes = VP.getCached('action=qc', fresh => {
       cachedQcData = fresh;
       applyPendingData(cachedOrdersData, cachedQcData);
       renderPendingList();
     });
 
-    if (freshOrders) { cachedOrdersData = freshOrders; gotCache = true; }
-    if (freshQc)     { cachedQcData = freshQc; gotCache = true; }
+    if (ordersRes.data) { cachedOrdersData = ordersRes.data; gotCache = true; }
+    if (qcRes.data)     { cachedQcData = qcRes.data; gotCache = true; }
 
     if (gotCache) {
       applyPendingData(cachedOrdersData, cachedQcData);
@@ -305,7 +311,10 @@ async function loadPending(forceFresh) {
 // never shows an order as "still needs packing" long after someone else
 // already packed it.
 setInterval(() => {
-  if (document.getElementById('view-pending').style.display !== 'none') {
+  // tab-history lives inside view-pending, so this must also check which
+  // tab is actually showing -- otherwise the pending refresh keeps firing
+  // (and re-rendering) while the user is reading Historial.
+  if (currentTab === 'pending' && document.getElementById('view-pending').style.display !== 'none') {
     loadPending();
   }
 }, 20000);
@@ -337,10 +346,8 @@ function switchTab(tab) {
   if (tab === 'history') { historyPage = 0; renderHistoryList(); }
 }
 
-function toggleHistorySort() {
-  historySortMode = historySortMode === 'new-old' ? 'old-new' : 'new-old';
-  const btn = document.getElementById('history-sort-btn');
-  if (btn) btn.textContent = historySortMode === 'new-old' ? 'Más reciente primero' : 'Más antiguo primero';
+function setHistorySort(mode) {
+  historySortMode = mode;
   historyPage = 0;
   renderHistoryList();
 }
@@ -380,9 +387,12 @@ function renderHistoryList() {
   const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
   if (query) rows = rows.filter(r => historySearchBlob(r).includes(query));
 
+  // QC rows carry no date column (saveQC writes Shipped Date to the Orders
+  // sheet, not this one), which is why sorting on it did nothing. QC ID is
+  // 'QC-<zero-padded row>-<rand>', so it sorts reliably by creation order.
   rows = rows.slice().sort((a, b) => {
-    const aT = String(a['Shipped Date'] || a['Created Date'] || '');
-    const bT = String(b['Shipped Date'] || b['Created Date'] || '');
+    const aT = String(a['QC ID'] || '');
+    const bT = String(b['QC ID'] || '');
     return historySortMode === 'old-new' ? aT.localeCompare(bT) : bT.localeCompare(aT);
   });
 
@@ -551,6 +561,7 @@ function toggleEditShipped() {
 }
 
 function openCapture(shipment) {
+  cameFromTab = currentTab;
   pendingScrollY = window.scrollY;
   selected = shipment;
   currentQcId = null;
@@ -611,12 +622,16 @@ function openCapture(shipment) {
 // Always returns to the pending list -- previously this branched on a
 // session that no longer exists, so every save silently redirected to the
 // (now-removed) session gate instead of back to work.
+// Returns to whichever tab the order was opened from -- going into an
+// order from Historial and landing back on Pendientes loses your place.
+let cameFromTab = 'pending';
+
 async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
   selected = null;
   currentQcId = null;
   localFinalizeInProgress = false;
-  switchTab('pending');
+  switchTab(cameFromTab);
   await refreshQcBadges();
   window.scrollTo(0, pendingScrollY);
 }
