@@ -1612,16 +1612,21 @@ function renderTikTokTab() {
   container.innerHTML = sortedDays.map(day => {
     const orders = groups[day];
     const rows = orders.map(r => {
-      const username = escapeHtml(r.Cliente || '—');
-      const products = escapeHtml(r.Producto || '—');
-      const price    = r.Precio ? `$${Number(r.Precio).toFixed(2)}` : '—';
-      const tracking = escapeHtml(r['Tracking ID'] || '');
+      const username = escapeHtml((r.Cliente || '—').replace(/^@/, ''));
+      const price    = r.Precio ? formatMXN(r.Precio) : '—';
+      // Was r['Tracking ID'], which mapFromApi never produces (it maps to
+      // TrackingId) -- so this line has silently never rendered until now.
+      const tracking = escapeHtml(r.TrackingId || '');
+      // shopifyOrderLine() already renders each TikTok Order ID as its own
+      // link to that order on TikTok Seller plus the combined item count --
+      // exactly what this card needs, and the same markup the order rows
+      // use, so the two can't drift apart.
       return `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
           <div style="min-width:0">
-            <div style="font-weight:600;font-size:13px;margin-bottom:2px">@${username}</div>
-            <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${products}</div>
-            ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">${tracking}</div>` : ''}
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">${username}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${shopifyOrderLine(r)}</div>
+            ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">Guía ${tracking}</div>` : ''}
           </div>
           <div style="font-size:13px;font-weight:600;white-space:nowrap">${price}</div>
         </div>`;
@@ -1661,7 +1666,7 @@ function renderShopifyPendingTab() {
     return;
   }
 
-  container.innerHTML = shopifyPendingGroupsList.map(g => {
+  container.innerHTML = shopifyPendingGroupsList.map((g, i) => {
     const best = g.candidates && g.candidates[0];
     const orders = (g.order_names || []).length
       ? g.order_names.slice(0, 4).join(', ') + (g.order_names.length > 4 ? ` +${g.order_names.length - 4} más` : '')
@@ -1676,8 +1681,81 @@ function renderShopifyPendingTab() {
           <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(orders)}</div>
           <div style="font-size:11.5px;color:var(--text-faint);margin-top:2px">${suggestion}</div>
         </div>
+        <button class="btn btn-sm btn-enviado shopify-review-btn" data-idx="${i}" style="white-space:nowrap">Revisar</button>
       </div>`;
   }).join('');
+
+  container.querySelectorAll('.shopify-review-btn').forEach(btn => btn.addEventListener('click', () => {
+    const g = shopifyPendingGroupsList[Number(btn.dataset.idx)];
+    if (g) showShopifyMatchModal(g);
+  }));
+}
+
+// One pending Shopify customer at a time. The Ajustes bulk tool stays as
+// it is -- this is the quick path for the one or two that show up day to
+// day, without opening a separate page. Both go through the same
+// resolve_shopify_matches_bulk action, so the resulting data and audit
+// entries are identical either way.
+function showShopifyMatchModal(group) {
+  const c = document.getElementById('modal-container');
+  const inc = group.incoming || {};
+  const incomingLines = [inc.name, inc.username, inc.email, inc.phone].filter(Boolean).map(escapeHtml).join(' · ');
+  const orderNames = (group.order_names || []).join(', ');
+  const cands = group.candidates || [];
+
+  const candHtml = cands.length
+    ? cands.map(cd => `
+        <label class="bulk-order-item" style="cursor:pointer">
+          <input type="radio" name="sm-cand" value="${escapeHtml(cd.customer_id)}" />
+          <div class="bulk-order-main">
+            <span class="bulk-order-product">${escapeHtml(cd.username || cd.name || cd.customer_id)}</span>
+            <span class="bulk-order-meta">${cd.same_shopify_id ? 'ID de Shopify coincide' : escapeHtml(cd.score + '% · ' + (cd.reasons || []).join(', '))}</span>
+          </div>
+        </label>`).join('')
+    : '<div class="empty-state">Sin candidatos sugeridos</div>';
+
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
+    <div class="modal-title">Confirmar cliente de Shopify</div>
+    <div class="bulk-section-label">Pedido entrante</div>
+    <div style="font-size:13px;margin-bottom:3px">${incomingLines || 'Sin datos'}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:1rem">${escapeHtml(orderNames)}</div>
+    <div class="bulk-section-label">Vincular a cliente existente</div>
+    <div class="bulk-order-list">${candHtml}</div>
+    <div class="modal-actions" style="flex-wrap:wrap;gap:6px">
+      <button class="btn" id="sm-cancel">Cerrar</button>
+      <button class="btn" id="sm-ignore">Ignorar</button>
+      <button class="btn" id="sm-new">Crear cliente nuevo</button>
+      <button class="btn btn-primary" id="sm-link" disabled>Vincular</button>
+    </div>
+  </div></div>`;
+
+  document.getElementById('sm-cancel').addEventListener('click', closeModal);
+  c.querySelectorAll('input[name="sm-cand"]').forEach(radio =>
+    radio.addEventListener('change', () => { document.getElementById('sm-link').disabled = false; }));
+  document.getElementById('sm-link').addEventListener('click', () => {
+    const sel = c.querySelector('input[name="sm-cand"]:checked');
+    if (sel) applyShopifyMatchDecision(group, 'link', sel.value);
+  });
+  document.getElementById('sm-new').addEventListener('click', () => applyShopifyMatchDecision(group, 'new', ''));
+  document.getElementById('sm-ignore').addEventListener('click', () => {
+    showConfirmModal('¿Ignorar este pedido de Shopify? No se creará ni vinculará ningún cliente.',
+      () => applyShopifyMatchDecision(group, 'ignore', ''));
+  });
+}
+
+async function applyShopifyMatchDecision(group, decision, customerId) {
+  try {
+    const res = await apiPost({
+      action: 'resolve_shopify_matches_bulk',
+      items: [{ key: group.key, match_ids: group.match_ids, decision: decision, customer_id: customerId }],
+    });
+    const first = (res.results || [])[0];
+    if (first && first.ok === false) throw new Error(first.error || 'Error');
+    closeModal();
+    showToast(decision === 'ignore' ? '✓ Pedido ignorado' : '✓ Cliente confirmado');
+    await fetchShopifyPending();
+    loadRecords();
+  } catch (e) { showToast('Error: ' + e.message); }
 }
 
 function switchTab(tab) {
