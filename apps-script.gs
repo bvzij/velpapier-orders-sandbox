@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-15.12';
+const SCRIPT_VERSION = '2026-10-17.1';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1104,8 +1104,43 @@ function deleteOrder(body) {
   headers.forEach((h, i) => { snapshot[h] = rowValues[i]; });
 
   sheet.deleteRow(rowIndex);
-  logAuditEvent('delete_order', 'Order', body.order_id, { deleted_row: snapshot });
-  return jsonResponse({ result: 'deleted', order_id: body.order_id });
+
+  // Deleting a Shopify order used to leave its match row sitting at
+  // Pending forever, so the "Shopify pendiente" badge kept counting an
+  // order that no longer exists and nothing in the UI could clear it.
+  const matchesClosed = closePendingMatchesForShopifyOrder(snapshot['Shopify Order ID']);
+
+  logAuditEvent('delete_order', 'Order', body.order_id, { deleted_row: snapshot, matches_closed: matchesClosed });
+  return jsonResponse({ result: 'deleted', order_id: body.order_id, matches_closed: matchesClosed });
+}
+
+// Marks any still-Pending Shopify match rows for this Shopify Order ID as
+// Order-Deleted, rather than removing them, so the record of what came in
+// and what happened to it stays readable. No-op for TikTok/manual orders,
+// which have no Shopify Order ID. Returns how many rows were closed.
+function closePendingMatchesForShopifyOrder(shopifyOrderId) {
+  const id = String(shopifyOrderId || '').trim();
+  if (!id) return 0;
+  const mSheet = getShopifyMatchesSheet();
+  if (!mSheet) return 0;
+  const data = mSheet.getDataRange().getValues();
+  if (data.length < 2) return 0;
+
+  const h = data[0];
+  const iOrder = h.indexOf('Shopify Order ID');
+  const iDecision = h.indexOf('Decision');
+  const iDecided = h.indexOf('Decided Date');
+  if (iOrder < 0 || iDecision < 0) return 0;
+
+  let closed = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][iOrder] || '').trim() !== id) continue;
+    if (String(data[i][iDecision] || '').trim() !== 'Pending') continue;
+    mSheet.getRange(i + 1, iDecision + 1).setValue('Order-Deleted');
+    if (iDecided >= 0) mSheet.getRange(i + 1, iDecided + 1).setValue(nowISO());
+    closed++;
+  }
+  return closed;
 }
 // ─── Auto-archive ───────────────────────────────────────────────────────────────
 
@@ -4571,6 +4606,17 @@ function resolveShopifyMatchesBulk(body) {
         'First Name': np[0] || '', 'Surname': np.slice(1).join(' '), 'Email': String(latest[M.email] || '') }[h] || ''));
       ci = newRowNum - 1;
       custRowById[targetId] = ci;
+    } else if (item.decision === 'ignore') {
+      // Closes the match out without creating or linking a customer and
+      // without touching any order row -- for test or junk orders that
+      // shouldn't become a customer at all. Returns before the shared tail
+      // below, which assumes a real target customer exists.
+      pending.forEach(r => { matchChanges.push({ r: r, decision: 'Ignored', linked: '' }); });
+      results.push({ key: key, ok: true, customer_id: '', matches_resolved: pending.length, orders_updated: 0, ignored: true });
+      logAuditEvent('resolve_shopify_match', 'ShopifyMatch', String(key), {
+        decision: 'ignore', matches_resolved: pending.length, orders_updated: 0,
+      });
+      return;
     } else {
       results.push({ key: key, ok: false, error: 'Decisión desconocida: ' + item.decision }); return;
     }
