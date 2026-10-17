@@ -3,11 +3,12 @@
 const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
 const MAX_PHOTOS = 5;
 
-// TEMPORARY: packing sessions are disabled while the team gets used to the
-// general workflow first. Flip this back to true to re-enable the session
-// gate, banner, and end-session flow -- everything underneath is untouched.
-const SESSIONS_ENABLED = false;
-
+// Packing sessions were fully removed (see ways-of-working / to-do list):
+// the gate, banner, start/end-session flow, and the three-way
+// Pendientes/Empacados/Historial split are gone. Session ID stays on
+// existing QC rows as historical data, and the start_session/end_session/
+// update_session_participants backend actions are untouched -- nothing in
+// this file calls them anymore.
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
 let allActiveOrders = [];
@@ -16,7 +17,6 @@ let selected = null;      // { tracking_id, order_ids:[{id,channel}], customer_i
 let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
-let activeSession = null; // { 'Session ID', 'Start Time', ... } or null if no session running
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
 const gallery = { content: [], box: [] };
@@ -147,59 +147,19 @@ function currentPacker() {
 }
 
 function updatePackersBtnLabel() { /* no-op: packer button removed from the UI */ }
-// Push the checked-packer list to the session row so every device sees the
-// same "who's packing" state, instead of each device only knowing its own.
-async function pushParticipants() {
-  if (!activeSession) return;
-  try {
-    await apiPost({
-      action: 'update_session_participants',
-      session_id: activeSession['Session ID'],
-      participants: checkedPackers,
-    });
-  } catch (e) {
-    console.warn('[pushParticipants] failed:', e);
-  }
-}
 
 (async function init() {
   await ensureAuth();
-  await checkSessionAndRoute();
+  switchTab('pending');
+  await loadPending();
   setInterval(() => {
-    if (!activeSession) return;
     if (document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
     } else if (document.getElementById('view-capture').style.display !== 'none') {
       pollCaptureUpdates();
     }
   }, 4000);
-
-  // Sessions change far less often than photos/orders, so a slower, separate
-  // poll for the "no active session" gate is enough — catches a session
-  // someone else started/finished elsewhere without needing a manual refresh.
-  setInterval(() => {
-    if (activeSession) return;
-    if (document.getElementById('view-session-gate').style.display === 'none') return;
-    refreshGateState();
-  }, 60000);
 })();
-
-// Re-check whether a session has appeared (another device started one) and
-// silently refresh the history list so newly-finalized sessions show up.
-async function refreshGateState() {
-  try {
-    const data = await apiGet('action=active_session');
-    if (data.session) {
-      activeSession = data.session;
-      await checkSessionAndRoute();
-      return;
-    }
-    historySessions = null;
-    renderHistoryList('history-list-gate');
-  } catch (e) {
-    console.warn('[refreshGateState] failed:', e);
-  }
-}
 
 // While inside an order, quietly check the server for photos another device
 // may have added/removed, and merge them in — this is the real-time sync
@@ -251,127 +211,25 @@ async function pollCaptureUpdates() {
 let shippedLockShown = false;
 let localFinalizeInProgress = false;
 
-// Checks whether a session is currently active and shows the right view:
-// gate (no session) vs. pending list + live banner (session running).
-async function checkSessionAndRoute() {
-  // Hide both views while we determine state — prevents the wrong one flashing
-  document.getElementById('view-session-gate').style.display = 'none';
-  document.getElementById('session-banner').style.display = 'none';
-  document.getElementById('header-end-session-btn').style.display = 'none';
-  document.getElementById('view-pending').style.display = 'none';
-
-  if (!SESSIONS_ENABLED) {
-    // Sessions temporarily disabled -- go straight to the pending list,
-    // skip the gate entirely, no session banner or end-session button.
-    activeSession = null;
-    switchTab('pending');
-    await loadPending();
-    return;
-  }
-
-  try {
-    const data = await apiGet('action=active_session');
-    activeSession = data.session || null;
-  } catch (e) {
-    console.error('[checkSessionAndRoute] failed:', e);
-    activeSession = null;
-  }
-
-    if (activeSession) {
-    document.getElementById('session-banner').style.display = 'flex';
-    document.getElementById('header-end-session-btn').style.display = 'block';
-    // Packer picker UI is disabled (see DEFAULT_PACKER) -- no longer adopting
-    // server-side Participants here, since checkedPackers is fixed.
-    switchTab('pending');
-    await loadPending();
-  } else {
-    // No active session: show the gate (start/join session + history),
-    // not the pending list, which is session-scoped.
-    document.getElementById('view-session-gate').style.display = 'block';
-    historySessions = null;  // force a fresh fetch in case anything changed
-    renderHistoryList('history-list-gate');
-  }
-}
-
-let startingSession = false;
-
-async function handleStartSession() {
-  if (startingSession) return;
-  startingSession = true;
-  const btn = document.getElementById('start-session-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Cargando…'; }
-  try {
-    const res = await apiPost({ action: 'start_session' });
-    if (res.error) throw new Error(res.error);
-    if (res.result === 'already_active') {
-      showToast('Te uniste a la sesión ' + res.session_id);
-    } else {
-      showToast('Sesión iniciada: ' + res.session_id);
-    }
-    await checkSessionAndRoute();
-  } catch (e) {
-    showToast('Error al iniciar sesión: ' + e.message, true);
-  }
-  startingSession = false;
-  if (btn) { btn.disabled = false; btn.textContent = 'Iniciar / unirse a sesión'; }
-}
-
-async function handleEndSession() {
-  if (!activeSession) return;
-  if (!confirm('¿Finalizar la sesión de empaque actual?')) return;
-  try {
-    const res = await apiPost({
-      action: 'end_session',
-      session_id: activeSession['Session ID'],
-      participants: checkedPackers,
-    });
-    if (res.error) throw new Error(res.error);
-    showSessionSummary(res);
-    activeSession = null;
-    await checkSessionAndRoute();
-  } catch (e) {
-    showToast('Error al finalizar sesión: ' + e.message, true);
-  }
-}
-
-function showSessionSummary(summary) {
-  const startMs = summary.start_time ? Date.parse(summary.start_time) : activeSessionStartMs;
-  const totalSec = startMs ? Math.round((Date.now() - startMs) / 1000) : null;
-
-  const lines = [
-    `📦 ${summary.total_packages} paquete${summary.total_packages !== 1 ? 's' : ''} empacado${summary.total_packages !== 1 ? 's' : ''}`,
-    `🧩 ${summary.total_items} artículo${summary.total_items !== 1 ? 's' : ''} en total`,
-    totalSec !== null ? `⏱ Duración: ${formatHM(totalSec)}` : '',
-    (totalSec !== null && summary.total_packages > 0)
-      ? `⚡ Promedio: ${formatMS(Math.round(totalSec / summary.total_packages))} por paquete` : '',
-    summary.participants && summary.participants.length ? `👥 ${summary.participants.join(', ')}` : '',
-  ].filter(Boolean);
-
-  alert('Sesión finalizada\n\n' + lines.join('\n'));
-}
-
-// 3725 -> "1h 2m"
-function formatHM(totalSeconds) {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.round((totalSeconds % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
-
-// 95 -> "1m 35s"
-function formatMS(totalSeconds) {
-  const m = Math.floor(totalSeconds / 60);
-  const s = totalSeconds % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-let activeSessionStartMs = null;
-
-
 // ── Pending list ─────────────────────────────────────────────────────────
 
 function applyPendingData(ordersData, qcData) {
   allActiveOrders = ordersData.records || [];
   allQcRows = qcData.records || [];
+}
+
+// Manual refresh button -- bypasses the sessionStorage cache so a stuck or
+// stale list (e.g. after the tab was backgrounded a long time) can always
+// be force-reloaded without waiting for the 20s auto-refresh.
+async function manualRefresh() {
+  const icon = document.getElementById('refresh-icon');
+  if (icon) icon.classList.add('spinning');
+  try {
+    if (currentTab === 'history') { historyPage = 0; await refreshQcBadges(); }
+    else await loadPending();
+  } finally {
+    if (icon) icon.classList.remove('spinning');
+  }
 }
 
 async function loadPending() {
@@ -389,13 +247,11 @@ async function loadPending() {
   const freshOrders = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
     cachedOrdersData = fresh;
     applyPendingData(cachedOrdersData, cachedQcData);
-    updateSessionBanner();
     renderPendingList();
   });
   const freshQc = VP.getCached('action=qc', fresh => {
     cachedQcData = fresh;
     applyPendingData(cachedOrdersData, cachedQcData);
-    updateSessionBanner();
     renderPendingList();
   });
 
@@ -404,7 +260,6 @@ async function loadPending() {
 
   if (gotCache) {
     applyPendingData(cachedOrdersData, cachedQcData);
-    updateSessionBanner();
     renderPendingList();
     return;
   }
@@ -432,7 +287,6 @@ async function loadPending() {
     return;
   }
 
-  updateSessionBanner();
   renderPendingList();
 }
 
@@ -446,46 +300,41 @@ setInterval(() => {
   }
 }, 20000);
 
-function updateSessionBanner() {
-  if (!activeSession) return;
-  if (!activeSessionStartMs) {
-    const parsed = Date.parse(activeSession['Start Time']);
-    activeSessionStartMs = isNaN(parsed) ? Date.now() : parsed;
-  }
-  const count = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado').length;
-  document.getElementById('session-live-count').textContent = `Sesión activa · ${count} empacado${count !== 1 ? 's' : ''}`;
-}
-
-// ── Tabs: Pendientes / Empacados (this session) / Historial ────────────────
+// ── Tabs: Pendientes / Historial ─────────────────────────────
 
 let currentTab = 'pending';
 
 function renderCurrentTab() {
-  if (currentTab === 'packed') renderPackedList();
+  if (currentTab === 'history') renderHistoryList();
   else renderPendingList();
 }
 
 function switchTab(tab) {
   currentTab = tab;
-  const tabs = { pending: 'tab-pending', packed: 'tab-packed', history: 'tab-history' };
+  const tabs = { pending: 'tab-pending', history: 'tab-history' };
   Object.entries(tabs).forEach(([key, id]) => {
     document.getElementById(id).style.display = key === tab ? 'block' : 'none';
     const btn = document.getElementById(`tab-btn-${key}`);
     btn.style.background = key === tab ? 'var(--text)' : 'var(--surface2)';
     btn.style.color = key === tab ? 'var(--surface)' : 'var(--text-muted)';
   });
-  if (tab === 'packed') renderPackedList();
-  if (tab === 'history') renderHistoryList();
+  if (tab === 'history') { historyPage = 0; renderHistoryList(); }
 }
 
-function renderPackedList() {
-  const list = document.getElementById('packed-list');
-  if (!activeSession) { list.innerHTML = '<div class="empty-state">Sin sesión activa</div>'; return; }
+// Flat, paginated list of everything ever packed -- no session grouping.
+// allQcRows is already loaded for the pending view; Historial reuses it
+// instead of a separate fetch, filtered to Enviado and sorted newest-first.
+const HISTORY_PAGE_SIZE = 20;
+let historyPage = 0;
 
-  let rows = allQcRows.filter(r => r['Session ID'] === activeSession['Session ID'] && r['Status'] === 'Enviado');
+function renderHistoryList() {
+  const list = document.getElementById('history-list-tab');
+  let rows = allQcRows
+    .filter(r => r['Status'] === 'Enviado')
+    .sort((a, b) => String(b['Shipped Date'] || b['Created Date'] || '').localeCompare(String(a['Shipped Date'] || a['Created Date'] || '')));
 
   const searchInput = document.getElementById('search-input');
-  const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+  const query = currentTab === 'history' && searchInput ? searchInput.value.trim().toLowerCase() : '';
   if (query) {
     rows = rows.filter(r =>
       (r['Primary Username'] || '').toLowerCase().includes(query) ||
@@ -494,11 +343,15 @@ function renderPackedList() {
   }
 
   if (rows.length === 0) {
-    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Nada empacado todavía en esta sesión'}</div>`;
+    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Nada empacado todav\u00eda'}</div>`;
     return;
   }
 
-  list.innerHTML = rows.map(row => {
+  const start = historyPage * HISTORY_PAGE_SIZE;
+  const pageRows = rows.slice(start, start + HISTORY_PAGE_SIZE);
+  const hasMore = rows.length > start + HISTORY_PAGE_SIZE;
+
+  list.innerHTML = pageRows.map(row => {
     const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
       .filter(c => row[c]).length;
     const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
@@ -517,85 +370,20 @@ function renderPackedList() {
         username: row['Primary Username'] || '',
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
-          <span class="pending-username">${escapeHtml(row['Primary Username'] || '—')}</span>
-          <span class="pending-count">✓ Enviado</span>
+          <span class="pending-username">${escapeHtml(row['Primary Username'] || '\u2014')}</span>
+          <span class="pending-count">\u2713 Enviado</span>
         </div>
         <div class="pending-tracking">${escapeHtml(row['Tracking ID'] || '')}</div>
         <div class="pending-progress">${photoCount} foto${photoCount !== 1 ? 's' : ''}</div>
       </div>`;
-  }).join('');
-}
-
-let historySessions = null;  // cached after first load this page-session
-let historySessionsFinished = [];  // filtered+indexed list actually shown/clicked in the UI
-
-async function renderHistoryList(targetId) {
-  targetId = targetId || 'history-list-tab';
-  const list = document.getElementById(targetId);
-  list.innerHTML = '<div class="empty-state">Cargando…</div>';
-  try {
-    if (!historySessions) {
-      const data = await apiGet('action=sessions');
-      historySessions = (data.records || []).slice()
-        .sort((a, b) => String(b['Start Time'] || '').localeCompare(String(a['Start Time'] || '')));
-    }
-    const finished = historySessions.filter(s => s['Status'] === 'Finalizada');
-    historySessionsFinished = finished;  // toggleHistorySession indexes into THIS array, not the raw one
-    if (finished.length === 0) {
-      list.innerHTML = '<div class="empty-state">Sin sesiones anteriores</div>';
-      return;
-    }
-    list.innerHTML = finished.map((s, i) => `
-      <div class="pending-card" onclick="toggleHistorySession(${i}, '${targetId}')" id="history-session-${targetId}-${i}">
-        <div class="pending-card-top">
-          <span class="pending-username">${escapeHtml(s['Session ID'])}</span>
-          <span class="pending-count">${escapeHtml(String(s['Total Packages'] || 0))} paq. (al finalizar)</span>
-        </div>
-        <div class="pending-tracking">${escapeHtml(s['Participants'] || '—')}</div>
-        <div id="history-session-detail-${targetId}-${i}" style="display:none;margin-top:10px"></div>
-      </div>
-    `).join('');
-  } catch (e) {
-    list.innerHTML = '<div class="empty-state">Error al cargar el historial</div>';
-  }
-}
-
-async function toggleHistorySession(i, targetId) {
-  targetId = targetId || 'history-list-tab';
-  const detail = document.getElementById(`history-session-detail-${targetId}-${i}`);
-  const isOpen = detail.style.display !== 'none';
-  detail.style.display = isOpen ? 'none' : 'block';
-  if (isOpen || detail.dataset.loaded) return;
-
-  detail.innerHTML = '<div style="font-size:12px;color:var(--text-faint)">Cargando…</div>';
-  try {
-    const sessionId = historySessionsFinished[i]['Session ID'];
-    const data = await apiGet(`action=qc&session_id=${encodeURIComponent(sessionId)}`);
-    const rows = (data.records || []).filter(r => r['Status'] === 'Enviado');
-    detail.innerHTML = rows.length === 0
-      ? '<div style="font-size:12px;color:var(--text-faint)">Sin registros</div>'
-      : rows.map((row, ri) => {
-          const photoCount = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
-            .filter(c => row[c]).length;
-          return `<div style="font-size:12px;padding:8px 0;border-top:0.5px solid var(--border);cursor:pointer" onclick='event.stopPropagation(); openHistoryOrder(${JSON.stringify(row).replace(/'/g, "&apos;")})'>
-            <strong>${escapeHtml(row['Primary Username'] || '—')}</strong> · ${escapeHtml(row['Tracking ID'] || '')} · ${photoCount} foto${photoCount !== 1 ? 's' : ''}
-          </div>`;
-        }).join('');
-    detail.dataset.loaded = '1';
-  } catch (e) {
-    detail.innerHTML = '<div style="font-size:12px;color:var(--red-text)">Error al cargar</div>';
-  }
+  }).join('') + (hasMore
+    ? `<button class="qc-submit" style="margin-top:10px" onclick="historyPage++; renderHistoryList()">Cargar m\u00e1s</button>`
+    : '');
 }
 
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
-  console.log('[DIAG2] allActiveOrders.length =', allActiveOrders.length);
-  if (allActiveOrders.length > 0) {
-    console.log('[DIAG2] first record Channel/Status:', JSON.stringify(allActiveOrders[0]['Channel']), JSON.stringify(allActiveOrders[0]['Status']));
-  }
-  console.log('[DIAG2] tikTokOrders.length =', tikTokOrders.length);
-
   if (tikTokOrders.length === 0) {
     list.innerHTML = '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>';
     return;
@@ -712,38 +500,6 @@ function toggleEditShipped() {
   applyShippedLock(true);
 }
 
-// Opens an order from Historial, which may be viewed with no active session
-// and therefore no populated allQcRows/allActiveOrders. Builds the shipment
-// object directly from the QC row data already fetched for the history
-// detail view, and makes sure every other view (including the session gate)
-// is hidden first.
-function openHistoryOrder(row) {
-  // So openCapture's own lookup (which reads allQcRows) finds this row too,
-  // even if the list was never loaded this session.
-  if (!allQcRows.find(r => r['QC ID'] === row['QC ID'])) {
-    allQcRows = [...allQcRows, row];
-  }
-
-  const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
-  const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
-  const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
-  const orderIds = [
-    ...tikTokIds.map(id => ({ id, channel: 'TikTok' })),
-    ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
-    ...manualIds.map(id => ({ id, channel: 'Manual' })),
-  ];
-
-  document.getElementById('view-session-gate').style.display = 'none';
-  document.getElementById('view-pending').style.display = 'none';
-
-  openCapture({
-    tracking_id: row['Tracking ID'] || '',
-    order_ids: orderIds,
-    customer_id: row['Customer ID'] || '',
-    username: row['Primary Username'] || '',
-  });
-}
-
 function openCapture(shipment) {
   pendingScrollY = window.scrollY;
   selected = shipment;
@@ -802,49 +558,24 @@ function openCapture(shipment) {
   window.scrollTo(0, 0);
 }
 
+// Always returns to the pending list -- previously this branched on a
+// session that no longer exists, so every save silently redirected to the
+// (now-removed) session gate instead of back to work.
 async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
   selected = null;
   currentQcId = null;
   localFinalizeInProgress = false;
-
-  if (activeSession) {
-    document.getElementById('view-pending').style.display = 'block';
-    await refreshQcBadges();
-    window.scrollTo(0, pendingScrollY);
-  } else {
-    // Came from Historial with no active session — go back to the gate,
-    // not the (empty, session-only) pending list.
-    document.getElementById('view-session-gate').style.display = 'block';
-    historySessions = null;  // force a fresh fetch in case anything changed
-    renderHistoryList('history-list-gate');
-    window.scrollTo(0, pendingScrollY);
-  }
+  switchTab('pending');
+  await refreshQcBadges();
+  window.scrollTo(0, pendingScrollY);
 }
 
 async function refreshQcBadges() {
   try {
-    const [qcData, sessionData] = await Promise.all([
-      apiGet('action=qc'),
-      apiGet('action=active_session'),
-    ]);
+    const qcData = await apiGet('action=qc');
     allQcRows = qcData.records || [];
-
-    // Session ended on another device — route this one back to the gate too.
-    if (activeSession && !sessionData.session) {
-      activeSession = null;
-      await checkSessionAndRoute();
-      return;
-    }
-
-        if (sessionData.session) {
-      activeSession = sessionData.session;
-      // Packer picker UI is disabled (see DEFAULT_PACKER) -- checkedPackers
-      // stays fixed, so no need to reconcile against live Participants here.
-    }
-    updateSessionBanner();
-    if (currentTab === 'packed') renderPackedList();
-    else renderPendingList();
+    renderCurrentTab();
   } catch (e) {
     console.warn('[refreshQcBadges] failed:', e);
   }
@@ -1043,7 +774,6 @@ async function submitQC() {
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
       finalize:      true,
-      session_id:    activeSession ? activeSession['Session ID'] : '',
       tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
