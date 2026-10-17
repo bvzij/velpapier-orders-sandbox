@@ -179,7 +179,6 @@
   <header class="qc-header">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
       <div class="qc-title">Empacar <span>· control de calidad</span></div>
-      <button id="header-end-session-btn" onclick="handleEndSession()" style="display:none;background:none;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:7px 10px;font-size:11px;font-weight:600;font-family:inherit;color:var(--text);cursor:pointer;white-space:nowrap;flex-shrink:0">Finalizar</button>
     </div>
         <div class="packer-row" style="gap:8px">
       <div style="flex:1;min-width:0;position:relative">
@@ -191,26 +190,9 @@
 
   <div class="qc-body">
 
-    <!-- Session gate: shown when no session is active -->
-    <div id="view-session-gate" style="display:none">
-      <div style="text-align:center;padding:2rem 1rem 1rem">
-        <div style="font-size:15px;color:var(--text-muted);margin-bottom:1.5rem">No hay ninguna sesión de empaque activa</div>
-        <button class="qc-submit" id="start-session-btn" style="max-width:280px;margin:0 auto 1.5rem" onclick="handleStartSession()">Iniciar / unirse a sesión</button>
-      </div>
-      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:8px">Historial de sesiones</div>
-      <div id="history-list-gate"></div>
-    </div>
-
-    <!-- Live session banner: shown above the list while a session is active -->
-    <div id="session-banner" style="display:none;background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:14px;align-items:center;gap:10px">
-      <span style="width:9px;height:9px;border-radius:50%;background:#d33;display:inline-block;animation:pulse-rec 1.4s ease-in-out infinite"></span>
-      <span style="font-size:12px;font-weight:700" id="session-live-count">Sesión activa · 0 empacados</span>
-    </div>
-
-    <div id="view-pending" style="display:none">
+    <div id="view-pending">
       <div style="display:flex;gap:6px;margin-bottom:10px">
         <button id="tab-btn-pending" onclick="switchTab('pending')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--text);color:var(--surface)">Pendientes</button>
-        <button id="tab-btn-packed" onclick="switchTab('packed')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--surface2);color:var(--text-muted)">Empacados</button>
         <button id="tab-btn-history" onclick="switchTab('history')" style="flex:1;padding:8px;font-size:12px;font-weight:700;font-family:inherit;border:none;border-radius:var(--radius-md);cursor:pointer;background:var(--surface2);color:var(--text-muted)">Historial</button>
       </div>
 
@@ -224,10 +206,6 @@
           </select>
         </div>
         <div id="pending-list"></div>
-      </div>
-
-      <div id="tab-packed" style="display:none">
-        <div id="packed-list"></div>
       </div>
 
       <div id="tab-history" style="display:none">
@@ -302,6 +280,10 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<button class="refresh-fab" onclick="manualRefresh()" aria-label="Actualizar">
+  <svg id="refresh-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+</button>
 
 <script src="common.js"></script>
 <script>
