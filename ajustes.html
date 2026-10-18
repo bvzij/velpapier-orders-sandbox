@@ -65,7 +65,7 @@
       <div class="aj-row" style="margin-bottom:0">
         <div>
           <div class="aj-row-label">Importación histórica / backfill</div>
-          <div class="aj-row-hint">Sube un CSV completo de pedidos de TikTok para rellenar fechas de envío, entrega y cancelación que la importación diaria aún no conoce</div>
+          <div class="aj-row-hint">Sube un CSV completo de pedidos de TikTok para rellenar fechas de envío, entrega y cancelación, y crear en Pedidos los envíos con guía que falten</div>
         </div>
         <button class="refresh-btn" id="aj-open-backfill">Importar CSV histórico</button>
       </div>
@@ -88,6 +88,59 @@
           <div class="aj-row-hint">Elige dos productos tú mismo y fusiónalos directamente, sin esperar a la búsqueda automática</div>
         </div>
         <button class="refresh-btn" id="aj-manual-product-merge">Buscar manualmente</button>
+      </div>
+      <div class="aj-row" style="margin-bottom:0;margin-top:12px">
+        <div>
+          <div class="aj-row-label">Historial de fusiones</div>
+          <div class="aj-row-hint">Revisa las fusiones de productos y deshaz cualquiera que haya sido un error</div>
+        </div>
+        <button class="refresh-btn" id="aj-product-merge-history">Ver historial</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="aj-section">
+    <div class="aj-section-title">Salud de los datos</div>
+    <div class="aj-card">
+      <div class="aj-row">
+        <div>
+          <div class="aj-row-label">Informe de revisión</div>
+          <div class="aj-row-hint">Busca pedidos duplicados, envíos que faltan en Pedidos, IDs dañados, pedidos atascados y conteos desactualizados. Se revisa solo cada noche</div>
+        </div>
+        <button class="refresh-btn" id="aj-open-health">Ver informe</button>
+      </div>
+      <div class="aj-row" style="margin-bottom:0">
+        <div>
+          <div class="aj-row-label">Conteos de clientes</div>
+          <div class="aj-row-hint">Recalcula envíos por cliente y fecha del primer pedido a partir de Pedidos. También corre solo cada noche</div>
+        </div>
+        <button class="refresh-btn" id="aj-run-reconcile">Recalcular</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="aj-section">
+    <div class="aj-section-title">Usuarios</div>
+    <div class="aj-card">
+      <div class="aj-row" style="margin-bottom:0">
+        <div>
+          <div class="aj-row-label">Usuarios y contraseñas</div>
+          <div class="aj-row-hint">Cambia contraseñas del equipo y cierra sus sesiones abiertas en otros teléfonos</div>
+        </div>
+        <button class="refresh-btn" id="aj-open-roles">Administrar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="aj-section">
+    <div class="aj-section-title">Sesión</div>
+    <div class="aj-card">
+      <div class="aj-row" style="margin-bottom:0">
+        <div>
+          <div class="aj-row-label">Cerrar sesión</div>
+          <div class="aj-row-hint">Sal del panel en este dispositivo. Tendrás que escribir tu contraseña otra vez</div>
+        </div>
+        <button class="refresh-btn" id="aj-logout">Cerrar sesión</button>
       </div>
     </div>
   </div>
