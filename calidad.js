@@ -433,13 +433,16 @@ function cardHtml(r) {
   // everything you'd actually want when troubleshooting for a customer.
   // Product names and the QC row's own Notes text were dropped -- the
   // card is a quick-scan summary now, full detail lives in the modal.
+  // Always four lines, same order, every card -- a count of 0 still shows
+  // as "0 Shopify" rather than the line disappearing, so the shape of the
+  // card never shifts between orders.
   const infoLines = [
     `Empacado ${fmtTimeline24h(r['Timestamp'])}`,
     `Guía ${r['Tracking ID'] || '—'}`,
-    ids.tiktok.length  ? `${ids.tiktok.length} pedido${ids.tiktok.length !== 1 ? 's' : ''} TikTok` : '',
-    ids.shopify.length ? `${ids.shopify.length} pedido${ids.shopify.length !== 1 ? 's' : ''} Shopify` : '',
-    notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : '',
-  ].filter(Boolean);
+    `${ids.tiktok.length} pedido${ids.tiktok.length !== 1 ? 's' : ''} TikTok`,
+    `${ids.shopify.length} pedido${ids.shopify.length !== 1 ? 's' : ''} Shopify`,
+    notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : 'Sin notas',
+  ];
 
   return `<article class="vp-qc-card" data-qcid="${VP.esc(r['QC ID'] || '')}">
     <div class="vp-qc-photos">
