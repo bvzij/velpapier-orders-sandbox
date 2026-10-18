@@ -230,8 +230,14 @@ function wireCustomerCombo() {
 const photosOf = r => [...CONTENT_COLS, ...BOX_COLS].map(c => r[c]).filter(Boolean);
 
 function orderIdsOf(r) {
+  // The QC sheet's actual header is 'TikTok Order IDs ' with a trailing
+  // space -- confirmed by inspecting a live row -- so the plain key never
+  // matched and TikTok order IDs were silently always empty. Read both so
+  // this keeps working whether or not that trailing space ever gets
+  // cleaned up in the sheet itself.
+  const tiktokRaw = r['TikTok Order IDs'] !== undefined ? r['TikTok Order IDs'] : r['TikTok Order IDs '];
   return {
-    tiktok:  String(r['TikTok Order IDs']  || '').split(' + ').filter(Boolean),
+    tiktok:  String(tiktokRaw || '').split(' + ').filter(Boolean),
     shopify: String(r['Shopify Order IDs'] || '').split(' + ').filter(Boolean),
     manual:  String(r['Manual Order IDs']  || '').split(' + ').filter(Boolean),
   };
@@ -420,7 +426,7 @@ function cardHtml(r) {
       ${photos.length ? cells + extra : '<div class="vp-qc-nophoto">Sin fotos</div>'}
     </div>
     <div class="vp-qc-body">
-      <div class="vp-qc-user">${VP.esc(r['Primary Username'] || '—')}</div>
+      <div class="vp-qc-user">${VP.esc(r['Primary Username'] || '—')}${ids.tiktok.length ? ` <span class="vp-qc-ttid">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>` : ''}</div>
       <div class="vp-qc-meta">
         <code>${VP.esc(r['Tracking ID'] || '—')}</code><br>
         ${VP.esc(VP.fmtDateTime(r['Timestamp']))}
@@ -493,7 +499,7 @@ function renderDetailOrderBlock(id, channel, idx) {
     idHref = `https://seller-mx.tiktok.com/order/detail?order_no=${encodeURIComponent(id)}&shop_region=MX`;
   } else if (channel === 'Shopify') {
     idLabel = (o && o['Shopify Order Number']) ? o['Shopify Order Number'] : id;
-    idHref = o ? `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${o['ShopifyOrderId'] || o['Shopify Order ID'] || id}` : '';
+    idHref = o ? `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${o['Shopify Order ID'] || id}` : '';
   } else {
     idLabel = id;
     idHref = '';
@@ -504,14 +510,53 @@ function renderDetailOrderBlock(id, channel, idx) {
     : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
 
   const detailId = `cal-order-detail-${idx}`;
+  const labelHtml = channel === 'Shopify'
+    ? `<span class="cal-detail-order-id">Shopify #${VP.esc(idLabel)}</span>${idHref ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-link" onclick="event.stopPropagation()">Ver en Shopify →</a>` : ''}`
+    : idHref
+      ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">${VP.esc(idLabel)}</a>`
+      : `<span class="cal-detail-order-id">${VP.esc(idLabel)}</span>`;
   return `<div class="cal-detail-order">
     <div class="cal-detail-order-head" onclick="document.getElementById('${detailId}').classList.toggle('open')">
       <span class="cal-detail-order-chevron">▸</span>
-      ${idHref ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">${VP.esc(idLabel)}</a>` : `<span class="cal-detail-order-id">${VP.esc(idLabel)}</span>`}
+      ${labelHtml}
       <span class="cal-detail-order-summary">${itemCount} art. · ${price}</span>
     </div>
     <div class="cal-detail-order-items" id="${detailId}">${itemRows}</div>
   </div>`;
+}
+
+// 24h time, local to this timeline only -- VP.fmtDateTime is shared across
+// the whole app (Pedidos cards, etc.) and stays 12h there; nothing else
+// asked for that to change.
+function fmtTimeline24h(v) {
+  const d = VP.asDate(v);
+  if (!d) return '—';
+  return d.toLocaleString('es-MX', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
+const AUDIT_ACTION_LABELS = {
+  qc_photo_added: 'Foto agregada',
+  qc_photo_removed: 'Foto eliminada',
+  save_qc: 'Guardado',
+  finalize_shipment: 'Envío finalizado',
+  update_order_status: 'Estado actualizado',
+  import_tiktok_order: 'Importado (TikTok)',
+  import_shopify_order: 'Importado (Shopify)',
+};
+const AUDIT_GROUP_LABELS = { Content: 'contenido', Box: 'caja' };
+
+function describeAuditEntry(en) {
+  const label = AUDIT_ACTION_LABELS[en.action] || en.action;
+  if ((en.action === 'qc_photo_added' || en.action === 'qc_photo_removed') && en.details && en.details.group) {
+    return `${label} · ${AUDIT_GROUP_LABELS[en.details.group] || en.details.group}`;
+  }
+  if (en.field) {
+    return `${label} · ${en.field}: ${en.before || '—'} → ${en.after || '—'}`;
+  }
+  return label;
 }
 
 async function loadAndRenderAuditTrail(qcId, orderIds) {
@@ -521,16 +566,11 @@ async function loadAndRenderAuditTrail(qcId, orderIds) {
     const data = await VP.get(`action=audit_trail&qc_id=${encodeURIComponent(qcId || '')}&order_ids=${encodeURIComponent(orderIds.join(','))}`);
     const entries = data.entries || [];
     if (!entries.length) { el.innerHTML = '<div class="vp-empty-sm">Sin historial</div>'; return; }
-    el.innerHTML = entries.map(en => {
-      const what = en.field
-        ? `${VP.esc(en.action)} · ${VP.esc(en.field)}: ${VP.esc(en.before || '—')} → ${VP.esc(en.after || '—')}`
-        : VP.esc(en.action);
-      return `<div class="cal-detail-timeline-row">
-        <span class="cal-detail-timeline-time">${VP.esc(VP.fmtDateTime(en.timestamp))}</span>
+    el.innerHTML = entries.map(en => `<div class="cal-detail-timeline-row">
+        <span class="cal-detail-timeline-time">${VP.esc(fmtTimeline24h(en.timestamp))}</span>
         <span class="cal-detail-timeline-person">${VP.esc(en.person || '—')}</span>
-        <span class="cal-detail-timeline-what">${what}</span>
-      </div>`;
-    }).join('');
+        <span class="cal-detail-timeline-what">${VP.esc(describeAuditEntry(en))}</span>
+      </div>`).join('');
   } catch (e) {
     el.innerHTML = '<div class="vp-empty-sm">No se pudo cargar el historial</div>';
   }
@@ -571,7 +611,7 @@ function showOrderDetailModal(r) {
 
   modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
     <div class="modal cal-detail-modal">
-      <div class="modal-title">${VP.esc(r['Primary Username'] || 'Sin usuario')}</div>
+      <div class="modal-title">${VP.esc(r['Primary Username'] || 'Sin usuario')}${ids.tiktok.length ? ` <span class="vp-qc-ttid">${ids.tiktok.map(VP.esc).join(' + ')}</span>` : ''}</div>
       <div class="cal-detail-scroll">
         <div class="cal-detail-meta">
           <div><span class="cal-detail-label">Guía</span><code>${VP.esc(r['Tracking ID'] || '—')}</code></div>
