@@ -151,9 +151,15 @@ function wire() {
   });
 
   // Text + date filters
-  ['cal-search', 'cal-from', 'cal-to'].forEach(id => {
+  ['cal-search-order', 'cal-search-product', 'cal-from', 'cal-to'].forEach(id => {
     const el = document.getElementById(id);
-    el.addEventListener(id === 'cal-search' ? 'input' : 'change', () => { currentPage = 1; render(); });
+    const isText = id === 'cal-search-order' || id === 'cal-search-product';
+    el.addEventListener(isText ? 'input' : 'change', () => { currentPage = 1; render(); });
+  });
+  // Channel checkboxes for Pedido and Producto -- re-run the filter the
+  // moment either is toggled, same as typing in the text box.
+  ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => { currentPage = 1; render(); });
   });
 
   // Native date inputs only reliably open their picker when you hit the
@@ -167,16 +173,22 @@ function wire() {
   wireCustomerCombo();
 
   document.getElementById('cal-clear').addEventListener('click', () => {
-    document.getElementById('cal-search').value = '';
+    document.getElementById('cal-search-order').value = '';
+    document.getElementById('cal-search-product').value = '';
     document.getElementById('cal-from').value = '';
     document.getElementById('cal-to').value = '';
     document.getElementById('cal-customer').value = '';
+    // Checkboxes reset to their default "both channels" state, not
+    // unchecked -- an empty search box with both boxes off would look
+    // identical to "cleared" but actually match nothing if later typed into.
+    ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
+      document.getElementById(id).checked = true;
+    });
     customerFilter = '';
     currentPage = 1;
     render();
     closeSidebar();
   });
-}
 
 function applyViewMode(mode) {
   viewMode = mode === 'list' ? 'list' : 'tiles';
@@ -256,25 +268,35 @@ function productSummary(r) {
   return names;
 }
 
-/* One searchable blob per row: username, tracking, every order id, and every
-   product name. Built once per render pass rather than per keystroke. */
-function searchBlob(r) {
+// Channel-scoped product names, for the Producto filter's TikTok/Shopify
+// checkboxes -- same idea as productSummary() but only the channels asked for.
+function productNamesForChannels(r, wantTikTok, wantShopify) {
   const ids = orderIdsOf(r);
-  return [
-    r['Primary Username'] || '',
-    r['Tracking ID'] || '',
-    ...ids.tiktok, ...ids.shopify, ...ids.manual,
-    ...productSummary(r),
-  ].join(' ').toLowerCase();
+  const idsToCheck = [...(wantTikTok ? ids.tiktok : []), ...(wantShopify ? ids.shopify : [])];
+  const names = [];
+  idsToCheck.forEach(id => {
+    const o = ORDERS_BY_ID[id];
+    if (o && o['Products']) {
+      VP.parseProducts(o['Products']).forEach(p => names.push(p.name));
+    }
+  });
+  return names;
 }
 
 /* ── Filtering ──────────────────────────────────────────────────────── */
 
 function filteredRows() {
-  const q    = document.getElementById('cal-search').value.trim().toLowerCase();
   const from = document.getElementById('cal-from').value;
   const to   = document.getElementById('cal-to').value;
   const custTyped = document.getElementById('cal-customer').value.trim().toLowerCase();
+
+  const orderQ      = document.getElementById('cal-search-order').value.trim().toLowerCase();
+  const orderTiktok = document.getElementById('cal-order-tiktok').checked;
+  const orderShopify = document.getElementById('cal-order-shopify').checked;
+
+  const productQ      = document.getElementById('cal-search-product').value.trim().toLowerCase();
+  const productTiktok = document.getElementById('cal-product-tiktok').checked;
+  const productShopify = document.getElementById('cal-product-shopify').checked;
 
   let rows = QC;
 
@@ -302,13 +324,39 @@ function filteredRows() {
     });
   }
 
-  if (q) rows = rows.filter(r => searchBlob(r).includes(q));
+  // Pedido: matches the tracking ID (guía) always, plus the TikTok and/or
+  // Shopify order ids per the checkboxes -- an unchecked channel's own
+  // order ids never match, even if the text happens to overlap.
+  if (orderQ) {
+    rows = rows.filter(r => {
+      const ids = orderIdsOf(r);
+      const tracking = String(r['Tracking ID'] || '').toLowerCase();
+      if (tracking.includes(orderQ)) return true;
+      const candidateIds = [
+        ...(orderTiktok ? ids.tiktok : []),
+        ...(orderShopify ? ids.shopify : []),
+      ];
+      return candidateIds.some(id => String(id).toLowerCase().includes(orderQ));
+    });
+  }
+
+  // Producto: only matches product names from the checked channel(s) --
+  // this is the exact fix for the "ana" false-positive (a product name
+  // containing "ana" no longer surfaces every customer whose own name
+  // happens to match, since product and customer are now separate fields).
+  if (productQ) {
+    rows = rows.filter(r => {
+      const names = productNamesForChannels(r, productTiktok, productShopify);
+      return names.some(name => name.toLowerCase().includes(productQ));
+    });
+  }
 
   return rows;
 }
 
 function anyFilterActive() {
-  return !!(document.getElementById('cal-search').value.trim() ||
+  return !!(document.getElementById('cal-search-order').value.trim() ||
+            document.getElementById('cal-search-product').value.trim() ||
             document.getElementById('cal-from').value ||
             document.getElementById('cal-to').value ||
             document.getElementById('cal-customer').value.trim());
