@@ -436,9 +436,9 @@ function cardHtml(r) {
   const infoHtml = `
     <div>Empacado: ${VP.esc(fmtTimeline24h(r['Timestamp']))}</div>
     <div>${VP.esc(r['Tracking ID'] || '—')}</div>
-    <div><span class="vp-qc-count-badge tiktok">TikTok: ${ids.tiktok.length}</span></div>
-    <div><span class="vp-qc-count-badge shopify">Shopify: ${ids.shopify.length}</span></div>
-    <div><span class="vp-qc-count-badge manual">Manual: ${ids.manual.length}</span></div>
+    <div><span class="vp-qc-count-badge tiktok"><span class="vp-qc-count-label">TikTok:</span> ${ids.tiktok.length}</span></div>
+    <div><span class="vp-qc-count-badge shopify"><span class="vp-qc-count-label">Shopify:</span> ${ids.shopify.length}</span></div>
+    <div><span class="vp-qc-count-badge manual"><span class="vp-qc-count-label">Manual:</span> ${ids.manual.length}</span></div>
     <div>${notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : 'Sin notas'}</div>
   `;
 
