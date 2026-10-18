@@ -2010,3 +2010,9 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 }
 .cal-field-clear.visible { display: flex; }
 .cal-field-clear:hover { background: var(--border); color: var(--text); }
+
+.aj-backfill-stat-divider {
+  height: 1px;
+  background: var(--border, #e5e5e5);
+  margin: 8px 0;
+}
