@@ -874,6 +874,15 @@ async function submitQC() {
     }
     if (res.error) throw new Error(res.error);
 
+    // Apps Script's own execution log viewer is no longer available, so
+    // the server sends its own step-by-step timing back on the response
+    // (see _timings in apps-script.gs) -- printed here as one readable
+    // table in the console instead of a second browser tab.
+    if (res._timings) {
+      console.log('[submitQC timings]');
+      console.table(res._timings);
+    }
+
     showToast('✓ Empacado y enviado');
     backToPending();
 
