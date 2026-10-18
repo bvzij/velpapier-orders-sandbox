@@ -18,6 +18,7 @@ let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
 let savingInProgress = false; // true for the whole duration of a submitQC() call -- nothing else may re-enable the button while this is set
+let photoSyncsInFlight = 0; // pending pushAddPhoto/pushRemovePhoto calls -- the poll must not merge server state while one of these hasn't landed yet, or it overwrites a photo that uploaded fine but isn't in the sheet yet
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
 const gallery = { content: [], box: [] };
@@ -188,7 +189,7 @@ async function pollCaptureUpdates() {
     // row can still reflect the pre-save state for several seconds after
     // submitQC() was called, and overwriting the local gallery with that
     // stale snapshot is exactly what made photos flash away mid-save.
-    if (!isEditingShipped && !savingInProgress) {
+    if (!isEditingShipped && !savingInProgress && photoSyncsInFlight === 0) {
       ['content', 'box'].forEach(group => {
         const cols = group === 'content'
           ? ['Content1','Content2','Content3','Content4','Content5']
@@ -767,13 +768,18 @@ function bindAddButton(group, btnId) {
 
       // Sync to the sheet in the background — the thumbnail and the submit
       // button are already usable at this point, they don't need to wait
-      // for this slower, secondary round-trip to Apps Script.
+      // for this slower, secondary round-trip to Apps Script. But the 4s
+      // poll must know this is in flight too (photoSyncsInFlight) -- it
+      // reads the server's row, which doesn't have this photo yet until
+      // this call lands, and would otherwise wipe the thumbnail right back
+      // out thinking the server is the source of truth.
+      photoSyncsInFlight++;
       pushAddPhoto(group, uploaded.url).then(res => {
         if (res && res.blocked) {
           document.getElementById('edit-shipped-checkbox').checked = true;
           toggleEditShipped();
         }
-      });
+      }).finally(() => { photoSyncsInFlight--; });
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
       gallery[group].splice(placeholderIdx, 1);
