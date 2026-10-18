@@ -12,7 +12,7 @@ const isShipped = r => SHIPPED.includes(r['Status']);
 const price     = r => Number(r['Price']) || 0;
 const created   = r => VP.asDate(r['Created Date']);
 
-const DATA = { orders: [], customers: [], qc: [], sessions: [], byId: {}, fullOrdersLoaded: false };
+const DATA = { orders: [], customers: [], qc: [], byId: {}, fullOrdersLoaded: false };
 let periodDays = 30;
 
 // Every order field anything on this page reads. Caching just these keeps
@@ -105,7 +105,33 @@ function ensureFullOrders() {
     if (!r30.data) setUpdating(true);
     const rCustomers = VP.getCached('action=customers', fresh => { DATA.customers = fresh.records || []; rebuildById(); render(); });
     const rQc         = VP.getCached('action=qc',        fresh => { DATA.qc = fresh.records || []; render(); });
-    const rSessions   = VP.getCached('action=sessions',  fresh => { DATA.sessions = fresh.records || []; render(); });
+
+    let gotCache = false;
+    if (r30.data)        { DATA.orders = r30.data.records || []; gotCache = true; }
+    if (rCustomers.data) { DATA.customers = rCustomers.data.records || []; gotCache = true; }
+    if (rQc.data)        { DATA.qc = rQc.data.records || []; gotCache = true; }
+
+    if (gotCache) {
+      rebuildById();
+      render();
+    } else {
+      // No cache at all yet (first visit this session) -- await the SAME
+      // in-flight fetches getCached already kicked off above (each writes
+      // its own sessionStorage entry in its own .then()). We must not
+      // issue separate VP.get() calls here -- that would race the cached
+      // ones and never write the cache, silently defeating it on every
+      // cold load.
+      const [o, c, q] = await Promise.all([
+        r30.pending,
+        rCustomers.pending,
+        rQc.pending.catch(() => ({ records: [] })),
+      ]);
+      DATA.orders    = o.records || [];
+      DATA.customers = c.records || [];
+      DATA.qc        = q.records || [];
+      rebuildById();
+      render();
+    }
 
     let gotCache = false;
     if (r30.data)        { DATA.orders = r30.data.records || []; gotCache = true; }
@@ -764,63 +790,49 @@ function blockFulfillment(now) {
   </section>`;
 }
 
-/* ── 8 · Packing sessions & packers ─────────────────────────────────── */
+/* ── 8 · Empaque (packer leaderboard) ─────────────────────────────────
+   Sessions were fully removed (see ways-of-working / to-do list) -- this
+   used to be split "Sesiones recientes" (session duration/pace, now gone
+   for good) + "Paquetes por empacador". Only the packer leaderboard
+   survives, rebuilt straight from QC + Orders: QC rows have no date of
+   their own, so each one's date comes from its linked Order's Shipped
+   Date (same source used throughout the QC/Calidad fixes) -- that's also
+   what makes the date-range filter here actually work, unlike before. */
 
 function blockPacking(sc) {
-  const sessions = DATA.sessions
-    .filter(s => s['Status'] === 'Finalizada')
-    .filter(s => {
-      if (!sc.days) return true;
-      const d = VP.asDate(s['Start Time']);
-      return d && d > sc.from && d <= sc.to;
-    })
-    .sort((a, b) => String(b['Start Time']).localeCompare(String(a['Start Time'])));
-
-  const rows = sessions.map(s => {
-    const start = VP.asDate(s['Start Time']);
-    const end   = VP.asDate(s['End Time']);
-    const mins  = start && end ? (end - start) / 60000 : null;
-    const pkgs  = Number(s['Total Packages']) || 0;
-    const items = Number(s['Total Items']) || 0;
-    return {
-      id: s['Session ID'], start, mins, pkgs, items,
-      people: s['Participants'] || '—',
-      perHour: mins && mins > 0 ? (pkgs / (mins / 60)) : null,
-    };
+  const ordersById = {};
+  DATA.orders.forEach(o => {
+    String(o['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
+      ordersById[id] = o;
+    });
   });
 
-  const totalPkgs  = rows.reduce((s, r) => s + r.pkgs, 0);
-  const totalItems = rows.reduce((s, r) => s + r.items, 0);
-  const totalMins  = rows.reduce((s, r) => s + (r.mins || 0), 0);
-  const avgPerHour = totalMins > 0 ? totalPkgs / (totalMins / 60) : null;
-
-  // Packer leaderboard from QC rows (independent of who closed the session)
   const packerCount = {};
+  let totalPkgs = 0, totalItems = 0;
   DATA.qc.forEach(q => {
     if (q['Status'] !== 'Enviado') return;
-    const t = VP.asDate(q['Timestamp']);
-    if (sc.days && (!t || t <= sc.from || t > sc.to)) return;
+
+    const ids = [
+      ...String(q['TikTok Order IDs']  || '').split(' + '),
+      ...String(q['Shopify Order IDs'] || '').split(' + '),
+      ...String(q['Manual Order IDs']  || '').split(' + '),
+    ].map(s => s.trim()).filter(Boolean);
+    const linked = ids.map(id => ordersById[id]).find(Boolean);
+    const shipped = linked ? VP.asDate(linked['Shipped Date']) : null;
+    if (sc.days && (!shipped || shipped <= sc.from || shipped > sc.to)) return;
+
     const p = String(q['Packer'] || '').trim();
-    if (!p) return;
-    packerCount[p] = (packerCount[p] || 0) + 1;
+    if (p) packerCount[p] = (packerCount[p] || 0) + 1;
+    totalPkgs += 1;
+    totalItems += ids.length || 1;
   });
   const packers = Object.entries(packerCount).sort((a, b) => b[1] - a[1])
     .map(([label, value]) => ({ label, value }));
 
-  const sessionRows = rows.slice(0, 15).map(r => `<tr>
-    <td class="vp-table-name">${VP.esc(r.id)}</td>
-    <td>${VP.esc(r.start ? VP.fmtDate(r.start) : '—')}</td>
-    <td>${VP.esc(r.people)}</td>
-    <td class="num">${VP.num(r.pkgs)}</td>
-    <td class="num">${VP.num(r.items)}</td>
-    <td class="num">${r.mins !== null ? VP.fmtDuration(r.mins * 60) : '—'}</td>
-    <td class="num">${r.perHour !== null ? r.perHour.toFixed(1) : '—'}</td>
-  </tr>`).join('');
-
   return `<section class="vp-section">
     <div class="vp-section-head">
       <h2 class="vp-section-title">Empaque</h2>
-      <span class="vp-section-note">${VP.num(sessions.length)} sesión${sessions.length !== 1 ? 'es' : ''} finalizada${sessions.length !== 1 ? 's' : ''}</span>
+      <span class="vp-section-note">${VP.num(totalPkgs)} paquete${totalPkgs !== 1 ? 's' : ''} empacado${totalPkgs !== 1 ? 's' : ''}</span>
     </div>
 
     <div class="vp-grid-3" style="margin-bottom:14px">
@@ -829,37 +841,14 @@ function blockPacking(sc) {
         <div class="vp-stat-value">${VP.num(totalPkgs)}</div>
         <div class="vp-stat-foot"><span class="vp-stat-sub">${VP.num(totalItems)} artículos en total</span></div>
       </div>
-      <div class="vp-stat">
-        <div class="vp-stat-label">Ritmo promedio</div>
-        <div class="vp-stat-value">${avgPerHour !== null ? avgPerHour.toFixed(1) : '—'}</div>
-        <div class="vp-stat-foot"><span class="vp-stat-sub">paquetes por hora</span></div>
-      </div>
-      <div class="vp-stat">
-        <div class="vp-stat-label">Tiempo empacando</div>
-        <div class="vp-stat-value">${totalMins ? VP.fmtDuration(totalMins * 60) : '—'}</div>
-        <div class="vp-stat-foot"><span class="vp-stat-sub">suma de todas las sesiones</span></div>
-      </div>
     </div>
 
-    <div class="vp-grid-2">
-      <div class="vp-panel">
-        <div class="vp-panel-head">
-          <span class="vp-panel-title">Sesiones recientes</span>
-          <span class="vp-panel-note">últimas 15</span>
-        </div>
-        ${rows.length ? `<div style="overflow-x:auto"><table class="vp-table"><thead><tr>
-          <th>Sesión</th><th>Fecha</th><th>Participantes</th>
-          <th class="num">Paq.</th><th class="num">Art.</th><th class="num">Duración</th><th class="num">Paq/h</th>
-        </tr></thead><tbody>${sessionRows}</tbody></table></div>`
-        : '<div class="vp-empty-sm">Sin sesiones finalizadas en el periodo</div>'}
+    <div class="vp-panel">
+      <div class="vp-panel-head">
+        <span class="vp-panel-title">Paquetes por empacador</span>
+        <span class="vp-panel-note">quien registró cada envío</span>
       </div>
-      <div class="vp-panel">
-        <div class="vp-panel-head">
-          <span class="vp-panel-title">Paquetes por empacador</span>
-          <span class="vp-panel-note">quien registró cada envío</span>
-        </div>
-        ${VP.chart.rank(packers, { accent: '#854f0b', fmt: v => VP.num(v) + ' paquetes' })}
-      </div>
+      ${packers.length ? VP.chart.rank(packers, { accent: '#854f0b', fmt: v => VP.num(v) + ' paquetes' }) : '<div class="vp-empty-sm">Sin envíos en el periodo</div>'}
     </div>
   </section>`;
 }
