@@ -410,10 +410,11 @@ function openBackfillModal() {
       <div class="aj-backfill-title">Importación histórica de TikTok</div>
       <div id="aj-backfill-content">
         <p class="aj-backfill-intro">
-          Sube el CSV completo de pedidos de TikTok (todos los estados). Solo
-          actualiza <strong>TikTok Import History</strong> — nunca crea ni
-          modifica pedidos en "Orders", y nunca toca la lista de control de
-          calidad.
+          Sube el CSV completo de pedidos de TikTok (todos los estados).
+          Actualiza <strong>TikTok Import History</strong> y, si un pedido ya
+          tiene guía pero no existe en <strong>Orders</strong>, lo crea ahí
+          también. Los pedidos cancelados, sin pagar o sin guía nunca se
+          crean en "Orders". Nunca toca la lista de control de calidad.
         </p>
         <label class="aj-backfill-dropzone" id="aj-backfill-dropzone">
           <div class="aj-backfill-dropzone-icon">📄</div>
@@ -530,11 +531,30 @@ function renderBackfillPreview(records, result) {
         <span class="aj-backfill-stat-label">Omitidas</span>
         <span class="aj-backfill-stat-value">${VP.num(result.skipped)}</span>
       </div>
+      <div class="aj-backfill-stat-divider"></div>
+      <div class="aj-backfill-stat-row is-highlight">
+        <span class="aj-backfill-stat-label">Pedidos nuevos en "Orders"</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.orders_created)}</span>
+      </div>
+      <div class="aj-backfill-stat-row">
+        <span class="aj-backfill-stat-label">Pedidos que ya existían</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.orders_skipped_existing)}</span>
+      </div>
+      <div class="aj-backfill-stat-row">
+        <span class="aj-backfill-stat-label">Clientes nuevos (solo usuario)</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.customers_created)}</span>
+      </div>
     </div>
     <p class="aj-backfill-note">
       Solo se sobrescriben "Order Status" y "Order Substatus". Las fechas de
       envío, entrega y cancelación solo se rellenan si estaban vacías — nunca
       se sobrescribe un valor ya existente.
+    </p>
+    <p class="aj-backfill-note">
+      Se crea un pedido en "Orders" solo si tiene guía y el paquete ya está
+      listo para recolección o en camino. Los clientes nuevos se crean sin
+      dirección (solo el usuario de TikTok) y se enriquecen en su siguiente
+      pedido normal.
     </p>
   `;
   const modalActions = document.querySelector('#aj-backfill-overlay .modal-actions');
@@ -570,6 +590,23 @@ async function runBackfillCommit(records) {
         <div class="aj-backfill-stat-row">
           <span class="aj-backfill-stat-label">Omitidas</span>
           <span class="aj-backfill-stat-value">${VP.num(result.skipped)}</span>
+        </div>
+        <div class="aj-backfill-stat-divider"></div>
+        <div class="aj-backfill-stat-row is-highlight">
+          <span class="aj-backfill-stat-label">Pedidos creados en "Orders"</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.orders_created)}</span>
+        </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Pedidos que ya existían</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.orders_skipped_existing)}</span>
+        </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Clientes nuevos creados</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.customers_created)}</span>
+        </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Estados actualizados</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.status_updated)}</span>
         </div>
       </div>
     `;
