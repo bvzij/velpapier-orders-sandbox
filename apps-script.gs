@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.7';
+const SCRIPT_VERSION = '2026-10-17.8';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -5657,4 +5657,47 @@ function diagnoseOrphanedHistory() {
 
   Logger.log('--- First 20 orphaned order IDs (for spot-checking) ---');
   orphanRows.slice(0, 20).forEach(o => Logger.log(o.order_id + ' | ' + o.status + ' / ' + o.substatus));
+}
+
+function recomputeAllShipmentCounts() {
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+
+  // Single shared definition: TikTok/Shopify orders in Enviado or Archivado.
+  const counts = buildShippedCountMap(ordersSheet, oh);
+
+  const cs = getCustomersSheet();
+  const ch = cs.getRange(1, 1, 1, cs.getLastColumn()).getValues()[0];
+  const idCol = ch.indexOf('Customer ID');
+  const countCol = ch.indexOf('Shipment Count');
+  if (idCol < 0 || countCol < 0) {
+    Logger.log('ERROR: Customer ID or Shipment Count column not found.');
+    return;
+  }
+
+  const idVals = readColumn(cs, idCol);
+  const oldVals = readColumn(cs, countCol);
+
+  let changedCount = 0, zeroedCount = 0;
+  const newVals = idVals.map((v, i) => {
+    const k = String(v || '');
+    const fresh = k ? (counts[k] || 0) : 0;
+    const prev = Number(oldVals[i]) || 0;
+    if (fresh !== prev) {
+      changedCount++;
+      if (fresh === 0 && prev > 0) zeroedCount++;
+    }
+    return [fresh];
+  });
+
+  // One batched write for the whole column, not a cell at a time.
+  if (newVals.length) {
+    cs.getRange(2, countCol + 1, newVals.length, 1).setValues(newVals);
+  }
+
+  Logger.log('Customers scanned: ' + newVals.length);
+  Logger.log('Counts changed: ' + changedCount);
+  Logger.log('Dropped to zero (had shipments before, none now): ' + zeroedCount);
+  Logger.log('Customers with at least 1 shipment: ' +
+    newVals.filter(r => r[0] > 0).length);
 }
