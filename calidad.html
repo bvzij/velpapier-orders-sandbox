@@ -53,8 +53,11 @@
 
       <label class="cal-field">
         <span class="cal-field-label">Pedido</span>
-        <input class="vp-input" id="cal-search-order" type="text"
-               placeholder="Guía o número de pedido…" autocomplete="off">
+        <div class="cal-field-input-wrap">
+          <input class="vp-input" id="cal-search-order" type="text"
+                 placeholder="Guía o número de pedido…" autocomplete="off">
+          <button type="button" class="cal-field-clear" id="cal-search-order-clear" aria-label="Limpiar">&times;</button>
+        </div>
         <span class="cal-field-checks">
           <label><input type="checkbox" id="cal-order-tiktok" checked> TikTok</label>
           <label><input type="checkbox" id="cal-order-shopify" checked> Shopify</label>
@@ -63,8 +66,11 @@
 
       <label class="cal-field">
         <span class="cal-field-label">Producto</span>
-        <input class="vp-input" id="cal-search-product" type="text"
-               placeholder="Nombre del producto…" autocomplete="off">
+        <div class="cal-field-input-wrap">
+          <input class="vp-input" id="cal-search-product" type="text"
+                 placeholder="Nombre del producto…" autocomplete="off">
+          <button type="button" class="cal-field-clear" id="cal-search-product-clear" aria-label="Limpiar">&times;</button>
+        </div>
         <span class="cal-field-checks">
           <label><input type="checkbox" id="cal-product-tiktok" checked> TikTok</label>
           <label><input type="checkbox" id="cal-product-shopify" checked> Shopify</label>
