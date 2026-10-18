@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.4';
+const SCRIPT_VERSION = '2026-10-17.5';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -672,10 +672,22 @@ function doPost(e) {
     return withWriteLock(function () {
       const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
-      Logger.log('[doPost] dispatchPostAction total: ' + (Date.now() - _tDispatch) + 'ms');
+      const dispatchMs = Date.now() - _tDispatch;
       const _tFlush = Date.now();
       flushAudit(); // after the real write already succeeded -- never blocks it
-      Logger.log('[doPost] flushAudit: ' + (Date.now() - _tFlush) + 'ms');
+      const flushMs = Date.now() - _tFlush;
+      // Merged onto the response itself -- Apps Script's own log viewer is
+      // no longer available, so timing has to travel back to the browser
+      // to be inspected at all.
+      if (result && typeof result.getContent === 'function') {
+        try {
+          const parsed = JSON.parse(result.getContent());
+          parsed._timings = parsed._timings || {};
+          parsed._timings.dispatch_total_ms = dispatchMs;
+          parsed._timings.flush_audit_ms = flushMs;
+          return jsonResponse(parsed);
+        } catch (e) { /* not JSON for some reason, fall through unmodified */ }
+      }
       return result;
     });
 
@@ -1992,6 +2004,7 @@ function saveQC(body) {
   // way back in, which is how long numeric IDs were being corrupted.
   if (body.finalize) {
     const _t0 = Date.now();
+    const _timings = {};
     const allOrderIds = (body.order_ids || []).map(o => o.id);
 
     const orders = getOrdersSheet();
@@ -2003,7 +2016,7 @@ function saveQC(body) {
     const iStat    = oh.indexOf('Status');
     const iShipped = oh.indexOf('Shipped Date');
     const iCust    = oh.indexOf('Customer ID');
-    Logger.log('[finalize] headers read: ' + (Date.now() - _t0) + 'ms');
+    _timings.headers_read_ms = Date.now() - _t0;
 
     // Order ID located by header (it used to be assumed to be column A).
     const _t1 = Date.now();
@@ -2012,7 +2025,8 @@ function saveQC(body) {
     const custVals = readColumn(orders, iCust);
     const idToRowIdx = {};
     idVals.forEach((v, i) => { idToRowIdx[String(v)] = i; });
-    Logger.log('[finalize] 3 column reads (' + idVals.length + ' rows) + index build: ' + (Date.now() - _t1) + 'ms');
+    _timings.column_reads_ms = Date.now() - _t1;
+    _timings.orders_row_count = idVals.length;
 
     const shipResults = [];
     const shippedRows = [];        // every order being shipped
@@ -2036,7 +2050,7 @@ function saveQC(body) {
     setCellsToValue(orders, iLink,    linkRows, body.tracking_id, true);
     setCellsToValue(orders, iStat,    shippedRows, 'Enviado', false);
     setCellsToValue(orders, iShipped, shippedRows, now, false);
-    Logger.log('[finalize] 4 setCellsToValue writes: ' + (Date.now() - _t2) + 'ms');
+    _timings.set_cells_ms = Date.now() - _t2;
 
     // Shipping is what moves a customer's Shipment Count. Previously this
     // called recalculateShipmentCountsFor(), which re-reads and re-scans
@@ -2050,17 +2064,18 @@ function saveQC(body) {
     const incrementByCustomer = {};
     customersToRecount.forEach(id => { incrementByCustomer[id] = (incrementByCustomer[id] || 0) + 1; });
     incrementShipmentCounts(incrementByCustomer);
-    Logger.log('[finalize] incrementShipmentCounts: ' + (Date.now() - _t3) + 'ms');
+    _timings.increment_counts_ms = Date.now() - _t3;
 
     const _t4 = Date.now();
     logAuditEvent('finalize_shipment', 'QC', qcId, {
       tracking_id: body.tracking_id, order_ids: allOrderIds, shipped: shipResults,
     });
-    Logger.log('[finalize] logAuditEvent (buffer only, not flushed yet): ' + (Date.now() - _t4) + 'ms');
+    _timings.log_audit_buffer_ms = Date.now() - _t4;
 
     result.result = 'created';
     result.orders = shipResults;
-    Logger.log('[finalize] TOTAL inside finalize block: ' + (Date.now() - _t0) + 'ms');
+    _timings.total_finalize_ms = Date.now() - _t0;
+    result._timings = _timings;
   }
 
   return jsonResponse(result);
