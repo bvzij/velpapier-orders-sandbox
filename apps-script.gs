@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.1';
+const SCRIPT_VERSION = '2026-10-17.2';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -264,6 +264,7 @@ function doGet(e) {
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_redo_status') return undoRedoStatusAction(e);
+    if (action === 'audit_trail') return getAuditTrailAction(e);
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -621,6 +622,43 @@ function undoRedoStatusAction(e) {
   }
 
   return jsonResponse({ can_undo: canUndo, can_redo: canRedo });
+}
+
+// Timeline for the Calidad detail modal: every logged action touching this
+// QC row OR any of its linked Order IDs (import, status changes, QC saves,
+// finalize) across every available Log <year> tab -- a shipment can span
+// a year boundary (packed in January, imported in December). Returned
+// oldest-first so the modal can render it as a simple top-to-bottom story.
+function getAuditTrailAction(e) {
+  const identity = getIdentity(e.parameter.token);
+  if (!identity) return jsonResponse({ error: 'unauthorized' });
+
+  const qcId = String(e.parameter.qc_id || '').trim();
+  const orderIds = String(e.parameter.order_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!qcId && !orderIds.length) return jsonResponse({ entries: [] });
+
+  const wantIds = new Set([qcId, ...orderIds].filter(Boolean));
+  const ss = SpreadsheetApp.openById(AUDIT_LOG_SHEET_ID);
+  const entries = [];
+
+  ss.getSheets().filter(sh => /^Log \d{4}$/.test(sh.getName())).forEach(sheet => {
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) return;
+    const C = getAuditSheetCols(sheet);
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      if (!wantIds.has(String(row[C.recordId]))) continue;
+      entries.push({
+        timestamp: row[C.ts], person: row[C.person], action: row[C.action],
+        record_type: row[C.recordType], field: row[C.field],
+        before: row[C.before], after: row[C.after],
+        details: row[C.details] ? (function () { try { return JSON.parse(row[C.details]); } catch (e) { return null; } })() : null,
+      });
+    }
+  });
+
+  entries.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+  return jsonResponse({ entries: entries });
 }
 
 function doPost(e) {
@@ -1876,9 +1914,13 @@ function saveQC(body) {
     logAudit('save_qc', 'QC', qcId, 'Notes', get('Notes'), body.notes);
     set('Notes', body.notes);
   }
-  if (body.packer && body.packer !== get('Packer')) {
-    logAudit('save_qc', 'QC', qcId, 'Packer', get('Packer'), body.packer);
-    set('Packer', body.packer);
+  // Packer is now the real logged-in identity, not whatever the client
+  // sent (previously always the frontend's hardcoded default). The audit
+  // log already had this right per-action; the QC row itself did not.
+  const packerName = _currentIdentity ? _currentIdentity.name : (body.packer || '');
+  if (packerName && packerName !== get('Packer')) {
+    logAudit('save_qc', 'QC', qcId, 'Packer', get('Packer'), packerName);
+    set('Packer', packerName);
   }
   // Finalizing marks the QC row itself, so other devices polling QC rows can
   // drop this shipment from their pending list without refetching all orders.
