@@ -401,6 +401,17 @@ const AJ_BACKFILL_COLUMN_MAP = {
 
 const AJ_BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
 
+// Orders whose TikTok username only resembled an existing customer
+// (FIX_LOG 0.1): created without a customer so a person can link them
+// from Pedidos instead of the tool guessing.
+function renderFuzzyReview(list) {
+  if (!list || !list.length) return '';
+  const rows = list.slice(0, 15).map(f =>
+    `<div class="aj-row-hint">@${VP.esc(f.username)} se parece a @${VP.esc(f.suggested_username || f.suggested_customer_id)} — guía ${VP.esc(f.tracking_id)}</div>`
+  ).join('');
+  return `<p class="aj-backfill-note">Estos pedidos quedan sin cliente asignado. Vincúlalos desde Pedidos si son la misma persona:</p>${rows}`;
+}
+
 document.getElementById('aj-open-backfill').addEventListener('click', openBackfillModal);
 
 function openBackfillModal() {
@@ -544,7 +555,12 @@ function renderBackfillPreview(records, result) {
         <span class="aj-backfill-stat-label">Clientes nuevos (solo usuario)</span>
         <span class="aj-backfill-stat-value">${VP.num(result.customers_created)}</span>
       </div>
+      <div class="aj-backfill-stat-row${result.fuzzy_count ? ' is-highlight' : ''}">
+        <span class="aj-backfill-stat-label">Coincidencias dudosas (quedan sin cliente)</span>
+        <span class="aj-backfill-stat-value">${VP.num(result.fuzzy_count || 0)}</span>
+      </div>
     </div>
+    ${renderFuzzyReview(result.fuzzy_review)}
     <p class="aj-backfill-note">
       Solo se sobrescriben "Order Status" y "Order Substatus". Las fechas de
       envío, entrega y cancelación solo se rellenan si estaban vacías — nunca
@@ -608,7 +624,12 @@ async function runBackfillCommit(records) {
           <span class="aj-backfill-stat-label">Estados actualizados</span>
           <span class="aj-backfill-stat-value">${VP.num(result.status_updated)}</span>
         </div>
+        <div class="aj-backfill-stat-row">
+          <span class="aj-backfill-stat-label">Coincidencias dudosas (sin cliente)</span>
+          <span class="aj-backfill-stat-value">${VP.num(result.fuzzy_count || 0)}</span>
+        </div>
       </div>
+      ${renderFuzzyReview(result.fuzzy_review)}
     `;
   } catch (e) {
     content.innerHTML = `<div class="vp-empty-sm">Error al importar: ${VP.esc(e.message)}</div>`;
@@ -1011,3 +1032,172 @@ function renderManualSearchForm(products) {
     }
   });
 }
+
+/* ── Fix-pack 2026-10-19: Data Health, users, product-merge undo, sign out ─
+   All four reuse the existing modal / row / button styles on this page.  */
+
+function ajModal(id, title, bodyId, extraActions) {
+  const modalRoot = document.getElementById('modal-container');
+  modalRoot.innerHTML = `<div class="modal-overlay" id="${id}">
+    <div class="modal aj-merge-modal">
+      <div class="modal-title">${VP.esc(title)}</div>
+      <div class="aj-merge-scroll" id="${bodyId}"><div class="vp-loading">Cargando…</div></div>
+      <div class="modal-actions">${extraActions || ''}<button class="btn" id="${id}-close">Cerrar</button></div>
+    </div>
+  </div>`;
+  const close = () => { modalRoot.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  document.getElementById(id + '-close').addEventListener('click', close);
+  return document.getElementById(bodyId);
+}
+
+// ─── Data Health (FIX_LOG 7.1) ──────────────────────────────────────────
+const AJ_SEVERITY = {
+  ok:    { text: 'Bien',    bg: 'var(--green-bg)', fg: 'var(--green-text)' },
+  amber: { text: 'Revisar', bg: 'var(--amber-bg)', fg: 'var(--amber-text)' },
+  red:   { text: 'Urgente', bg: 'var(--red-bg)',   fg: 'var(--red-text)' },
+};
+
+function renderHealth(el, report) {
+  if (!report || !report.ran_at) {
+    el.innerHTML = '<div class="vp-empty-sm">Todavía no hay informe. Usa «Revisar ahora».</div>';
+    return;
+  }
+  const order = { red: 0, amber: 1, ok: 2 };
+  const checks = (report.checks || []).slice().sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+  el.innerHTML = `<div class="aj-row-hint" style="margin-bottom:10px">Última revisión: ${VP.esc(VP.fmtDateTime(report.ran_at))} (${VP.esc(VP.fmtRel(report.ran_at))})</div>` +
+    checks.map(c => {
+      const sev = AJ_SEVERITY[c.severity] || AJ_SEVERITY.amber;
+      const examples = (c.examples || []).length
+        ? `<details style="margin-top:6px"><summary class="aj-row-hint" style="cursor:pointer">Ver ejemplos</summary>${
+            c.examples.map(x => `<div class="aj-row-hint">${VP.esc(x)}</div>`).join('')}</details>`
+        : '';
+      return `<div class="aj-history-row" style="display:block">
+        <div class="aj-history-main" style="justify-content:space-between">
+          <span>${VP.esc(c.label)}</span>
+          <span class="status-pill" style="background:${sev.bg};color:${sev.fg}">${c.count ? VP.num(c.count) + ' · ' : ''}${sev.text}</span>
+        </div>${examples}
+      </div>`;
+    }).join('');
+}
+
+async function openHealthModal() {
+  const el = ajModal('aj-health', 'Salud de los datos', 'aj-health-body',
+    '<button class="refresh-btn" id="aj-health-run">Revisar ahora</button>');
+  const runBtn = document.getElementById('aj-health-run');
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true; runBtn.textContent = 'Revisando…';
+    el.innerHTML = '<div class="vp-loading">Revisando todas las hojas… puede tardar 20–40 s</div>';
+    try { renderHealth(el, await VP.post({ action: 'run_health_checks' })); }
+    catch (e) { el.innerHTML = `<div class="vp-empty-sm">No se pudo revisar: ${VP.esc(e.message)}</div>`; }
+    runBtn.disabled = false; runBtn.textContent = 'Revisar ahora';
+  });
+  try { renderHealth(el, await VP.get('action=health_report')); }
+  catch (e) { el.innerHTML = `<div class="vp-empty-sm">No se pudo cargar el informe: ${VP.esc(e.message)}</div>`; }
+}
+
+async function runReconcile(btn) {
+  btn.disabled = true; btn.textContent = 'Recalculando…';
+  try {
+    const r = await VP.post({ action: 'reconcile_customers' });
+    VP.toast(`Listo: ${VP.num(r.shipment_counts_changed)} conteos y ${VP.num(r.first_order_dates_changed)} fechas corregidas`);
+  } catch (e) {
+    VP.toast('No se pudo recalcular: ' + e.message, true);
+  }
+  btn.disabled = false; btn.textContent = 'Recalcular';
+}
+
+// ─── Users and passwords (FIX_LOG 7.2) ──────────────────────────────────
+async function openRolesModal() {
+  const el = ajModal('aj-roles', 'Usuarios y contraseñas', 'aj-roles-body');
+  let data;
+  try { data = await VP.get('action=get_roles'); }
+  catch (e) { el.innerHTML = `<div class="vp-empty-sm">No se pudo cargar: ${VP.esc(e.message)}</div>`; return; }
+  const users = data.users || [];
+  if (!users.length) { el.innerHTML = '<div class="vp-empty-sm">No hay usuarios configurados.</div>'; return; }
+  el.innerHTML = users.map(u => {
+    const isAdmin = u.role === 'admin';
+    const actions = isAdmin
+      ? '<span class="aj-row-hint">Se cambia en Apps Script</span>'
+      : `<div style="display:flex;gap:6px">
+           <button class="refresh-btn aj-pw-btn" data-name="${VP.esc(u.name)}">Cambiar contraseña</button>
+           <button class="refresh-btn aj-revoke-btn" data-name="${VP.esc(u.name)}">Cerrar sesiones</button>
+         </div>`;
+    return `<div class="aj-history-row">
+      <div class="aj-history-main" style="flex-direction:column;align-items:flex-start;gap:2px">
+        <span>${VP.esc(u.name)} · ${isAdmin ? 'Administrador' : 'Equipo'}</span>
+        <span class="aj-row-hint">${u.active_sessions ? VP.num(u.active_sessions) + ' sesión(es) abierta(s)' : 'Sin sesiones abiertas'}${u.hashed ? '' : ' · contraseña aún sin cifrar (se cifra al iniciar sesión)'}</span>
+      </div>
+      ${actions}
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('.aj-pw-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const name = btn.dataset.name;
+    const pw = prompt(`Nueva contraseña para ${name} (mínimo 4 caracteres):`);
+    if (!pw) return;
+    if (prompt('Escríbela otra vez para confirmar:') !== pw) { VP.toast('Las contraseñas no coinciden', true); return; }
+    try {
+      const r = await VP.post({ action: 'update_role_password', person_name: name, new_password: pw });
+      VP.toast(`Contraseña de ${name} cambiada. Se cerraron ${r.sessions_revoked || 0} sesión(es).`);
+      openRolesModal();
+    } catch (e) { VP.toast(e.message, true); }
+  }));
+  el.querySelectorAll('.aj-revoke-btn').forEach(btn => btn.addEventListener('click', async () => {
+    const name = btn.dataset.name;
+    if (!confirm(`¿Cerrar todas las sesiones de ${name}? Tendrá que volver a escribir su contraseña.`)) return;
+    try {
+      const r = await VP.post({ action: 'revoke_user_sessions', person_name: name });
+      VP.toast(`Se cerraron ${r.sessions_revoked || 0} sesión(es) de ${name}.`);
+      openRolesModal();
+    } catch (e) { VP.toast(e.message, true); }
+  }));
+}
+
+// ─── Product merge history + undo (FIX_LOG 6.3) ─────────────────────────
+// The backend has supported undo since the merger was built; this is the
+// first screen that can reach it.
+async function openProductMergeHistoryModal() {
+  const el = ajModal('aj-pmh', 'Historial de fusiones de productos', 'aj-pmh-body');
+  let records;
+  try { records = (await VP.get('action=product_merge_history')).records || []; }
+  catch (e) { el.innerHTML = `<div class="vp-empty-sm">No se pudo cargar: ${VP.esc(e.message)}</div>`; return; }
+  if (!records.length) { el.innerHTML = '<div class="vp-empty-sm">Todavía no se ha fusionado ningún producto.</div>'; return; }
+  const dateOf = r => r['Merged Date'] || r['Merge Date'] || r['Date'] || '';
+  records.sort((a, b) => String(dateOf(b)).localeCompare(String(dateOf(a))));
+  el.innerHTML = records.map(r => {
+    const undone = r['Status'] && r['Status'] !== 'Activo';
+    const right = undone
+      ? `<span class="status-pill" style="background:var(--surface2);color:var(--text-faint)">${VP.esc(r['Status'])}</span>`
+      : `<button class="refresh-btn aj-pundo-btn" data-merge-id="${VP.esc(r['Merge ID'])}">Deshacer</button>`;
+    return `<div class="aj-history-row">
+      <div class="aj-history-main" style="flex-direction:column;align-items:flex-start;gap:2px">
+        <span class="aj-history-arrow">${VP.esc(r['Merged Parent Name'] || r['Merged Parent ID'])} → ${VP.esc(r['Kept Parent Name'] || r['Kept Parent ID'])}</span>
+        <span class="aj-history-date">${VP.esc(VP.fmtDateTime(dateOf(r)))}${r['Orders Repointed'] !== undefined && r['Orders Repointed'] !== '' ? ' · ' + VP.num(r['Orders Repointed']) + ' pedidos movidos' : ''}</span>
+      </div>
+      ${right}
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.aj-pundo-btn').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm('¿Deshacer esta fusión? Los pedidos vuelven a apuntar al producto original.')) return;
+    btn.disabled = true; btn.textContent = 'Deshaciendo…';
+    try {
+      await VP.post({ action: 'undo_product_merge', merge_id: btn.dataset.mergeId });
+      btn.closest('.aj-history-row').outerHTML =
+        '<div class="aj-history-row" style="color:var(--green-text);font-size:13px">✓ Fusión deshecha</div>';
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Deshacer';
+      VP.toast('No se pudo deshacer: ' + e.message, true);
+    }
+  }));
+}
+
+(function bindFixpackCards() {
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', () => fn(el)); };
+  on('aj-open-health', openHealthModal);
+  on('aj-run-reconcile', runReconcile);
+  on('aj-open-roles', openRolesModal);
+  on('aj-product-merge-history', openProductMergeHistoryModal);
+  on('aj-logout', () => { if (confirm('¿Cerrar sesión en este dispositivo?')) VP.logout(); });
+})();
