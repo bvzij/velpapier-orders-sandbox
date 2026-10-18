@@ -123,6 +123,7 @@ function mapFromApi(r) {
     TrackingId: r['Tracking ID'] || '',
     LinkedShipment: r['Linked Shipment'] || '',
     ArchiveDate: r['Archive Date'] || '',
+    ShippedDate: r['Shipped Date'] || '',
     'Fecha Creación': r['Created Date']
   };
 }
@@ -605,6 +606,70 @@ function showQCViewModal(r) {
   loadQCViewBody(trackingId);
 }
 
+// Standalone copy of calidad.js's detail modal content, using app.js's
+// own already-loaded data (allRecords) instead of calidad.js's globals.
+// calidad.js itself isn't loaded here -- its init() calls VP.mountNav
+// ('calidad') and wires Calidad-only DOM elements that don't exist on
+// this page, so pulling the whole file in would break navigation and
+// throw on load. Small duplication, but keeps the two pages independent.
+function qcModalOrderBlock(id, channel, idx) {
+  const o = allRecords.find(rec => String(rec.ID) === String(id));
+  const items = o ? VP.parseProducts(o.Producto || '') : [];
+  const itemCount = items.reduce((sum, p) => sum + (Number(p.qty) || 0), 0);
+  const price = o && o.Precio ? formatMXN(o.Precio) : '—';
+
+  let idLabel, idHref;
+  if (channel === 'TikTok') {
+    idLabel = id;
+    idHref = `https://seller-mx.tiktok.com/order/detail?order_no=${encodeURIComponent(id)}&shop_region=MX`;
+  } else if (channel === 'Shopify') {
+    idLabel = (o && o.ShopifyOrderNumber) ? o.ShopifyOrderNumber : id;
+    idHref = o ? `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${o.ShopifyOrderId || id}` : '';
+  } else {
+    idLabel = id;
+    idHref = '';
+  }
+
+  const itemRows = items.length
+    ? items.map(p => `<div class="cal-detail-item"><span>${escapeHtml(p.qty)}×</span><span>${escapeHtml(p.name)}</span>${p.price ? `<span class="cal-detail-item-price">${formatMXN(p.price)}</span>` : ''}</div>`).join('')
+    : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
+
+  const detailId = `pedidos-qc-order-detail-${idx}`;
+  const labelHtml = channel === 'Shopify'
+    ? `<span class="cal-detail-order-id">Shopify #${escapeHtml(idLabel)}</span>${idHref ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-link" onclick="event.stopPropagation()">Ver en Shopify →</a>` : ''}`
+    : idHref
+      ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">TikTok ${escapeHtml(idLabel)}</a>`
+      : `<span class="cal-detail-order-id">${escapeHtml(idLabel)}</span>`;
+
+  const noteText = o && o.Notas ? o.Notas : '';
+  const notesHtml = noteText
+    ? `<div class="cal-detail-order-notes-toggle" onclick="document.getElementById('${detailId}-notes').classList.toggle('open')">
+         <span class="cal-detail-order-chevron">▸</span> 1 nota
+       </div>
+       <div class="cal-detail-order-notes" id="${detailId}-notes">${escapeHtml(noteText)}</div>`
+    : '';
+
+  return `<div class="cal-detail-order">
+    <div class="cal-detail-order-head" onclick="document.getElementById('${detailId}').classList.toggle('open')">
+      <span class="cal-detail-order-chevron">▸</span>
+      ${labelHtml}
+      <span class="cal-detail-order-summary">${itemCount} art. · ${price}</span>
+    </div>
+    <div class="cal-detail-order-items" id="${detailId}">${itemRows}</div>
+    ${notesHtml}
+  </div>`;
+}
+
+function qcModalTime24h(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString('es-MX', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
 async function loadQCViewBody(trackingId) {
   const body = document.getElementById('qc-view-body');
   try {
@@ -612,18 +677,44 @@ async function loadQCViewBody(trackingId) {
     const row = (data.records || [])[0];
     if (!row) { body.innerHTML = '<div class="vp-empty-sm">Sin registro de calidad para esta guía.</div>'; return; }
 
-    const photoCols = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5'];
-    const photos = photoCols.map(c => row[c]).filter(Boolean);
-    const photoGrid = photos.length
-      ? `<div class="cal-detail-photos">${photos.map(u =>
-          `<img src="${escapeHtml(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>`
+    const tikTokIds = String(row['TikTok Order IDs'] || '').split(' + ').filter(Boolean);
+    const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
+    const manualIds = String(row['Manual Order IDs'] || '').split(' + ').filter(Boolean);
+
+    let idx = 0;
+    const orderBlocks = [
+      ...tikTokIds.map(id => qcModalOrderBlock(id, 'TikTok', idx++)),
+      ...shopifyIds.map(id => qcModalOrderBlock(id, 'Shopify', idx++)),
+      ...manualIds.map(id => qcModalOrderBlock(id, 'Manual', idx++)),
+    ];
+    const orderBlocksHtml = orderBlocks.length ? orderBlocks.join('') : '<div class="vp-empty-sm">No se encontraron los pedidos originales.</div>';
+
+    const contentPhotos = ['Content1','Content2','Content3','Content4','Content5'].map(c => row[c]).filter(Boolean);
+    const boxPhotos = ['Box1','Box2','Box3','Box4','Box5'].map(c => row[c]).filter(Boolean);
+    const photoGroupHtml = (label, urls) => urls.length
+      ? `<div class="cal-detail-photo-group">
+          <div class="cal-detail-photo-group-label">${label}</div>
+          <div class="cal-detail-photos">${urls.map(u =>
+            `<img src="${escapeHtml(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
+        </div>`
+      : '';
+    const photoGrid = (contentPhotos.length || boxPhotos.length)
+      ? photoGroupHtml('Contenido', contentPhotos) + photoGroupHtml('Caja', boxPhotos)
       : '<div class="vp-empty-sm">Sin fotos</div>';
+
+    const allIds = [...tikTokIds, ...shopifyIds, ...manualIds];
+    const linkedOrder = allIds.map(id => allRecords.find(rec => String(rec.ID) === String(id))).find(Boolean);
+    const shippedDate = linkedOrder ? linkedOrder.ShippedDate || '' : '';
 
     body.innerHTML = `
       <div class="cal-detail-meta">
-        <div><span class="cal-detail-label">Empacador</span>${escapeHtml(row['Packer'] || '—')}</div>
+        <div><span class="cal-detail-label">Guía</span><code>${escapeHtml(row['Tracking ID'] || '—')}</code></div>
+        <div><span class="cal-detail-label">Empacado</span>${shippedDate ? escapeHtml(qcModalTime24h(shippedDate)) : '—'}</div>
+        ${row['Packer'] ? `<div><span class="cal-detail-label">Empacador</span>${escapeHtml(row['Packer'])}</div>` : ''}
         ${row['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${escapeHtml(row['Notes'])}</span></div>` : ''}
       </div>
+      <div class="cal-detail-section-title">Pedidos</div>
+      ${orderBlocksHtml}
       <div class="cal-detail-section-title">Fotos</div>
       ${photoGrid}`;
   } catch (e) {
