@@ -424,6 +424,9 @@ function renderHistoryList() {
       ...shopifyIds.map(id => ({ id, channel: 'Shopify' })),
       ...manualIds.map(id => ({ id, channel: 'Manual' })),
     ];
+    const ttIdHtml = tikTokIds.length
+      ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(tikTokIds[0])}${tikTokIds.length > 1 ? ' +' + (tikTokIds.length - 1) : ''}</span>`
+      : '';
     return `
       <div class="pending-card" onclick='openCapture(${JSON.stringify({
         tracking_id: row['Tracking ID'] || '',
@@ -432,7 +435,7 @@ function renderHistoryList() {
         username: row['Primary Username'] || '',
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
-          <span class="pending-username">${escapeHtml(row['Primary Username'] || '\u2014')}</span>
+          <span class="pending-username">${escapeHtml(row['Primary Username'] || '\u2014')}${ttIdHtml}</span>
           <span class="pending-count">\u2713 Enviado</span>
         </div>
         <div class="pending-tracking">${escapeHtml(row['Tracking ID'] || '')}</div>
@@ -514,6 +517,12 @@ function renderPendingList() {
       ? `<div class="pending-progress">✓ ${photoCount} foto${photoCount !== 1 ? 's' : ''} guardada${photoCount !== 1 ? 's' : ''}</div>`
       : '';
 
+    // Every order in this list is TikTok (renderPendingList filters to
+    // Channel === 'TikTok' before building groups), so orderIds here are
+    // always TikTok Order IDs -- no channel check needed before showing them.
+    const ttIdHtml = orderIds.length
+      ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(orderIds[0].id)}${orderIds.length > 1 ? ' +' + (orderIds.length - 1) : ''}</span>`
+      : '';
     return `
       <div class="pending-card" onclick='openCapture(${JSON.stringify({
         tracking_id: first['Tracking ID'] || '',
@@ -522,7 +531,7 @@ function renderPendingList() {
         username: username,
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
-          <span class="pending-username">${escapeHtml(username)}</span>
+          <span class="pending-username">${escapeHtml(username)}${ttIdHtml}</span>
           <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}</span>
         </div>
         ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
