@@ -17,6 +17,7 @@ let selected = null;      // { tracking_id, order_ids:[{id,channel}], customer_i
 let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
+let savingInProgress = false; // true for the whole duration of a submitQC() call -- nothing else may re-enable the button while this is set
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
 const gallery = { content: [], box: [] };
@@ -754,7 +755,9 @@ function bindAddButton(group, btnId) {
       gallery[group][placeholderIdx] = { url: uploaded.url };
       renderGallery(group);
       uploadsInFlight--;
-      document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+      if (!savingInProgress) {
+        document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+      }
 
       // Sync to the sheet in the background — the thumbnail and the submit
       // button are already usable at this point, they don't need to wait
@@ -771,7 +774,9 @@ function bindAddButton(group, btnId) {
       renderGallery(group);
       showToast('Error al subir foto, intenta de nuevo', true);
       uploadsInFlight--;
-      document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+      if (!savingInProgress) {
+        document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+      }
     }
   };
 }
@@ -804,6 +809,7 @@ async function submitQC() {
   // current gallery, explicitly confirmed. Does not touch order/ship status
   // again (already shipped) — just corrects the photos on record.
   if (isEditingShipped) {
+    savingInProgress = true;
     btn.disabled = true;
     btn.textContent = 'Guardando…';
     try {
@@ -823,12 +829,15 @@ async function submitQC() {
       showToast('Error: ' + e.message, true);
       btn.disabled = false;
       btn.textContent = 'Guardar cambios';
+    } finally {
+      savingInProgress = false;
     }
     return;
   }
 
   localFinalizeInProgress = true;  // suppress "shipped elsewhere" false-positive from our own poll tick
 
+  savingInProgress = true;
   btn.disabled = true;
   btn.textContent = 'Guardando…';
 
@@ -852,6 +861,7 @@ async function submitQC() {
     if (res.error === 'already_shipped') {
       showToast('Este pedido ya fue enviado desde otro dispositivo', true);
       localFinalizeInProgress = false;
+      savingInProgress = false;
       btn.disabled = false;
       btn.textContent = 'Enviar';
       return;
@@ -864,6 +874,7 @@ async function submitQC() {
   } catch (e) {
     showToast('Error: ' + e.message, true);
     localFinalizeInProgress = false;
+    savingInProgress = false;
     btn.disabled = false;
     btn.textContent = 'Enviar';
   }
