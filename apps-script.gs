@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.5';
+const SCRIPT_VERSION = '2026-10-17.6';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1027,6 +1027,9 @@ function recalculateShipmentCount(customerID) {
 // certain the delta is correct (finalize: these orders were definitely
 // not counted before, since they're being shipped right now). One
 // targeted write per affected customer row, not a scan of every order.
+// TextFinder per customer (always 1-2 for a finalize) instead of reading
+// the whole Customer ID column -- same fix, same reasoning as the order
+// lookup above.
 function incrementShipmentCounts(incrementByCustomer) {
   const ids = Object.keys(incrementByCustomer);
   if (!ids.length) return;
@@ -1037,19 +1040,15 @@ function incrementShipmentCounts(incrementByCustomer) {
   const countCol = ch.indexOf('Shipment Count');
   if (idCol < 0 || countCol < 0) return;
 
-  const wanted = {};
-  ids.forEach(id => { wanted[id] = true; });
-
-  const idVals = readColumn(cs, idCol);
-  const countVals = readColumn(cs, countCol);
-  const changed = [];
-  idVals.forEach((v, i) => {
-    const k = String(v);
-    if (!wanted[k]) return;
-    countVals[i] = (Number(countVals[i]) || 0) + incrementByCustomer[k];
-    changed.push(i);
+  const custIdColumn = cs.getRange(2, idCol + 1, Math.max(cs.getLastRow() - 1, 1), 1);
+  ids.forEach(id => {
+    const finder = custIdColumn.createTextFinder(id).matchEntireCell(true);
+    const found = finder.findNext();
+    if (!found) return;
+    const cell = cs.getRange(found.getRow(), countCol + 1);
+    const current = Number(cell.getValue()) || 0;
+    cell.setValue(current + incrementByCustomer[id]);
   });
-  writeColumnChanges(cs, countCol, countVals, changed);
 }
 
 // ─── Add alias ─────────────────────────────────────────────────────────────────
@@ -2018,31 +2017,36 @@ function saveQC(body) {
     const iCust    = oh.indexOf('Customer ID');
     _timings.headers_read_ms = Date.now() - _t0;
 
-    // Order ID located by header (it used to be assumed to be column A).
+    // A finalize ships 1-2 orders (occasionally a few more for a combined
+    // shipment), so reading all ~5000 Orders rows just to find them was
+    // the actual bottleneck (confirmed: ~4.9s of a ~7s request). TextFinder
+    // looks each one up directly instead -- same mechanism findOrderRow()
+    // already uses elsewhere, just against the real Order ID column
+    // (found by header) rather than assuming column A. One finder call
+    // plus one 1-row read per order id, not a full-column read.
     const _t1 = Date.now();
-    const idVals   = readColumn(orders, iOrderId);
-    const chanVals = readColumn(orders, iChan);
-    const custVals = readColumn(orders, iCust);
-    const idToRowIdx = {};
-    idVals.forEach((v, i) => { idToRowIdx[String(v)] = i; });
-    _timings.column_reads_ms = Date.now() - _t1;
-    _timings.orders_row_count = idVals.length;
-
+    const orderIdColumn = orders.getRange(2, iOrderId + 1, Math.max(orders.getLastRow() - 1, 1), 1);
     const shipResults = [];
     const shippedRows = [];        // every order being shipped
     const linkRows = [];           // non-TikTok orders get Linked Shipment = tracking ID
     const customersToRecount = [];
 
     allOrderIds.forEach(id => {
-      const idx = idToRowIdx[String(id)];
-      if (idx === undefined) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
+      const finder = orderIdColumn.createTextFinder(id).matchEntireCell(true);
+      const found = finder.findNext();
+      if (!found) { shipResults.push({ order_id: id, result: 'not_found' }); return; }
+      const idx = found.getRow() - 2; // back to the same 0-based "data row" indexing the rest of this block expects
       shippedRows.push(idx);
-      if (iChan >= 0 && iLink >= 0 && chanVals[idx] !== 'TikTok') linkRows.push(idx);
-      if ((chanVals[idx] === 'TikTok' || chanVals[idx] === 'Shopify') && custVals[idx]) {
-        customersToRecount.push(String(custVals[idx]));
+      const chan = orders.getRange(idx + 2, iChan + 1).getValue();
+      const cust = orders.getRange(idx + 2, iCust + 1).getValue();
+      if (iChan >= 0 && iLink >= 0 && chan !== 'TikTok') linkRows.push(idx);
+      if ((chan === 'TikTok' || chan === 'Shopify') && cust) {
+        customersToRecount.push(String(cust));
       }
       shipResults.push({ order_id: id, result: 'shipped' });
     });
+    _timings.order_lookup_ms = Date.now() - _t1;
+    _timings.orders_looked_up = allOrderIds.length;
 
     const _t2 = Date.now();
     const now = nowISO();
