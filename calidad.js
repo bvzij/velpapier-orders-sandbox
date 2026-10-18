@@ -22,7 +22,16 @@ function applyQcData(q, o) {
   // sorts reliably by creation order (same fix as Historial in qc.js).
   QC.sort((a, b) => String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || '')));
   ORDERS_BY_ID = {};
-  (o.records || []).forEach(r => { ORDERS_BY_ID[r['Order ID']] = r; });
+  (o.records || []).forEach(r => {
+    // A combined shipment's Order ID is itself a " + "-joined string
+    // ("123 + 456"), so a single component ID (what QC rows store, split
+    // out by orderIdsOf) never matched this key. Index every component
+    // individually -- the row is unchanged, just reachable by each of its
+    // own order IDs, not only the full joined string.
+    String(r['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
+      ORDERS_BY_ID[id] = r;
+    });
+  });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
   hasLoadedOnce = true;
 }
