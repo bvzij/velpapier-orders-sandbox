@@ -456,25 +456,33 @@ function cardHtml(r) {
 function listRowHtml(r) {
   const photos = photosOf(r);
   const ids    = orderIdsOf(r);
-  const prods  = productSummary(r);
+  const notesCount = linkedOrderNotesCount(ids);
   const thumb  = photos.length
     ? `<img class="cal-list-thumb" src="${VP.esc(photos[0])}" loading="lazy" alt=""
             data-lightbox="1" onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
     : `<div class="cal-list-thumb cal-list-thumb--empty">—</div>`;
 
+  // Same redesign as the card: prominent (non-bold) TikTok ID next to the
+  // username, product-name text dropped in favor of the fixed count badges.
+  const ttIdHtml = ids.tiktok.length
+    ? ` <span class="vp-qc-ttid-prominent">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>`
+    : '';
+
   return `<div class="cal-list-row" data-qcid="${VP.esc(r['QC ID'] || '')}">
     ${thumb}
     <div class="cal-list-main">
-      <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}</div>
-      <div class="cal-list-sub">
-        <code>${VP.esc(r['Tracking ID'] || '—')}</code>
-        ${prods.length ? ` · ${VP.esc(prods.slice(0, 2).join(', '))}${prods.length > 2 ? ` +${prods.length - 2}` : ''}` : ''}
-      </div>
+      <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}${ttIdHtml}</div>
+      <div class="cal-list-sub">${VP.esc(r['Tracking ID'] || '—')}</div>
     </div>
-    <div class="cal-list-tags">${channelTags(ids)}</div>
+    <div class="cal-list-tags">
+      <span class="vp-qc-count-badge tiktok"><span class="vp-qc-count-label">TikTok:</span><span class="vp-qc-count-num">${ids.tiktok.length}</span></span>
+      <span class="vp-qc-count-badge shopify"><span class="vp-qc-count-label">Shopify:</span><span class="vp-qc-count-num">${ids.shopify.length}</span></span>
+      <span class="vp-qc-count-badge manual"><span class="vp-qc-count-label">Manual:</span><span class="vp-qc-count-num">${ids.manual.length}</span></span>
+    </div>
     <div class="cal-list-when">
       ${VP.esc(fmtTimeline24h(r['Timestamp']))}
       ${photos.length > 1 ? `<br><span class="cal-list-photocount">${photos.length} fotos</span>` : ''}
+      ${notesCount ? `<br>${notesCount} nota${notesCount !== 1 ? 's' : ''}` : ''}
     </div>
   </div>`;
 }
