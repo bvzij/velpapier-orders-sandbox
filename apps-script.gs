@@ -1006,6 +1006,36 @@ function recalculateShipmentCount(customerID) {
   recalculateShipmentCountsFor([customerID]);
 }
 
+// Adds a per-customer delta to the existing Shipment Count rather than
+// rebuilding it from a full sheet scan -- safe only when the caller is
+// certain the delta is correct (finalize: these orders were definitely
+// not counted before, since they're being shipped right now). One
+// targeted write per affected customer row, not a scan of every order.
+function incrementShipmentCounts(incrementByCustomer) {
+  const ids = Object.keys(incrementByCustomer);
+  if (!ids.length) return;
+
+  const cs = getCustomersSheet();
+  const ch = cs.getRange(1, 1, 1, cs.getLastColumn()).getValues()[0];
+  const idCol = ch.indexOf('Customer ID');
+  const countCol = ch.indexOf('Shipment Count');
+  if (idCol < 0 || countCol < 0) return;
+
+  const wanted = {};
+  ids.forEach(id => { wanted[id] = true; });
+
+  const idVals = readColumn(cs, idCol);
+  const countVals = readColumn(cs, countCol);
+  const changed = [];
+  idVals.forEach((v, i) => {
+    const k = String(v);
+    if (!wanted[k]) return;
+    countVals[i] = (Number(countVals[i]) || 0) + incrementByCustomer[k];
+    changed.push(i);
+  });
+  writeColumnChanges(cs, countCol, countVals, changed);
+}
+
 // ─── Add alias ─────────────────────────────────────────────────────────────────
 
 function addAlias(body) {
@@ -1998,12 +2028,18 @@ function saveQC(body) {
     setCellsToValue(orders, iStat,    shippedRows, 'Enviado', false);
     setCellsToValue(orders, iShipped, shippedRows, now, false);
 
-    // Shipping is what moves a customer's Shipment Count. Finalize writes
-    // Status directly (it does not go through applyStatusSideEffects), so
-    // refresh the count here, for just the customers involved.
-    SpreadsheetApp.flush();
-    SpreadsheetApp.flush();
-    recalculateShipmentCountsFor(customersToRecount);
+    // Shipping is what moves a customer's Shipment Count. Previously this
+    // called recalculateShipmentCountsFor(), which re-reads and re-scans
+    // EVERY row of the entire Orders sheet to rebuild counts from scratch
+    // -- increasingly slow as the sheet grows, and almost certainly the
+    // biggest single cost in this request. We already know exactly which
+    // orders were just shipped and by whom (customersToRecount, one entry
+    // per shipped TikTok/Shopify order), so each affected customer's count
+    // just needs +1 per order of theirs in this batch -- no full rescan.
+    const incrementByCustomer = {};
+    customersToRecount.forEach(id => { incrementByCustomer[id] = (incrementByCustomer[id] || 0) + 1; });
+    incrementShipmentCounts(incrementByCustomer);
+
     logAuditEvent('finalize_shipment', 'QC', qcId, {
       tracking_id: body.tracking_id, order_ids: allOrderIds, shipped: shipResults,
     });
