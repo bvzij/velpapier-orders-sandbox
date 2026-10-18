@@ -32,12 +32,12 @@ function slimOrders(resp) {
 // Does nothing until orders are actually in hand: painting an empty ORDERS
 // would replace the honest "Cargando..." / "-" placeholders with real
 // looking zeros, which reads as "you made no money" rather than "loading".
-function paintAll(session) {
+function paintAll() {
   if (!ORDERS_READY) return;
   paintStats();
-  paintAlerts(session);
+  paintAlerts();
   paintRevenueChart();
-  paintHeroLine(session);
+  paintHeroLine();
 }
 
 (async function init() {
@@ -53,21 +53,13 @@ function paintAll(session) {
     // -- unlike analytics, these numbers need the long tail: the Trimestre
     // sparkline reaches ~360 days back, and "Por cobrar" counts unpaid
     // orders of ANY age. Narrowing the fetch would silently undercount.
-    let session = null;
-
-    const rSession = VP.getCached('action=active_session', fresh => {
-      session = fresh.session || null;
-      paintAll(session);
-    });
-    if (rSession.data) session = rSession.data.session || null;
-
     // Slimmed + its own cache key: the analytics page caches the SAME
     // 'action=orders' response in full under the plain key, and it needs
     // fields this page drops. Sharing the key would corrupt that page.
     const rOrders = VP.getCached('action=orders', fresh => {
       ORDERS = fresh.records || [];
       ORDERS_READY = true;
-      paintAll(session);
+      paintAll();
     }, { slim: slimOrders, cacheKey: 'orders_home_slim' });
 
     if (rOrders.data) {
@@ -75,23 +67,19 @@ function paintAll(session) {
       ORDERS_READY = true;
     }
 
-    paintAll(session);
+    paintAll();
 
-    // Await whichever in-flight fetches getCached already kicked off above,
-    // for anything NOT already served from cache. We never issue a second,
-    // separate VP.get() for the same qs -- that would race the cached
-    // fetch and never write sessionStorage, silently defeating the cache.
-    if (rOrders.pending || rSession.pending) {
-      const [ordersData, sessionData] = await Promise.all([
-        rOrders.pending || Promise.resolve(null),
-        rSession.pending ? rSession.pending.catch(() => null) : Promise.resolve(null),
-      ]);
+    // Await the SAME in-flight fetch getCached already kicked off above if
+    // nothing was served from cache. We never issue a second, separate
+    // VP.get() for the same qs -- that would race the cached fetch and
+    // never write sessionStorage, silently defeating the cache.
+    if (rOrders.pending) {
+      const ordersData = await rOrders.pending;
       if (ordersData) {
         ORDERS = ordersData.records || [];
         ORDERS_READY = true;
       }
-      if (sessionData) session = sessionData.session || null;
-      paintAll(session);
+      paintAll();
     }
   } catch (e) {
     console.error('[home] load failed', e);
@@ -116,15 +104,11 @@ function paintDateline() {
     now.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
-function paintHeroLine(session) {
+function paintHeroLine() {
   const readyToPack = ORDERS.filter(r => r['Status'] === 'Pagado').length;
   const unpaid      = ORDERS.filter(r => r['Status'] === 'No Pagado').length;
 
   const bits = [];
-  if (session) {
-    const packed = 0; // live count lives on the packing page; keep this line calm
-    bits.push(`Hay una <b>sesión de empaque abierta</b>`);
-  }
   if (readyToPack) bits.push(`<b>${readyToPack}</b> pedido${readyToPack !== 1 ? 's' : ''} listo${readyToPack !== 1 ? 's' : ''} para empacar`);
   if (unpaid)      bits.push(`<b>${unpaid}</b> sin pagar`);
 
@@ -201,18 +185,9 @@ function paintStats() {
 
 /* ── Attention list ─────────────────────────────────────────────────── */
 
-function paintAlerts(session) {
+function paintAlerts() {
   const now = new Date();
   const alerts = [];
-
-  if (session) {
-    alerts.push({
-      href: 'qc.html',
-      dot: '#a32d2d',
-      html: `Sesión de empaque <b>${VP.esc(session['Session ID'] || '')}</b> abierta`,
-      count: '',
-    });
-  }
 
   const staleUnpaid = ORDERS.filter(r => {
     if (r['Status'] !== 'No Pagado') return false;
