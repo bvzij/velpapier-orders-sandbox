@@ -184,7 +184,11 @@ async function pollCaptureUpdates() {
     // Never merge server photos into a gallery that's mid-edit on this
     // device (editing a shipped order overwrites wholesale on save — pulling
     // in server changes mid-edit would be confusing and could clobber intent).
-    if (!isEditingShipped) {
+    // Also never merge while a save is actually in flight -- the server's
+    // row can still reflect the pre-save state for several seconds after
+    // submitQC() was called, and overwriting the local gallery with that
+    // stale snapshot is exactly what made photos flash away mid-save.
+    if (!isEditingShipped && !savingInProgress) {
       ['content', 'box'].forEach(group => {
         const cols = group === 'content'
           ? ['Content1','Content2','Content3','Content4','Content5']
@@ -202,7 +206,9 @@ async function pollCaptureUpdates() {
           renderGallery(group);
         }
       });
-      document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+      if (!savingInProgress) {
+        document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+      }
     }
   } catch (e) {
     console.warn('[pollCaptureUpdates] failed:', e);
