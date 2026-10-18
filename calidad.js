@@ -14,9 +14,30 @@ let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
 let hasLoadedOnce = false; // tells a genuinely empty result apart from a load that hasn't finished/succeeded yet
+let hasFullOrdersLoaded = false; // set once the actual action=orders payload (not just QC) has landed
+
+// The full Orders sheet no longer fits in sessionStorage's ~5-10MB quota
+// (confirmed: "[VP] cache write failed -- payload too large"), so the
+// cache write silently failed every time, meaning this page was doing a
+// slow uncached fetch on every load -- which is also what made the modal
+// timing bug so easy to hit. Only the few fields this page actually reads
+// need to be cached, same slimming pattern as home.js's slimOrders.
+const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date'];
+function slimOrdersForCalidad(resp) {
+  return {
+    records: (resp.records || []).map(r => {
+      const o = {};
+      for (const f of SLIM_ORDER_FIELDS) o[f] = r[f];
+      return o;
+    }),
+  };
+}
+
+let openModalQcId = null; // which order's modal is currently open, if any
 
 function applyQcData(q, o) {
   QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
+  if (o && o.records) hasFullOrdersLoaded = true;
   // QC rows have no Timestamp column -- this sort was comparing '' to ''
   // and doing nothing. QC ID is 'QC-<zero-padded row>-<rand>', so it
   // sorts reliably by creation order (same fix as Historial in qc.js).
@@ -34,6 +55,16 @@ function applyQcData(q, o) {
   });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
   hasLoadedOnce = true;
+
+  // The orders fetch can land well after the modal was opened (the full
+  // Orders payload is large and sometimes slow, see the sessionStorage
+  // quota fix below). A modal built before that data arrives froze on
+  // whatever it had at that instant -- re-render it in place once fresh
+  // data comes in, rather than requiring a close/reopen to see it.
+  if (openModalQcId) {
+    const row = QC.find(r => r['QC ID'] === openModalQcId);
+    if (row) showOrderDetailModal(row);
+  }
 }
 
 /* ── Manual refresh ─────────────────────────────────────────────────── */
@@ -76,7 +107,7 @@ async function manualRefresh() {
     let cq = { records: [] }, co = { records: [] };
 
     const qRes = VP.getCached('action=qc', fresh => { cq = fresh; applyQcData(fresh, co); render(); });
-    const oRes = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, fresh); render(); });
+    const oRes = VP.getCached('action=orders', fresh => { co = fresh; applyQcData(cq, fresh); render(); }, { slim: slimOrdersForCalidad, cacheKey: 'orders_calidad_slim' });
 
     if (qRes.data) { cq = qRes.data; gotCache = true; }
     if (oRes.data) { co = oRes.data; gotCache = true; }
@@ -506,6 +537,7 @@ async function loadAndRenderAuditTrail(qcId, orderIds) {
 }
 
 function showOrderDetailModal(r) {
+  openModalQcId = r['QC ID'] || null;
   const modalRoot = document.getElementById('modal-container') || createModalRoot();
   const ids = orderIdsOf(r);
   const photos = photosOf(r);
@@ -516,9 +548,15 @@ function showOrderDetailModal(r) {
     ...ids.shopify.map(id => renderDetailOrderBlock(id, 'Shopify', idx++)),
     ...ids.manual.map(id => renderDetailOrderBlock(id, 'Manual', idx++)),
   ];
+  const hasAnyIds = ids.tiktok.length + ids.shopify.length + ids.manual.length > 0;
+  // "No orders found" is only a true empty state once the full Orders
+  // payload has actually loaded -- before that, an id with no match yet
+  // just means the data hasn't arrived, not that it doesn't exist.
   const orderBlocksHtml = orderBlocks.length
     ? orderBlocks.join('')
-    : '<div class="vp-empty-sm">No se encontraron los pedidos originales.</div>';
+    : hasAnyIds && !hasFullOrdersLoaded
+      ? '<div class="vp-empty-sm">Cargando pedidos…</div>'
+      : '<div class="vp-empty-sm">No se encontraron los pedidos originales.</div>';
 
   const photoGrid = photos.length
     ? `<div class="cal-detail-photos">${photos.map(u =>
@@ -563,6 +601,7 @@ function showOrderDetailModal(r) {
 }
 
 function closeCalDetailModal() {
+  openModalQcId = null;
   const modalRoot = document.getElementById('modal-container');
   if (modalRoot) modalRoot.innerHTML = '';
 }
