@@ -872,8 +872,6 @@ async function submitQC() {
 
     if (res.error === 'already_shipped') {
       showToast('Este pedido ya fue enviado desde otro dispositivo', true);
-      localFinalizeInProgress = false;
-      savingInProgress = false;
       btn.disabled = false;
       btn.textContent = 'Enviar';
       return;
@@ -894,14 +892,18 @@ async function submitQC() {
 
   } catch (e) {
     showToast('Error: ' + e.message, true);
-    localFinalizeInProgress = false;
-    savingInProgress = false;
     btn.disabled = false;
     btn.textContent = 'Enviar';
+  } finally {
+    // Previously savingInProgress was only reset inside each explicit exit
+    // path above. If backToPending() itself threw after the success toast
+    // (no visible error, nothing obviously wrong), nothing ever reset it --
+    // the button stayed disabled forever with no error shown. finally runs
+    // no matter how this block exits, so that's no longer possible.
+    localFinalizeInProgress = false;
+    savingInProgress = false;
   }
 }
-
-
 // ── Lightbox ─────────────────────────────────────────────────────────────
 
 function openLightbox(url) {
