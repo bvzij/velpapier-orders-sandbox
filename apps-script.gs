@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.3';
+const SCRIPT_VERSION = '2026-10-17.4';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -670,8 +670,12 @@ function doPost(e) {
     const role = identity.role;
     _currentIdentity = identity; // read by logAudit() -- see audit log section
     return withWriteLock(function () {
+      const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
+      Logger.log('[doPost] dispatchPostAction total: ' + (Date.now() - _tDispatch) + 'ms');
+      const _tFlush = Date.now();
       flushAudit(); // after the real write already succeeded -- never blocks it
+      Logger.log('[doPost] flushAudit: ' + (Date.now() - _tFlush) + 'ms');
       return result;
     });
 
@@ -1987,6 +1991,7 @@ function saveQC(body) {
   // (the 7-9s "Enviar" save), and every unrelated cell got re-parsed on the
   // way back in, which is how long numeric IDs were being corrupted.
   if (body.finalize) {
+    const _t0 = Date.now();
     const allOrderIds = (body.order_ids || []).map(o => o.id);
 
     const orders = getOrdersSheet();
@@ -1998,13 +2003,16 @@ function saveQC(body) {
     const iStat    = oh.indexOf('Status');
     const iShipped = oh.indexOf('Shipped Date');
     const iCust    = oh.indexOf('Customer ID');
+    Logger.log('[finalize] headers read: ' + (Date.now() - _t0) + 'ms');
 
     // Order ID located by header (it used to be assumed to be column A).
+    const _t1 = Date.now();
     const idVals   = readColumn(orders, iOrderId);
     const chanVals = readColumn(orders, iChan);
     const custVals = readColumn(orders, iCust);
     const idToRowIdx = {};
     idVals.forEach((v, i) => { idToRowIdx[String(v)] = i; });
+    Logger.log('[finalize] 3 column reads (' + idVals.length + ' rows) + index build: ' + (Date.now() - _t1) + 'ms');
 
     const shipResults = [];
     const shippedRows = [];        // every order being shipped
@@ -2022,11 +2030,13 @@ function saveQC(body) {
       shipResults.push({ order_id: id, result: 'shipped' });
     });
 
+    const _t2 = Date.now();
     const now = nowISO();
     setCellsToValue(orders, iPacked,  shippedRows, now, false);
     setCellsToValue(orders, iLink,    linkRows, body.tracking_id, true);
     setCellsToValue(orders, iStat,    shippedRows, 'Enviado', false);
     setCellsToValue(orders, iShipped, shippedRows, now, false);
+    Logger.log('[finalize] 4 setCellsToValue writes: ' + (Date.now() - _t2) + 'ms');
 
     // Shipping is what moves a customer's Shipment Count. Previously this
     // called recalculateShipmentCountsFor(), which re-reads and re-scans
@@ -2036,16 +2046,21 @@ function saveQC(body) {
     // orders were just shipped and by whom (customersToRecount, one entry
     // per shipped TikTok/Shopify order), so each affected customer's count
     // just needs +1 per order of theirs in this batch -- no full rescan.
+    const _t3 = Date.now();
     const incrementByCustomer = {};
     customersToRecount.forEach(id => { incrementByCustomer[id] = (incrementByCustomer[id] || 0) + 1; });
     incrementShipmentCounts(incrementByCustomer);
+    Logger.log('[finalize] incrementShipmentCounts: ' + (Date.now() - _t3) + 'ms');
 
+    const _t4 = Date.now();
     logAuditEvent('finalize_shipment', 'QC', qcId, {
       tracking_id: body.tracking_id, order_ids: allOrderIds, shipped: shipResults,
     });
+    Logger.log('[finalize] logAuditEvent (buffer only, not flushed yet): ' + (Date.now() - _t4) + 'ms');
 
     result.result = 'created';
     result.orders = shipResults;
+    Logger.log('[finalize] TOTAL inside finalize block: ' + (Date.now() - _t0) + 'ms');
   }
 
   return jsonResponse(result);
