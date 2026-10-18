@@ -1975,14 +1975,11 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 }
 .cal-detail-order-notes.open { max-height: 200px; padding: 0 12px 8px; }
 
-/* ── Calidad card: prominent TikTok Order ID + info list ── */
+/* ── Calidad card: username + prominent-but-smaller TikTok Order ID ── */
 .vp-qc-ttid-prominent {
-  font-family: monospace; font-size: 11px; font-weight: 600;
+  font-family: monospace; font-size: 12px; font-weight: 600;
   color: var(--text); background: var(--surface2);
   border-radius: var(--radius-sm); padding: 1px 6px;
+  vertical-align: middle;
 }
-.vp-qc-info { font-size: 11.5px; color: var(--text-muted); line-height: 1.6; margin-top: 4px; }
-
-.cal-detail-photo-group { margin-bottom: 10px; }
-.cal-detail-photo-group:last-child { margin-bottom: 0; }
-.cal-detail-photo-group-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-faint); margin-bottom: 4px; }
+.vp-qc-info { font-size: 11px; color: var(--text-muted); line-height: 1.7; margin-top: 4px; }
