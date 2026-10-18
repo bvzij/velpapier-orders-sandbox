@@ -7,7 +7,28 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.8';
+const SCRIPT_VERSION = '2026-10-18.1';
+
+// ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
+// Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
+const HIDE_PRICES_FROM_STAFF = true;
+const STAFF_HIDDEN_ORDER_FIELDS = ['Price'];
+// Machine identities (VPS, Shopify webhook) may only call their own actions.
+// false = log violations only; flip to true after a week of clean logs.
+const SERVICE_ALLOWLIST_ENFORCE = false;
+const SERVICE_ALLOW = {
+  vps:     ['import_tiktok_orders', 'create_customers_bulk', 'customers', 'orders_index', 'import_qc_history', 'ping', 'whoami'],
+  shopify: ['import_shopify_order', 'customers', 'ping', 'whoami'],
+};
+// Login sessions replace sending the raw password on every request.
+const SESSION_DAYS = 30;
+// While true, a raw password still works as a token (old saved logins keep
+// working). Flip to false once every phone has logged in again after the
+// 2026-10-19 deploy -- then only session tokens and service tokens work.
+const ALLOW_PASSWORD_AS_TOKEN = true;
+// Only these Cloudinary folders can be signed for upload.
+const UPLOAD_FOLDERS = ['velpapier/qc'];
+const MX_TZ = 'America/Mexico_City';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -48,6 +69,8 @@ function getCustomersSheet() {
   return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Customers');
 }
 
+const QC_ID_COLUMNS = ['Tracking ID', 'TikTok Order IDs', 'Shopify Order IDs', 'Manual Order IDs'];
+
 function getQCSheet() {
   const ss = SpreadsheetApp.openById(QC_SHEET_ID);
 
@@ -72,7 +95,9 @@ function getQCSheet() {
       return sh;
     }
   }
-  return sheets[0];   // legacy fallback, same as before
+  // Previously fell back to sheets[0], silently sending QC writes into
+  // whatever tab happened to be first. Failing loudly is safer.
+  throw new Error('No se encontró la hoja de QC (encabezados "QC ID" y "Tracking ID").');
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
@@ -84,6 +109,76 @@ function generateUUID() {
 function nowISO() {
   return new Date().toISOString();
 }
+
+// Returns the 0-based index of `name` in row 1, appending it as a new last
+// column first if it doesn't exist yet. Lets a fix add a column without
+// anyone editing the sheet by hand. Callers must re-read headers after.
+function ensureHeader(sheet, name) {
+  const lastCol = sheet.getLastColumn();
+  const headers = lastCol ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  const idx = headers.indexOf(name);
+  if (idx >= 0) return idx;
+  sheet.getRange(1, lastCol + 1).setValue(name);
+  return lastCol;
+}
+
+// ─── Platform date parsing ─────────────────────────────────────────────
+// TikTok exports dates as text ("16/10/2026 11:53:21" or, depending on the
+// account locale, "10/16/2026 11:53:21 AM"). new Date() in the browser
+// cannot read the day-first form at all, and Sheets may silently swap
+// day and month on write -- so every platform date is parsed HERE, as
+// Mexico City local time, and stored as ISO.
+//
+// detectDayFirst() looks at a whole batch: any value whose first number
+// is > 12 proves day-first, any whose second number is > 12 proves
+// month-first. Returns null if the batch never disambiguates.
+function detectDayFirst(values) {
+  let dayFirst = 0, monthFirst = 0;
+  (values || []).forEach(v => {
+    const m = String(v || '').match(/^\s*(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+    if (!m) return;
+    if (Number(m[1]) > 12) dayFirst++;
+    else if (Number(m[2]) > 12) monthFirst++;
+  });
+  if (dayFirst && !monthFirst) return true;
+  if (monthFirst && !dayFirst) return false;
+  return null;
+}
+
+// dayFirst: true / false / null (null = Mexican default, day-first).
+// Accepts Date objects (Sheets already converted), ISO strings, and
+// d/m/y or m/d/y with optional seconds and AM/PM. Returns Date or null.
+function parseTikTokDateTime(v, dayFirst) {
+  if (!v) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?:[ T]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp]\.?\s*[Mm]\.?)?)?/);
+  if (!m) return null;
+  let a = Number(m[1]), b = Number(m[2]);
+  let year = Number(m[3]); if (year < 100) year += 2000;
+  let day, month;
+  if (a > 12) { day = a; month = b; }
+  else if (b > 12) { day = b; month = a; }
+  else if (dayFirst === false) { day = b; month = a; }
+  else { day = a; month = b; }
+  let hh = Number(m[4] || 0); const mi = Number(m[5] || 0), ss = Number(m[6] || 0);
+  const ampm = (m[7] || '').toLowerCase().replace(/[^ap]/g, '');
+  if (ampm === 'p' && hh < 12) hh += 12;
+  if (ampm === 'a' && hh === 12) hh = 0;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const pad = n => String(n).padStart(2, '0');
+  try {
+    return Utilities.parseDate(year + '-' + pad(month) + '-' + pad(day) + ' ' + pad(hh) + ':' + pad(mi) + ':' + pad(ss),
+      MX_TZ, 'yyyy-MM-dd HH:mm:ss');
+  } catch (e) { return null; }
+}
+
+// Airtable "Fecha Empacar" is "dd-mm-yy HH:MM" -- same parser, day-first.
+function toISOorEmpty(d) { return d ? d.toISOString() : ''; }
 
 function sheetToObjects(sheet) {
   const data = sheet.getDataRange().getValues();
@@ -243,16 +338,18 @@ function doGet(e) {
     // token -- wrong, blank, or rotated -- passed validation and the user
     // was never re-prompted. It must be authenticated like everything else.
     if (action === 'version') return jsonResponse({ version: SCRIPT_VERSION });
-    const role = getRole(e.parameter.token);
-    if (!role) return jsonResponse({ error: 'unauthorized' });
+    // Public, data-free health probe for the VPS / n8n / uptime checks.
+    if (action === 'health') return healthProbeAction();
+    const identity = getIdentity(e.parameter.token);
+    if (!identity) return jsonResponse({ error: 'unauthorized' });
+    const role = identity.role;
+    if (!serviceActionAllowed(identity, action)) return jsonResponse({ error: 'unauthorized' });
     if (action === 'ping') return jsonResponse({ ok: true, role: role });
-    if (action === 'whoami') return jsonResponse({ role: role });
+    if (action === 'whoami') return jsonResponse({ role: role, name: identity.name });
     if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
-    if (action === 'active_session') return getActiveSession(e);
-    if (action === 'sessions') return getSessions(e);
 
     // Ajustes-only tools -- duplicate finders/mergers, product merge
     // search/history. Staff role is a valid token but not allowed here.
@@ -263,6 +360,8 @@ function doGet(e) {
     if (action === 'product_merge_history') return requireAdmin(role) ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'orders_index') return requireAdmin(role) ? ordersIndexAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'health_report') return requireAdmin(role) ? healthReportAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_redo_status') return undoRedoStatusAction(e);
     if (action === 'audit_trail') return getAuditTrailAction(e);
 
@@ -276,6 +375,7 @@ function doGet(e) {
       const channelCol = headers.indexOf('Channel');
       const customerIdCol = headers.indexOf('Customer ID');
       const createdCol = headers.indexOf('Created Date');
+      const orderDateCol = headers.indexOf('Order Date');   // real platform time (FIX_LOG 2.1)
 
       const statusFilter = e.parameter.status
         ? e.parameter.status.split(',').map(s => s.trim()).filter(Boolean)
@@ -297,12 +397,18 @@ function doGet(e) {
         if (channelFilter && row[channelCol] !== channelFilter) continue;
         if (customerIdFilter && row[customerIdCol] !== customerIdFilter) continue;
         if (cutoff) {
-          const cd = row[createdCol] ? new Date(row[createdCol]) : null;
+          const rawDate = (orderDateCol >= 0 && row[orderDateCol]) || row[createdCol];
+          const cd = rawDate ? new Date(rawDate) : null;
           if (!cd || cd < cutoff) continue;
         }
 
         const obj = { _rowIndex: i + 1 };
         headers.forEach((h, j) => { obj[h] = row[j]; });
+        // Owner-only money data: a staff token never receives these fields,
+        // so hiding the Análisis page is no longer the only protection.
+        if (HIDE_PRICES_FROM_STAFF && role !== 'admin') {
+          STAFF_HIDDEN_ORDER_FIELDS.forEach(f => { delete obj[f]; });
+        }
         records.push(obj);
       }
 
@@ -665,10 +771,14 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const action = body.action;
+    // login is the one POST that runs before authentication: it is how a
+    // password becomes a session token.
+    if (action === 'login') return loginAction(body);
     const identity = getIdentity(body.token);
     if (!identity) return jsonResponse({ error: 'unauthorized' });
     const role = identity.role;
     _currentIdentity = identity; // read by logAudit() -- see audit log section
+    if (!serviceActionAllowed(identity, action)) { flushAudit(); return jsonResponse({ error: 'unauthorized' }); }
     return withWriteLock(function () {
       const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
@@ -701,7 +811,6 @@ function dispatchPostAction(action, body, role) {
     if (action === 'create_customer') return createCustomer(body);
     if (action === 'update_order_status') return updateOrderStatus(body);
     if (action === 'add_alias') return addAlias(body);
-    if (action === 'update_packed_date') return updatePackedDate(body);
     if (action === 'stamp_customer_ids') { stampCustomerIDs(); return jsonResponse({ result: 'done' }); }
     if (action === 'update_order') return updateOrder(body);
     if (action === 'delete_order') return deleteOrder(body);
@@ -709,9 +818,11 @@ function dispatchPostAction(action, body, role) {
     if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
     if (action === 'save_qc') return saveQC(body);
-    if (action === 'start_session') return startSession(body);
-    if (action === 'end_session') return endSession(body);
-    if (action === 'update_session_participants') return updateSessionParticipants(body);
+    if (action === 'logout') return logoutAction(body);
+    if (action === 'import_qc_history') return requireAdmin(role) ? importQcHistoryAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'run_health_checks') return requireAdmin(role) ? runHealthChecksAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'reconcile_customers') return requireAdmin(role) ? jsonResponse(reconcileCustomerAggregates()) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'revoke_user_sessions') return requireAdmin(role) ? revokeUserSessionsAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'resolve_shopify_match') return resolveShopifyMatchAction(body);
     if (action === 'resolve_shopify_matches_bulk') return resolveShopifyMatchesBulk(body);
 
@@ -1012,10 +1123,17 @@ function recalculateShipmentCountsFor(customerIds) {
   const countCol = ch.indexOf('Shipment Count');
   if (idCol < 0 || countCol < 0) return;
 
-  readColumn(cs, idCol).forEach((v, i) => {
+  // One read and one column write, instead of one setValue per customer.
+  const ids = readColumn(cs, idCol);
+  const vals = readColumn(cs, countCol);
+  const changed = [];
+  ids.forEach((v, i) => {
     const k = String(v);
-    if (wanted[k]) cs.getRange(i + 2, countCol + 1).setValue(counts[k] || 0);
+    if (!wanted[k]) return;
+    const fresh = counts[k] || 0;
+    if (Number(vals[i]) !== fresh) { vals[i] = fresh; changed.push(i); }
   });
+  if (changed.length) writeColumnChanges(cs, countCol, vals, changed);
 }
 
 function recalculateShipmentCount(customerID) {
@@ -1072,24 +1190,6 @@ function addAlias(body) {
   return jsonResponse({ result: 'alias_added', customer_id: body.customer_id, aliases: updated });
 }
 
-// ─── Update packed date ────────────────────────────────────────────────────────
-
-function updatePackedDate(body) {
-  const sheet = getOrdersSheet();
-  const rowIndex = findOrderRow(sheet, body.order_id);
-  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
-
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const packedCol = headers.indexOf('Packed Date') + 1;
-
-  const newValue = body.packed_date || nowISO();
-  const oldValue = sheet.getRange(rowIndex, packedCol).getValue();
-  sheet.getRange(rowIndex, packedCol).setValue(newValue);
-  logAudit('update_packed_date', 'Order', body.order_id, 'Packed Date', oldValue, newValue);
-
-  return jsonResponse({ result: 'packed_date_updated', order_id: body.order_id });
-}
-
 // ─── Migrate order ──────────────────────────────────────────────────────────────
 
 // migrateOrder() removed: it was dead code (no frontend caller) and
@@ -1112,6 +1212,7 @@ function stampCustomerIDs() {
   let notFound = 0;
   let skippedFuzzy = 0;
   let notFoundList = [];
+  const stampChanges = [];   // written in one column write below
 
   // This runs after EVERY alias confirmation and sweeps every unresolved
   // order in the sheet. It previously accepted 'fuzzy' matches and wrote
@@ -1127,7 +1228,7 @@ function stampCustomerIDs() {
     const resolution = findCustomerByUsername(customers, username);
 
     if (resolution && resolution.confidence !== 'fuzzy') {
-      ordersSheet.getRange(order._rowIndex, customerIDCol).setValue(resolution.customer['Customer ID']);
+      stampChanges.push({ row: order._rowIndex, id: resolution.customer['Customer ID'] });
       stamped++;
     } else if (resolution) {
       skippedFuzzy++;
@@ -1137,6 +1238,11 @@ function stampCustomerIDs() {
     }
   });
 
+  if (stampChanges.length && customerIDCol > 0) {
+    const colVals = ordersSheet.getRange(2, customerIDCol, ordersSheet.getLastRow() - 1, 1).getValues();
+    stampChanges.forEach(c => { colVals[c.row - 2][0] = c.id; });
+    ordersSheet.getRange(2, customerIDCol, colVals.length, 1).setValues(colVals);
+  }
   Logger.log(`Stamped: ${stamped} | Fuzzy skipped: ${skippedFuzzy} | Not found: ${notFound}`);
   Logger.log(`Not found list: ${[...new Set(notFoundList)].join(', ')}`);
 }
@@ -1144,6 +1250,12 @@ function stampCustomerIDs() {
 // ─── Update / delete order ──────────────────────────────────────────────────────
 
 function updateOrder(body) {
+  // Staff never receive prices (HIDE_PRICES_FROM_STAFF), so a price sent by
+  // a staff token is never a deliberate edit -- drop it rather than let a
+  // blank or 0 overwrite the real amount.
+  if (HIDE_PRICES_FROM_STAFF && _currentIdentity && _currentIdentity.role !== 'admin' && body.fields) {
+    STAFF_HIDDEN_ORDER_FIELDS.forEach(f => { delete body.fields[f]; });
+  }
   const sheet = getOrdersSheet();
   const rowIndex = findOrderRow(sheet, body.order_id);
   if (!rowIndex) return jsonResponse({ error: 'Order not found' });
@@ -1373,7 +1485,9 @@ function recalculateAllShipmentCounts() {
 function nightlyBackup() {
   const folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);
   const stamp = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy-MM-dd');
-  [['Orders', ORDERS_SHEET_ID], ['Customers', CUSTOMERS_SHEET_ID]].forEach(([name, id]) => {
+  // QC and the audit log added 2026-10-19: QC photos/links are the packing
+  // evidence and were previously not backed up at all.
+  [['Orders', ORDERS_SHEET_ID], ['Customers', CUSTOMERS_SHEET_ID], ['QC', QC_SHEET_ID], ['AuditLog', AUDIT_LOG_SHEET_ID]].forEach(([name, id]) => {
     try {
       DriveApp.getFileById(id).makeCopy('bk_' + stamp + '_' + name, folder);
     } catch (err) {
@@ -1403,23 +1517,68 @@ function nightlyBackup() {
 // equivalent) and API_TOKEN_SERVICE_STAFF (reserved for a future
 // staff-level automated tool) are unaffected by this and checked
 // separately below, since those aren't a human's personal password.
-function getIdentity(t) {
-  if (!t) return null;
-  const props = PropertiesService.getScriptProperties().getProperties();
+// ─── Credentials ───────────────────────────────────────────────────────
+// USER_<NAME> = "<password>|<role>" (legacy plain text, still accepted so
+// Vel can always type a new password straight into Script Properties) or
+// "sha256$<salt>$<hex>|<role>" (written automatically on first login).
+function hashPassword(salt, pw) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + pw, Utilities.Charset.UTF_8);
+  return bytes.map(b => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+}
 
+function parseUserProp(v) {
+  const parts = String(v || '').split('|');
+  const cred = parts[0] || '';
+  const role = parts[1] === 'admin' ? 'admin' : 'staff';
+  if (cred.indexOf('sha256$') === 0) {
+    const bits = cred.split('$');
+    return { role: role, salt: bits[1] || '', hash: bits[2] || '' };
+  }
+  return { role: role, password: cred };
+}
+
+function passwordMatches(parsed, t) {
+  if (!parsed || !t) return false;
+  if (parsed.hash) return hashPassword(parsed.salt, t) === parsed.hash;
+  return !!parsed.password && parsed.password === t;
+}
+
+// Finds which USER_ a password belongs to. Returns { key, name, role, parsed } or null.
+function findUserByPassword(props, t) {
   for (const key in props) {
     if (key.indexOf('USER_') !== 0) continue;
-    const parts = String(props[key] || '').split('|');
-    const password = parts[0];
-    const role = parts[1];
-    if (password && t === password) {
-      const name = key.slice('USER_'.length);
-      return { name: name, role: role === 'admin' ? 'admin' : 'staff' };
-    }
+    const parsed = parseUserProp(props[key]);
+    if (passwordMatches(parsed, t)) return { key: key, name: key.slice(5), role: parsed.role, parsed: parsed };
+  }
+  return null;
+}
+
+function getIdentity(t) {
+  if (!t) return null;
+  t = String(t);
+  const props = PropertiesService.getScriptProperties().getProperties();
+
+  // 1. Session tokens (issued by the login action). Checked first: after
+  //    the 2026-10-19 change this is what every browser sends instead of
+  //    the raw password.
+  if (t.indexOf('sess_') === 0) {
+    const sess = props['SESS_' + t];
+    if (!sess) return null;
+    const p = sess.split('|');               // name|role|expiresMs
+    if (Number(p[2]) < Date.now()) return null;
+    return { name: p[0], role: p[1] === 'admin' ? 'admin' : 'staff', session: true };
   }
 
+  // 2. Personal passwords (legacy direct use, kept during migration).
+  if (ALLOW_PASSWORD_AS_TOKEN) {
+    const user = findUserByPassword(props, t);
+    if (user) return { name: user.name, role: user.role };
+  }
+
+  // 3. Machine identities. role stays 'admin' so existing requireAdmin()
+  //    checks keep working; SERVICE_ALLOW narrows what each may call.
   const serviceAdmin = props['API_TOKEN_SERVICE'];
-  if (serviceAdmin && t === serviceAdmin) return { name: 'Sistema (VPS)', role: 'admin' };
+  if (serviceAdmin && t === serviceAdmin) return { name: 'Sistema (VPS)', role: 'admin', service: 'vps' };
 
   const serviceStaff = props['API_TOKEN_SERVICE_STAFF'];
   if (serviceStaff && t === serviceStaff) return { name: 'Sistema (staff)', role: 'staff' };
@@ -1429,9 +1588,78 @@ function getIdentity(t) {
   // the audit log can tell "a Shopify order came in automatically" apart
   // from "the VPS ran a TikTok import."
   const serviceShopify = props['API_TOKEN_SERVICE_SHOPIFY'];
-  if (serviceShopify && t === serviceShopify) return { name: 'Sistema (Shopify webhook)', role: 'admin' };
+  if (serviceShopify && t === serviceShopify) return { name: 'Sistema (Shopify webhook)', role: 'admin', service: 'shopify' };
 
   return null;
+}
+
+// true if this identity may call `action`. Humans: always true here (role
+// checks happen per action). Machines: must be on their SERVICE_ALLOW
+// list; violations are logged, and only blocked once ENFORCE is on.
+function serviceActionAllowed(identity, action) {
+  if (!identity || !identity.service) return true;
+  const allow = SERVICE_ALLOW[identity.service] || [];
+  if (allow.indexOf(action) >= 0) return true;
+  Logger.log('service_action_outside_allowlist: ' + identity.service + ' -> ' + action);
+  try { logAuditEvent('service_action_outside_allowlist', 'Service', identity.service, { action: action, enforced: SERVICE_ALLOWLIST_ENFORCE }); } catch (e) {}
+  return !SERVICE_ALLOWLIST_ENFORCE;
+}
+
+// ─── Login sessions ────────────────────────────────────────────────────
+// POST { action:'login', password } -> { token, role, name, expires }.
+// The browser stores the session token, never the password. On the first
+// successful login a plain-text password is upgraded to a salted hash.
+function loginAction(body) {
+  const pw = String(body.password || '');
+  if (!pw) return jsonResponse({ error: 'unauthorized' });
+  // Simple brake on password guessing: 20 failed logins in 10 minutes
+  // pauses logins for everyone until the window passes.
+  const cache = CacheService.getScriptCache();
+  const fails = Number(cache.get('login_fails') || 0);
+  if (fails >= 20) return jsonResponse({ error: 'Demasiados intentos fallidos. Espera 10 minutos.' });
+  const store = PropertiesService.getScriptProperties();
+  const props = store.getProperties();
+  const user = findUserByPassword(props, pw);
+  if (!user) { cache.put('login_fails', String(fails + 1), 600); return jsonResponse({ error: 'unauthorized' }); }
+
+  if (!user.parsed.hash) {
+    const salt = Utilities.getUuid().replace(/-/g, '').slice(0, 16);
+    store.setProperty(user.key, 'sha256$' + salt + '$' + hashPassword(salt, pw) + '|' + user.role);
+  }
+
+  // Drop expired sessions so Script Properties never fills up.
+  const now = Date.now();
+  Object.keys(props).forEach(k => {
+    if (k.indexOf('SESS_') !== 0) return;
+    const exp = Number(String(props[k]).split('|')[2]);
+    if (!exp || exp < now) store.deleteProperty(k);
+  });
+
+  const token = 'sess_' + Utilities.getUuid().replace(/-/g, '');
+  const expires = now + SESSION_DAYS * 86400000;
+  store.setProperty('SESS_' + token, user.name + '|' + user.role + '|' + expires);
+
+  _currentIdentity = { name: user.name, role: user.role };
+  logAuditEvent('login', 'User', user.name, {});
+  flushAudit();
+  return jsonResponse({ token: token, role: user.role, name: user.name, expires: new Date(expires).toISOString() });
+}
+
+function logoutAction(body) {
+  const t = String(body.token || '');
+  if (t.indexOf('sess_') === 0) PropertiesService.getScriptProperties().deleteProperty('SESS_' + t);
+  return jsonResponse({ result: 'logged_out' });
+}
+
+// Deletes every session belonging to one person (password change, lost phone).
+function revokeSessionsFor(personName) {
+  const store = PropertiesService.getScriptProperties();
+  const props = store.getProperties();
+  let n = 0;
+  Object.keys(props).forEach(k => {
+    if (k.indexOf('SESS_') === 0 && String(props[k]).split('|')[0] === personName) { store.deleteProperty(k); n++; }
+  });
+  return n;
 }
 
 // Old role-only shape, kept so every existing doGet/doPost action check
@@ -1459,23 +1687,29 @@ function requireAdmin(role) {
 // password" action writes a new value but this read side never echoes
 // it back, so a password can't leak just by opening the modal.
 function getRolesAction(e) {
-  const props = PropertiesService.getScriptProperties();
-  return jsonResponse({
-    roles: [
-      {
-        id: 'admin',
-        label: 'Administrador (tú)',
-        description: 'Acceso completo: Inicio, Análisis, Ajustes, y todo lo demás.',
-        password_set: !!props.getProperty('API_TOKEN_ADMIN'),
-      },
-      {
-        id: 'staff',
-        label: 'Equipo',
-        description: 'Pedidos, Empacar, Calidad, Importar. Sin acceso a Inicio, Análisis ni Ajustes.',
-        password_set: !!props.getProperty('API_TOKEN_STAFF'),
-      },
-    ],
+  // Lists real people (USER_<NAME> properties). Never returns a password or
+  // hash. The old version read API_TOKEN_ADMIN / API_TOKEN_STAFF, which no
+  // longer exist since per-person logins replaced them.
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const now = Date.now();
+  const sessions = {};
+  Object.keys(props).forEach(k => {
+    if (k.indexOf('SESS_') !== 0) return;
+    const p = String(props[k]).split('|');
+    if (Number(p[2]) > now) sessions[p[0]] = (sessions[p[0]] || 0) + 1;
   });
+  const users = Object.keys(props).filter(k => k.indexOf('USER_') === 0).map(k => {
+    const parsed = parseUserProp(props[k]);
+    const name = k.slice(5);
+    return {
+      name: name,
+      role: parsed.role,
+      password_set: !!(parsed.hash || parsed.password),
+      hashed: !!parsed.hash,
+      active_sessions: sessions[name] || 0,
+    };
+  }).sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : (a.role === 'admin' ? -1 : 1)));
+  return jsonResponse({ users: users });
 }
 
 // Only the staff password can be changed from the website. The admin
@@ -1505,9 +1739,25 @@ function updateRolePasswordAction(body) {
     return jsonResponse({ error: 'La contraseña de administrador solo se puede cambiar directamente en Apps Script.' });
   }
 
-  props.setProperty(propKey, newPassword + '|' + existingRole);
-  logAuditEvent('update_role_password', 'User', personName, {});
-  return jsonResponse({ result: 'done' });
+  if (newPassword.length < 4) return jsonResponse({ error: 'La contraseña debe tener al menos 4 caracteres.' });
+  // Two people with the same password would log in as whoever is listed
+  // first -- refuse it.
+  const clash = findUserByPassword(props.getProperties(), newPassword);
+  if (clash && clash.key !== propKey) return jsonResponse({ error: 'Esa contraseña ya la usa otra persona. Elige otra.' });
+
+  const salt = Utilities.getUuid().replace(/-/g, '').slice(0, 16);
+  props.setProperty(propKey, 'sha256$' + salt + '$' + hashPassword(salt, newPassword) + '|' + existingRole);
+  const revoked = revokeSessionsFor(personName);
+  logAuditEvent('update_role_password', 'User', personName, { sessions_revoked: revoked });
+  return jsonResponse({ result: 'done', sessions_revoked: revoked });
+}
+
+function revokeUserSessionsAction(body) {
+  const personName = String(body.person_name || '').trim().toUpperCase();
+  if (!personName) return jsonResponse({ error: 'person_name es obligatorio.' });
+  const n = revokeSessionsFor(personName);
+  logAuditEvent('revoke_user_sessions', 'User', personName, { sessions_revoked: n });
+  return jsonResponse({ result: 'done', sessions_revoked: n });
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // TIKTOK IMPORT
@@ -1515,6 +1765,7 @@ function updateRolePasswordAction(body) {
 
 function importTikTokOrders(body) {
   const orders = getOrdersSheet();
+  ensureHeader(orders, 'Order Date');   // real platform order time (see FIX_LOG 2.1)
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
 
@@ -1593,6 +1844,8 @@ function importTikTokOrders(body) {
   }
 
   const rows = [], results = [], unresolved = [], allImportHistory = [];
+  // created_time arrives raw from the VPS; decide day/month order once per batch.
+  const createdDayFirst = detectDayFirst((body.shipments || []).map(s => s.created_time));
   let customersDirty = false;
 
   (body.shipments || []).forEach(s => {
@@ -1665,6 +1918,8 @@ function importTikTokOrders(body) {
     row[oh.indexOf('Price')] = Number(s.price) || 0;
     row[oh.indexOf('Created Date')] = nowISO();
     row[oh.indexOf('Linked Shipment')] = tid;
+    const orderDate = parseTikTokDateTime(s.created_time, createdDayFirst);
+    if (oh.indexOf('Order Date') >= 0) row[oh.indexOf('Order Date')] = toISOorEmpty(orderDate);
 
     // ─── Populate the 30 product slots from resolved line items ─────
     const lineItems = s.line_items || [];
@@ -1677,9 +1932,15 @@ function importTikTokOrders(body) {
       if (slot.qtyCol >= 0) row[slot.qtyCol] = Number(li.qty) || 0;
     }
 
+    if (lineItems.length > PRODUCT_SLOTS && oh.indexOf('Notes') >= 0) {
+      row[oh.indexOf('Notes')] = '⚠ Más de ' + PRODUCT_SLOTS + ' productos — ver TikTok Import History';
+    }
+
     rows.push(row);
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
-    logAuditEvent('import_tiktok_order', 'Order', row[oh.indexOf('Order ID')], { tracking_id: tid, channel: 'TikTok' });
+    logAuditEvent('import_tiktok_order', 'Order', row[oh.indexOf('Order ID')], {
+      tracking_id: tid, channel: 'TikTok', requested_by: body.requested_by || '',
+    });
   });
 
   // Duplicates never got a results.push inside the main loop above (they
@@ -1817,6 +2078,7 @@ function getUploadSignature(e) {
   const p = PropertiesService.getScriptProperties();
   const timestamp = Math.floor(Date.now() / 1000);
   const folder = (e.parameter.folder || 'velpapier/qc').replace(/[^a-z0-9/_-]/gi, '');
+  if (UPLOAD_FOLDERS.indexOf(folder) < 0) return jsonResponse({ error: 'Carpeta de fotos no permitida: ' + folder });
   const secret = p.getProperty('CLOUDINARY_API_SECRET');
   const toSign = 'folder=' + folder + '&timestamp=' + timestamp + secret;
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_1, toSign);
@@ -1926,7 +2188,9 @@ function saveQC(body) {
       vals = vals.filter(v => v !== removeUrl);
       while (vals.length < 5) vals.push('');
     }
-    if (addUrl) {
+    // Skip a URL that's already in a slot: a retried upload call must
+    // never store the same photo twice.
+    if (addUrl && vals.indexOf(addUrl) < 0) {
       const emptyIdx = vals.indexOf('');
       if (emptyIdx >= 0) vals[emptyIdx] = addUrl;
       // if no empty slot (already 5), silently ignore — UI already blocks this
@@ -1986,6 +2250,9 @@ function saveQC(body) {
     set('Status', 'Enviado');
   }
 
+  // A single-order shipment writes a pure 18-digit TikTok ID here; without
+  // text format Sheets stores it as a number and the last digits are lost.
+  forceTextFormat(qcSheet, h, QC_ID_COLUMNS, row, 1);
   qcSheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
 
   const result = {
@@ -2151,162 +2418,10 @@ function findRowByColumn(sheet, columnLetters, value) {
   return null;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// PACKING SESSIONS
-// ═══════════════════════════════════════════════════════════════════════════
+// PACKING SESSIONS: removed 2026-10-19 (no page called start/end/update_session,
+// sessions or active_session since the Sessions feature was retired). The
+// 'Session ID' column on the QC sheet is kept and simply stays blank.
 
-function getSessionsSheet() {
-  return SpreadsheetApp.openById(QC_SHEET_ID).getSheetByName('Sessions');
-}
-
-// Returns the currently open session, if any, or null.
-function getActiveSession(e) {
-  const sheet = getSessionsSheet();
-  const rows = sheetToObjects(sheet);
-  const active = rows.find(r => r['Status'] === 'Activa');
-  return jsonResponse({ session: active || null });
-}
-
-// List all sessions, most recent first. Each includes its own summary stats
-// (recomputed live, not cached) so history stays accurate even if QC rows
-// are edited after a session ends.
-function getSessions(e) {
-  const sheet = getSessionsSheet();
-  const rows = sheetToObjects(sheet);
-  rows.sort((a, b) => String(b['Start Time']).localeCompare(String(a['Start Time'])));
-  return jsonResponse({ records: rows });
-}
-
-// Start a new session. Fails if one is already active (only one at a time).
-function startSession(body) {
-  // The script lock is now taken centrally by withWriteLock() in doPost.
-  // Re-acquiring it here would deadlock this execution against its own
-  // outer hold, so the inner lock has been removed. The guarantee it
-  // provided (no two devices creating duplicate sessions) is unchanged.
-  try {
-    const sheet = getSessionsSheet();
-    const rows = sheetToObjects(sheet);
-    const existingActive = rows.find(r => r['Status'] === 'Activa');
-    if (existingActive) {
-      return jsonResponse({
-        result: 'already_active',
-        session_id: existingActive['Session ID'],
-        session: existingActive
-      });
-    }
-
-    const todayStr = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyyMMdd');
-    const todayCount = rows.filter(r => String(r['Session ID']).startsWith('SES-' + todayStr)).length;
-    const sessionId = 'SES-' + todayStr + '-' + (todayCount + 1);
-
-    sheet.appendRow([sessionId, nowISO(), '', 'Activa', '', '', '']);
-    logAuditEvent('start_session', 'Session', sessionId, {});
-
-    return jsonResponse({ result: 'started', session_id: sessionId });
-  } finally {
-    // no-op: the script lock is released by withWriteLock() in doPost.
-  }
-}
-
-// End the active session: stamps End Time, computes Participants /
-// Total Packages / Total Items from every linked QC row, flips to Finalizada.
-// Live-update the Participants column while a session is running, so every
-// device shows the same checked-packer list instead of each device having
-// its own local copy that only gets "decided" by whichever device ends it.
-function updateSessionParticipants(body) {
-  if (!body.session_id) return jsonResponse({ error: 'session_id es obligatorio' });
-  const sheet = getSessionsSheet();
-  const row = findRowByColumn(sheet, 'A', body.session_id);
-  if (!row) return jsonResponse({ error: 'Sesión no encontrada' });
-
-  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const idx = h.indexOf('Participants') + 1;
-  if (idx > 0) {
-    sheet.getRange(row, idx).setValue((body.participants || []).join(', '));
-  }
-  return jsonResponse({ result: 'updated' });
-}
-
-function endSession(body) {
-  if (!body.session_id) return jsonResponse({ error: 'session_id es obligatorio' });
-
-  const sheet = getSessionsSheet();
-  const row = findRowByColumn(sheet, 'A', body.session_id);
-  if (!row) return jsonResponse({ error: 'Sesión no encontrada' });
-
-  const qcSheet = getQCSheet();
-  const qcRows = sheetToObjects(qcSheet).filter(r => r['Session ID'] === body.session_id);
-
-  const packers = [...new Set(qcRows.map(r => r['Packer']).filter(Boolean))];
-  const totalPackages = qcRows.length;
-
-  // Item count: parse "Nx " prefixes from linked orders' Products field where
-  // available (TikTok convention). Falls back to 1 item per order id if the
-  // Products text can't be parsed (e.g. legacy Shopify orders).
-  const ordersSheet = getOrdersSheet();
-  const allOrders = sheetToObjects(ordersSheet);
-  let totalItems = 0;
-  qcRows.forEach(qcRow => {
-    const allIds = [
-      ...String(qcRow['TikTok Order IDs']  || '').split(' + '),
-      ...String(qcRow['Shopify Order IDs'] || '').split(' + '),
-      ...String(qcRow['Manual Order IDs']  || '').split(' + '),
-    ].filter(Boolean);
-    allIds.forEach(id => {
-      // Order ID can be a " + "-joined combined-shipment string; an exact
-      // match against a single component id never hits in that case (same
-      // bug found in Calidad's order lookup and the backfill status sync).
-      const order = allOrders.find(o => String(o['Order ID'] || '').split(' + ').includes(id));
-      if (!order || !order['Products']) { totalItems += 1; return; }
-      const lines = String(order['Products']).split(/[\n;]+/).map(l => l.trim()).filter(Boolean);
-      if (lines.length === 0) { totalItems += 1; return; }
-      lines.forEach(line => {
-        const m = line.match(/^(\d+)\s*x\s*/i);
-        totalItems += m ? parseInt(m[1], 10) : 1;
-      });
-    });
-  });
-
-  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rowVals = sheet.getRange(row, 1, 1, h.length).getValues()[0];
-  const set = (col, val) => {
-    const idx = h.indexOf(col);
-    if (idx >= 0) rowVals[idx] = val;
-  };
-
-  // Merge auto-detected packers with any manually-added participants
-  // Merge auto-detected packers with the live Participants field (kept in
-  // sync by every device via update_session_participants as checkboxes are
-  // toggled — this is the one true list, not just whichever device happens
-  // to click "end session").
-  const liveParticipants = String(rowVals[h.indexOf('Participants')] || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-  const manualParticipants = (body.participants || []).filter(Boolean);
-  const allParticipants = [...new Set([...packers, ...liveParticipants, ...manualParticipants])];
-
-  set('End Time', nowISO());
-  set('Status', 'Finalizada');
-  set('Participants', allParticipants.join(', '));
-  set('Total Packages', totalPackages);
-  set('Total Items', totalItems);
-  const startMs = Date.parse(rowVals[h.indexOf('Start Time')]);
-  if (!isNaN(startMs) && h.indexOf('Duration (min)') >= 0) {
-    set('Duration (min)', Math.round((Date.now() - startMs) / 60000));
-  }
-  sheet.getRange(row, 1, 1, h.length).setValues([rowVals]);
-  logAuditEvent('end_session', 'Session', body.session_id, {
-    participants: allParticipants, total_packages: totalPackages, total_items: totalItems,
-  });
-
-  return jsonResponse({
-    result: 'ended',
-    session_id: body.session_id,
-    participants: allParticipants,
-    total_packages: totalPackages,
-    total_items: totalItems,
-    start_time: rowVals[h.indexOf('Start Time')],
-  });
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // PRODUCT CATALOG — accessors + resolution logic
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2759,6 +2874,18 @@ function logShopifyMatch(incoming, resolution, shopifyOrderId, orderName) {
   return row[0]; // return the Match ID
 }
 
+// Shopify financial_status -> dashboard Status. Absent -> 'Pagado' so the
+// webhook keeps working exactly as before until n8n sends the field.
+// 'CANCELLED' is an internal marker: never written as a Status.
+function shopifyStatusFromFinancial(fs) {
+  const f = String(fs || '').toLowerCase();
+  if (!f) return 'Pagado';
+  if (f === 'paid' || f === 'partially_refunded') return 'Pagado';
+  if (f === 'pending' || f === 'authorized' || f === 'partially_paid') return 'No Pagado';
+  if (f === 'refunded' || f === 'voided' || f === 'expired') return 'CANCELLED';
+  return 'Pagado';
+}
+
 function importShopifyOrder(body) {
   // The script lock is now taken centrally by withWriteLock() in doPost,
   // which returns its own "servidor ocupado" error if the wait times out.
@@ -2768,18 +2895,49 @@ function importShopifyOrder(body) {
     const shopifyOrderId = String(body.shopify_order_id || '');
     const orderName = body.order_name || '';
 
-        const ordersSheet = getOrdersSheet();
+    const ordersSheet = getOrdersSheet();
+    ensureHeader(ordersSheet, 'Order Date');
     const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+    const financial = String(body.financial_status || '').toLowerCase();
+    const targetStatus = shopifyStatusFromFinancial(financial);
 
     // ─── Dedup check: has this Shopify order already been imported? ───
+    // A repeat delivery (orders/paid, orders/updated, or a webhook retry)
+    // may carry a newer payment state: move Status FORWARD only, and flag
+    // refunds/voids in Notes without touching Status.
     const existing = sheetToObjects(ordersSheet);
     const dup = existing.find(o => String(o['Shopify Order ID'] || '') === shopifyOrderId);
     if (dup) {
+      if (financial) {
+        const statusCol = oh.indexOf('Status');
+        const notesCol = oh.indexOf('Notes');
+        if (targetStatus === 'CANCELLED') {
+          const marker = '⚠ Shopify: ' + financial;
+          const before = String(dup['Notes'] || '');
+          if (notesCol >= 0 && before.indexOf(marker) < 0) {
+            const after = (before ? before + ' | ' : '') + marker + ' (' + Utilities.formatDate(new Date(), MX_TZ, 'dd/MM/yyyy') + ')';
+            ordersSheet.getRange(dup._rowIndex, notesCol + 1).setValue(after);
+            logAudit('shopify_status_sync', 'Order', dup['Order ID'], 'Notes', before, after);
+          }
+          return jsonResponse({ result: 'duplicate_flagged', financial_status: financial, order_id: dup['Order ID'] });
+        }
+        const current = String(dup['Status'] || 'No Pagado');
+        if (statusCol >= 0 && (STATUS_RANK[targetStatus] || 0) > (STATUS_RANK[current] || 0)) {
+          ordersSheet.getRange(dup._rowIndex, statusCol + 1).setValue(targetStatus);
+          logAudit('shopify_status_sync', 'Order', dup['Order ID'], 'Status', current, targetStatus);
+          return jsonResponse({ result: 'status_updated', from: current, to: targetStatus, order_id: dup['Order ID'] });
+        }
+      }
       return jsonResponse({
         result: 'duplicate',
-        message: 'This Shopify Order ID has already been imported.',
+        message: 'Este pedido de Shopify ya estaba importado.',
         existing_row: dup,
       });
+    }
+
+    // A refunded / voided order that was never imported has nothing to pack.
+    if (targetStatus === 'CANCELLED') {
+      return jsonResponse({ result: 'skipped_cancelled', financial_status: financial, shopify_order_id: shopifyOrderId });
     }
 
     // ─── Build the "incoming" shape resolveShopifyCustomer() expects ──
@@ -2850,7 +3008,11 @@ function importShopifyOrder(body) {
       ? (customerDisplayName(customerID) || incoming.username || orderName || '')
       : (incoming.username || '');
     row[oh.indexOf('Channel')] = 'Shopify';
-    row[oh.indexOf('Status')] = 'Pagado';
+    row[oh.indexOf('Status')] = targetStatus;   // was hardcoded 'Pagado'
+    if (oh.indexOf('Order Date') >= 0) {
+      const od = body.created_at ? new Date(body.created_at) : null;
+      row[oh.indexOf('Order Date')] = od && !isNaN(od.getTime()) ? od.toISOString() : nowISO();
+    }
     row[oh.indexOf('Products')] = body.products || '';
     row[oh.indexOf('Price')] = Number(body.price) || 0;
     row[oh.indexOf('Created Date')] = nowISO();
@@ -2874,7 +3036,10 @@ function importShopifyOrder(body) {
       if (qtyCol >= 0) row[qtyCol] = Number(li.qty) || 0;
     }
 
-      ordersSheet.appendRow(row);
+    if (allLineItems.length > PRODUCT_SLOTS && oh.indexOf('Notes') >= 0) {
+      row[oh.indexOf('Notes')] = '⚠ Más de ' + PRODUCT_SLOTS + ' productos — ver el pedido en Shopify';
+    }
+    ordersSheet.appendRow(row);
     logAuditEvent('import_shopify_order', 'Order', row[oh.indexOf('Order ID')], {
       shopify_order_id: shopifyOrderId, order_name: orderName, tier: resolution.tier,
     });
@@ -3427,6 +3592,8 @@ function runTikTokBackfill(records, dryRun) {
 // figures across the shipment.
 function groupBackfillShipments(records) {
   const groups = {};
+  // Decide day/month order once for the whole file (FIX_LOG 0.2).
+  const dayFirst = detectDayFirst(records.map(r => r.created_time));
 
   records.forEach(rec => {
     const targetStatus = backfillTargetStatus(rec.order_substatus);
@@ -3447,7 +3614,7 @@ function groupBackfillShipments(records) {
         line_items:      [],
         price_by_order:  {},
         best_status:     'No Pagado',
-        created_time:    '',
+        created_ms:      0,
       };
     }
     const g = groups[tid];
@@ -3461,8 +3628,11 @@ function groupBackfillShipments(records) {
     // Earliest Created Time across the shipment's rows, as a plain string
     // compare -- TikTok's format sorts correctly lexicographically within a
     // single export, and this is only ever used as a display/record date.
-    const ct = String(rec.created_time || '').trim();
-    if (ct && (!g.created_time || ct < g.created_time)) g.created_time = ct;
+    // Earliest real Created Time across the shipment's rows, compared as
+    // dates. (Was a plain string compare, which picks the wrong "earliest"
+    // across months for day-first text.)
+    const ctDate = parseTikTokDateTime(rec.created_time, dayFirst);
+    if (ctDate && (!g.created_ms || ctDate.getTime() < g.created_ms)) g.created_ms = ctDate.getTime();
 
     const qtyRaw = String(rec.quantity || '').trim();
     const qty = /^\d+$/.test(qtyRaw) ? parseInt(qtyRaw, 10) : 1;
@@ -3519,10 +3689,11 @@ function groupBackfillShipments(records) {
 function createMissingOrdersFromBackfill(records, dryRun) {
   const shipments = groupBackfillShipments(records);
   if (!shipments.length) {
-    return { orders_created: 0, customers_created: 0, orders_skipped_existing: 0 };
+    return { orders_created: 0, customers_created: 0, orders_skipped_existing: 0, fuzzy_count: 0, fuzzy_review: [] };
   }
 
   const orders = getOrdersSheet();
+  if (!dryRun) ensureHeader(orders, 'Order Date');
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
   const componentIndex = buildOrderIdComponentIndex(orders, oh);
 
@@ -3546,10 +3717,15 @@ function createMissingOrdersFromBackfill(records, dryRun) {
   });
 
   if (!toCreate.length) {
-    return { orders_created: 0, customers_created: 0, orders_skipped_existing: skippedExisting };
+    return { orders_created: 0, customers_created: 0, orders_skipped_existing: skippedExisting, fuzzy_count: 0, fuzzy_review: [] };
   }
 
-  // ─── Resolve customers (username-only: exact -> alias -> fuzzy) ─────────
+  // ─── Resolve customers (username-only: exact or alias ONLY) ───────────────
+  // A 'fuzzy' hit (prefix-minus-one-character) is a guess: existing "maria"
+  // would capture "mariana.art". Same rule as createOrder() and
+  // stampCustomerIDs(): never written unattended. Fuzzy hits are left
+  // unlinked (no stub either -- that would duplicate the near-match) and
+  // returned in fuzzy_review for a human to confirm.
   const customersSheet = getCustomersSheet();
   const customers = sheetToObjects(customersSheet);
 
@@ -3564,7 +3740,8 @@ function createMissingOrdersFromBackfill(records, dryRun) {
 
   const newCustomerRows = [];
   const newCustomerLog = [];
-  const resolvedByUsername = {};   // normalized username -> Customer ID
+  const resolvedByUsername = {};   // normalized username -> Customer ID ('' = left unlinked)
+  const fuzzyReview = [];
 
   toCreate.forEach(s => {
     if (!s.username) { s.customer_id = ''; return; }
@@ -3574,9 +3751,19 @@ function createMissingOrdersFromBackfill(records, dryRun) {
       return;
     }
     const hit = findCustomerByUsername(customers, s.username);
-    if (hit && hit.customer && hit.customer['Customer ID']) {
+    if (hit && hit.customer && hit.customer['Customer ID'] && hit.confidence !== 'fuzzy') {
       s.customer_id = hit.customer['Customer ID'];
       resolvedByUsername[norm] = s.customer_id;
+      return;
+    }
+    if (hit && hit.confidence === 'fuzzy') {
+      s.customer_id = '';
+      resolvedByUsername[norm] = '';
+      fuzzyReview.push({
+        tracking_id: s.tracking_id, username: s.username,
+        suggested_customer_id: hit.customer['Customer ID'],
+        suggested_username: hit.customer['Primary Username'] || '',
+      });
       return;
     }
     // No match anywhere -- create a bare stub.
@@ -3598,6 +3785,8 @@ function createMissingOrdersFromBackfill(records, dryRun) {
       orders_created: toCreate.length,
       customers_created: newCustomerRows.length,
       orders_skipped_existing: skippedExisting,
+      fuzzy_count: fuzzyReview.length,
+      fuzzy_review: fuzzyReview.slice(0, 50),
     };
   }
 
@@ -3658,7 +3847,11 @@ function createMissingOrdersFromBackfill(records, dryRun) {
     row[oh.indexOf('Status')]           = s.best_status;
     row[oh.indexOf('Products')]         = s.products_str || '';
     row[oh.indexOf('Price')]            = Number(s.price) || 0;
-    row[oh.indexOf('Created Date')]     = s.created_time || nowISO();
+    // Created Date = when it entered the dashboard (same meaning as every
+    // other import path). The real TikTok order time goes to Order Date.
+    row[oh.indexOf('Created Date')]     = nowISO();
+    if (oh.indexOf('Order Date') >= 0) row[oh.indexOf('Order Date')] = s.created_ms ? new Date(s.created_ms).toISOString() : '';
+    if (lineItemsTooMany(s) && oh.indexOf('Notes') >= 0) row[oh.indexOf('Notes')] = '⚠ Más de 30 productos — ver TikTok Import History';
     row[oh.indexOf('Linked Shipment')]  = s.tracking_id;
 
     const lineItems = s.line_items || [];
@@ -3693,8 +3886,12 @@ function createMissingOrdersFromBackfill(records, dryRun) {
     orders_created:          rows.length,
     customers_created:       newCustomerRows.length,
     orders_skipped_existing: skippedExisting,
+    fuzzy_count:             fuzzyReview.length,
+    fuzzy_review:            fuzzyReview.slice(0, 50),
   };
 }
+
+function lineItemsTooMany(s) { return (s.line_items || []).length > 30; }
 
 // ─── ORDERS PASS: move EXISTING rows' status forward ───────────────────────
 // Called once per backfill commit, after runTikTokBackfill. Separate pass
@@ -5357,7 +5554,6 @@ function centerAlignAllSheets() {
     getCustomersSheet(),
     getQCSheet(),
     getShopifyMatchesSheet(),
-    getSessionsSheet(),
     getProductParentsSheet(),
     getProductVariantsSheet(),
     getCatalogSuggestionsSheet(),
@@ -5700,4 +5896,403 @@ function recomputeAllShipmentCounts() {
   Logger.log('Dropped to zero (had shipments before, none now): ' + zeroedCount);
   Logger.log('Customers with at least 1 shipment: ' +
     newVals.filter(r => r[0] > 0).length);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FIX-PACK 2026-10-19 — reconcile, health, Airtable QC import, triggers, tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Customer aggregates: the one authoritative recompute (FIX_LOG 2.4) ────
+// Shipment Count: buildShippedCountMap() (TikTok/Shopify, Enviado/Archivado).
+// First Order Date: earliest Order Date (fallback Created Date) per customer.
+// Only cells that actually differ are written. Runs nightly (installTriggers)
+// and on demand from Ajustes (action reconcile_customers).
+function reconcileCustomerAggregates() {
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  const counts = buildShippedCountMap(ordersSheet, oh);
+
+  const cidCol = readColumn(ordersSheet, oh.indexOf('Customer ID'));
+  const odCol = oh.indexOf('Order Date') >= 0 ? readColumn(ordersSheet, oh.indexOf('Order Date')) : [];
+  const cdCol = readColumn(ordersSheet, oh.indexOf('Created Date'));
+  const firstMap = {};
+  for (let i = 0; i < cidCol.length; i++) {
+    const k = String(cidCol[i] || '');
+    if (!k) continue;
+    const raw = odCol[i] || cdCol[i];
+    const d = raw instanceof Date ? raw : (raw ? new Date(raw) : null);
+    if (!d || isNaN(d.getTime())) continue;
+    if (!firstMap[k] || d.getTime() < firstMap[k]) firstMap[k] = d.getTime();
+  }
+
+  const cs = getCustomersSheet();
+  const ch = cs.getRange(1, 1, 1, cs.getLastColumn()).getValues()[0];
+  const iId = ch.indexOf('Customer ID'), iCount = ch.indexOf('Shipment Count'), iFirst = ch.indexOf('First Order Date');
+  if (iId < 0 || iCount < 0) return { error: 'Customers sheet is missing Customer ID or Shipment Count.' };
+
+  const ids = readColumn(cs, iId);
+  const countVals = readColumn(cs, iCount);
+  const firstVals = iFirst >= 0 ? readColumn(cs, iFirst) : [];
+  const countChanged = [], firstChanged = [];
+  let zeroed = 0;
+
+  ids.forEach((v, i) => {
+    const k = String(v || '');
+    if (!k) return;
+    const fresh = counts[k] || 0;
+    if (Number(countVals[i]) !== fresh) {
+      if (fresh === 0 && Number(countVals[i]) > 0) zeroed++;
+      countVals[i] = fresh; countChanged.push(i);
+    }
+    if (iFirst >= 0 && firstMap[k]) {
+      const cur = firstVals[i] instanceof Date ? firstVals[i].getTime() : (firstVals[i] ? Date.parse(firstVals[i]) : NaN);
+      if (isNaN(cur) || Math.abs(cur - firstMap[k]) > 60000) {
+        firstVals[i] = new Date(firstMap[k]).toISOString(); firstChanged.push(i);
+      }
+    }
+  });
+
+  writeColumnChanges(cs, iCount, countVals, countChanged);
+  if (iFirst >= 0) writeColumnChanges(cs, iFirst, firstVals, firstChanged);
+
+  const summary = {
+    customers: ids.length, shipment_counts_changed: countChanged.length,
+    dropped_to_zero: zeroed, first_order_dates_changed: firstChanged.length,
+    ran_at: nowISO(),
+  };
+  PropertiesService.getScriptProperties().setProperty('LAST_RECONCILE_AT', summary.ran_at);
+  Logger.log(JSON.stringify(summary));
+  return summary;
+}
+
+// ─── Public health probe (no data, booleans only) ───────────────────────
+function healthProbeAction() {
+  const out = { version: SCRIPT_VERSION, ok: true, sheets: {} };
+  const check = (label, fn) => { try { out.sheets[label] = !!fn(); } catch (e) { out.sheets[label] = false; } };
+  check('orders', getOrdersSheet);
+  check('customers', getCustomersSheet);
+  check('qc', getQCSheet);
+  check('history', getTikTokImportHistorySheet);
+  Object.keys(out.sheets).forEach(k => { if (!out.sheets[k]) out.ok = false; });
+  const p = PropertiesService.getScriptProperties();
+  out.last_reconcile_at = p.getProperty('LAST_RECONCILE_AT') || null;
+  out.last_health_at = p.getProperty('LAST_HEALTH_AT') || null;
+  return jsonResponse(out);
+}
+
+// ─── Orders index for machine jobs (Airtable QC import) ─────────────────
+// Slim: one entry per Orders row with the fields needed to resolve a
+// TikTok order ID to its shipment. No money fields.
+function ordersIndexAction(e) {
+  const sheet = getOrdersSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse({ records: [] });
+  const h = data[0];
+  const pick = ['Order ID', 'Tracking ID', 'Customer ID', 'Primary Username', 'Status', 'Channel', 'Packed Date'];
+  const idx = pick.map(c => h.indexOf(c));
+  const records = data.slice(1).map(r => {
+    const o = {};
+    pick.forEach((c, j) => { if (idx[j] >= 0) o[c] = r[idx[j]] instanceof Date ? r[idx[j]].toISOString() : String(r[idx[j]] || ''); });
+    return o;
+  });
+  return jsonResponse({ records: records });
+}
+
+// ─── Airtable QC history import (FIX_LOG 3.4) ───────────────────────────
+// Called in batches by vps-reference/airtable_qc_import.py with the VPS
+// service token. Body: { records: [...], dry_run?: bool }. Each record:
+// { airtable_key, tracking_id, tiktok_order_ids[], customer_id, username,
+//   packer, surtidor, timestamp (ISO), content[], box[], archived }.
+// Skips any Tracking ID that already has a QC row, so re-sending a batch is
+// safe. Fills Orders 'Packed Date' only where it is blank.
+function importQcHistoryAction(body) {
+  const recs = body.records || [];
+  const dryRun = !!body.dry_run;
+  const qcSheet = getQCSheet();
+  if (!dryRun) ensureHeader(qcSheet, 'Surtidor');
+  const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
+  const iTrk = h.indexOf('Tracking ID');
+
+  const existing = {};
+  readColumn(qcSheet, iTrk).forEach(v => { const t = String(v || '').trim(); if (t) existing[t] = true; });
+
+  const orders = getOrdersSheet();
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const iTrkO = oh.indexOf('Tracking ID'), iPacked = oh.indexOf('Packed Date');
+  const orderRowByTrk = {};
+  readColumn(orders, iTrkO).forEach((v, i) => { const t = String(v || '').trim(); if (t && orderRowByTrk[t] === undefined) orderRowByTrk[t] = i; });
+  const packedVals = iPacked >= 0 ? readColumn(orders, iPacked) : [];
+  const packedChanged = [];
+
+  let base = qcSheet.getLastRow();   // QC ID number base; incremented in memory
+  const rows = [], skipped = [], seen = {};
+
+  recs.forEach(r => {
+    const tid = String(r.tracking_id || '').trim();
+    if (!tid) { skipped.push({ key: r.airtable_key, reason: 'sin_guia' }); return; }
+    if (existing[tid] || seen[tid]) { skipped.push({ key: r.airtable_key, reason: 'qc_ya_existe' }); return; }
+    seen[tid] = true;
+    base++;
+    const row = new Array(h.length).fill('');
+    const set = (c, v) => { const i = h.indexOf(c); if (i >= 0) row[i] = v; };
+    set('QC ID', 'QC-' + String(base).padStart(4, '0') + '-' + Utilities.getUuid().slice(0, 4));
+    set('Tracking ID', tid);
+    set('TikTok Order IDs', (r.tiktok_order_ids || []).join(' + '));
+    set('Customer ID', r.customer_id || '');
+    set('Primary Username', r.username || '');
+    set('Packer', r.packer || '');
+    set('Surtidor', r.surtidor || '');
+    set('Timestamp', r.timestamp || '');
+    (r.content || []).slice(0, 5).forEach((u, i) => set('Content' + (i + 1), u));
+    (r.box || []).slice(0, 5).forEach((u, i) => set('Box' + (i + 1), u));
+    set('Status', 'Enviado');
+    set('Notes', r.archived ? 'Importado de Airtable (fotos archivadas)' : 'Importado de Airtable');
+    rows.push(row);
+
+    const oi = orderRowByTrk[tid];
+    if (iPacked >= 0 && r.timestamp && oi !== undefined && !packedVals[oi]) {
+      packedVals[oi] = r.timestamp; packedChanged.push(oi);
+    }
+  });
+
+  if (!dryRun && rows.length) {
+    const start = qcSheet.getLastRow() + 1;
+    forceTextFormat(qcSheet, h, QC_ID_COLUMNS, start, rows.length);
+    qcSheet.getRange(start, 1, rows.length, h.length).setValues(rows);
+  }
+  if (!dryRun && packedChanged.length) writeColumnChanges(orders, iPacked, packedVals, packedChanged);
+  if (!dryRun) {
+    logAuditEvent('import_qc_history', 'QC', '', {
+      source: 'airtable', inserted: rows.length, skipped: skipped.length, packed_date_filled: packedChanged.length,
+    });
+  }
+  return jsonResponse({
+    dry_run: dryRun, inserted: rows.length, packed_date_filled: packedChanged.length,
+    skipped: skipped.length, skipped_detail: skipped.slice(0, 100),
+  });
+}
+
+// ─── Data Health (FIX_LOG 7.1) ──────────────────────────────────────────
+// One function per check. runHealthChecks() runs them all, stores the
+// result in the 'Health' tab of the Orders spreadsheet, and returns it.
+// GET health_report reads the stored run; POST run_health_checks re-runs.
+const REQUIRED_HEADERS = {
+  'Orders': ['Order ID', 'Tracking ID', 'Customer ID', 'Primary Username', 'Channel', 'Status', 'Price', 'Created Date', 'Order Date', 'Packed Date'],
+  'QC': ['QC ID', 'Tracking ID', 'TikTok Order IDs', 'Packer', 'Timestamp', 'Content1', 'Box1', 'Status'],
+  'Customers': ['Customer ID', 'Primary Username', 'Aliases', 'Shipment Count', 'First Order Date'],
+};
+
+function runHealthChecks() {
+  const started = Date.now();
+  const orders = getOrdersSheet();
+  const odata = orders.getDataRange().getValues();
+  const oh = odata[0] || [];
+  const orows = odata.slice(1);
+  const col = name => oh.indexOf(name);
+  const qc = getQCSheet();
+  const qdata = qc.getDataRange().getValues();
+  const qh = qdata[0] || [];
+  const qrows = qdata.slice(1);
+  const cs = getCustomersSheet();
+  const cdata = cs.getDataRange().getValues();
+  const chh = cdata[0] || [];
+  const crows = cdata.slice(1);
+
+  const results = [];
+  const add = (id, label, severity, items) => results.push({
+    id: id, label: label, severity: items.length ? severity : 'ok', count: items.length, examples: items.slice(0, 10),
+  });
+
+  // 1. Missing headers
+  const missing = [];
+  [['Orders', oh], ['QC', qh], ['Customers', chh]].forEach(([name, hdr]) => {
+    (REQUIRED_HEADERS[name] || []).forEach(c => { if (hdr.indexOf(c) < 0) missing.push(name + ' → ' + c); });
+  });
+  add('missing_headers', 'Columnas que faltan o cambiaron de nombre', 'red', missing);
+
+  // 2. Duplicate component Order IDs / Tracking IDs in Orders
+  const seenId = {}, dupIds = [], seenTrk = {}, dupTrk = [];
+  orows.forEach((r, i) => {
+    String(r[col('Order ID')] || '').split('+').map(x => x.trim()).filter(Boolean).forEach(id => {
+      if (seenId[id] !== undefined) dupIds.push(id + ' (filas ' + (seenId[id] + 2) + ' y ' + (i + 2) + ')');
+      else seenId[id] = i;
+    });
+    const t = String(r[col('Tracking ID')] || '').trim();
+    if (t) { if (seenTrk[t] !== undefined) dupTrk.push(t + ' (filas ' + (seenTrk[t] + 2) + ' y ' + (i + 2) + ')'); else seenTrk[t] = i; }
+  });
+  add('dup_order_ids', 'Order ID repetido en más de un pedido', 'red', dupIds);
+  add('dup_tracking_ids', 'Guía repetida en más de un pedido', 'red', dupTrk);
+
+  // 3. IDs stored as numbers (precision already lost or about to be)
+  const numericIds = [];
+  orows.forEach((r, i) => {
+    ['Order ID', 'Tracking ID'].forEach(c => { const v = r[col(c)]; if (typeof v === 'number') numericIds.push('Orders fila ' + (i + 2) + ' ' + c); });
+  });
+  qrows.forEach((r, i) => {
+    const v = r[qh.indexOf('TikTok Order IDs')]; if (typeof v === 'number') numericIds.push('QC fila ' + (i + 2) + ' TikTok Order IDs');
+  });
+  add('numeric_ids', 'IDs guardados como número (pierden dígitos)', 'red', numericIds);
+
+  // 4. Shipped/delivered TikTok orders in History with no Orders row
+  const hist = getTikTokImportHistorySheet();
+  const hdata = hist.getDataRange().getValues();
+  const hh = hdata[0] || [];
+  const orphanSet = {};
+  hdata.slice(1).forEach(r => {
+    const oid = String(r[hh.indexOf('Order ID')] || '').replace(/\D/g, '');
+    const target = backfillTargetStatus(r[hh.indexOf('Order Substatus')]);
+    if (oid && target && seenId[oid] === undefined) orphanSet[oid] = r[hh.indexOf('Order Substatus')];
+  });
+  add('history_orphans', 'Pedidos enviados en TikTok que no están en Orders', 'red',
+    Object.keys(orphanSet).map(k => k + ' (' + orphanSet[k] + ')'));
+
+  // 5. Stored Shipment Count vs computed
+  const counts = buildShippedCountMap(orders, oh);
+  const drift = [];
+  crows.forEach(r => {
+    const id = String(r[chh.indexOf('Customer ID')] || '');
+    if (!id || String(r[chh.indexOf('Primary Username')] || '').indexOf('(merged→') >= 0) return;
+    const stored = Number(r[chh.indexOf('Shipment Count')]) || 0;
+    if (stored !== (counts[id] || 0)) drift.push(id + ': guardado ' + stored + ', real ' + (counts[id] || 0));
+  });
+  add('shipment_count_drift', 'Conteo de envíos desactualizado', 'amber', drift);
+
+  // 6. Packed Date without a QC row; 7. shipped QC rows without a box photo
+  const qcTrk = {};
+  qrows.forEach(r => { const t = String(r[qh.indexOf('Tracking ID')] || '').trim(); if (t) qcTrk[t] = r; });
+  const packedNoQc = [];
+  orows.forEach((r, i) => {
+    const t = String(r[col('Tracking ID')] || '').trim();
+    if (r[col('Packed Date')] && t && !qcTrk[t]) packedNoQc.push(t + ' (fila ' + (i + 2) + ')');
+  });
+  add('packed_without_qc', 'Marcado como empacado sin registro de calidad', 'amber', packedNoQc);
+  const noBox = [];
+  qrows.forEach(r => {
+    if (String(r[qh.indexOf('Status')]) === 'Enviado' && !r[qh.indexOf('Box1')]) noBox.push(String(r[qh.indexOf('Tracking ID')] || r[qh.indexOf('QC ID')]));
+  });
+  add('qc_without_box', 'Enviado sin foto de caja cerrada', 'amber', noBox);
+
+  // 8. Orders pointing at merged-away customers
+  const merged = {};
+  crows.forEach(r => { if (String(r[chh.indexOf('Primary Username')] || '').indexOf('(merged→') >= 0) merged[String(r[chh.indexOf('Customer ID')])] = true; });
+  const mergedRefs = [];
+  orows.forEach((r, i) => { const c = String(r[col('Customer ID')] || ''); if (merged[c]) mergedRefs.push(c + ' (fila ' + (i + 2) + ')'); });
+  add('merged_customer_refs', 'Pedidos apuntando a un cliente fusionado', 'amber', mergedRefs);
+
+  // 9. Paid but not packed for more than 48 h (stuck orders, FIX_LOG 7.3)
+  const stuck = [];
+  const cutoff = Date.now() - 48 * 3600000;
+  orows.forEach(r => {
+    if (String(r[col('Status')]) !== 'Pagado') return;
+    const t = String(r[col('Tracking ID')] || '').trim();
+    if (t && qcTrk[t]) return;
+    const raw = (col('Order Date') >= 0 && r[col('Order Date')]) || r[col('Created Date')];
+    const d = raw instanceof Date ? raw : new Date(raw);
+    if (!isNaN(d.getTime()) && d.getTime() < cutoff) stuck.push((t || String(r[col('Order ID')])) + ' · ' + String(r[col('Primary Username')] || ''));
+  });
+  add('stuck_paid', 'Pagado hace más de 48 h y sin empacar', 'amber', stuck);
+
+  const report = { ran_at: nowISO(), duration_ms: Date.now() - started, checks: results };
+  storeHealthReport(report);
+  PropertiesService.getScriptProperties().setProperty('LAST_HEALTH_AT', report.ran_at);
+  return report;
+}
+
+function getHealthSheet() {
+  const ss = SpreadsheetApp.openById(ORDERS_SHEET_ID);
+  return ss.getSheetByName('Health') || ss.insertSheet('Health');
+}
+
+function storeHealthReport(report) {
+  const sh = getHealthSheet();
+  sh.clear();
+  const rows = [['Run At', 'Check', 'Label', 'Severity', 'Count', 'Examples']];
+  report.checks.forEach(c => rows.push([report.ran_at, c.id, c.label, c.severity, c.count, JSON.stringify(c.examples)]));
+  sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function healthReportAction(e) {
+  const sh = getHealthSheet();
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse({ ran_at: null, checks: [] });
+  const checks = data.slice(1).map(r => ({
+    id: r[1], label: r[2], severity: r[3], count: Number(r[4]) || 0,
+    examples: (() => { try { return JSON.parse(r[5] || '[]'); } catch (x) { return []; } })(),
+  }));
+  const ranAt = data[1][0] instanceof Date ? data[1][0].toISOString() : String(data[1][0]);
+  return jsonResponse({ ran_at: ranAt, checks: checks });
+}
+
+function runHealthChecksAction(body) {
+  return jsonResponse(runHealthChecks());
+}
+
+// ─── Scheduled jobs ─────────────────────────────────────────────────────
+// Run installTriggers() ONCE from the editor's function dropdown. It
+// removes any existing triggers for these handlers first, so running it
+// again never creates duplicates.
+function installTriggers() {
+  const jobs = [['nightlyBackup', 2], ['reconcileCustomerAggregates', 3], ['runHealthChecks', 4]];
+  const names = jobs.map(j => j[0]);
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (names.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
+  });
+  jobs.forEach(([fn, hour]) => {
+    ScriptApp.newTrigger(fn).timeBased().everyDays(1).atHour(hour).inTimezone(MX_TZ).create();
+  });
+  Logger.log('Triggers installed: ' + names.join(', '));
+}
+
+// ─── Tests: run runAllTests() from the function dropdown ────────────────
+// Pure functions only -- nothing here reads or writes a sheet.
+function runAllTests() {
+  let pass = 0, fail = 0;
+  const eq = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    ok ? pass++ : fail++;
+    Logger.log((ok ? 'PASS ' : 'FAIL ') + name + (ok ? '' : ' — got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want)));
+  };
+  const iso = d => d ? d.toISOString() : null;
+
+  eq('normalizeUsername strips @ and case', normalizeUsername('@Maria.Art'), 'maria.art');
+  eq('normalizeUsername strips merged suffix', normalizeUsername('chino (merged→CUST-775)'), 'chino');
+  eq('backfillKey digit-strips order id', backfillKey('5866\t', ' SKU1 '), '5866||SKU1');
+  eq('backfillTargetStatus delivered', backfillTargetStatus('Delivered'), 'Enviado');
+  eq('backfillTargetStatus awaiting collection', backfillTargetStatus('awaiting collection'), 'Pagado');
+  eq('backfillTargetStatus canceled', backfillTargetStatus('Canceled'), '');
+
+  eq('detectDayFirst day-first', detectDayFirst(['16/10/2026 11:00:00', '01/02/2026']), true);
+  eq('detectDayFirst month-first', detectDayFirst(['10/16/2026 11:00:00 AM']), false);
+  eq('detectDayFirst ambiguous', detectDayFirst(['01/02/2026']), null);
+  // Mexico City is UTC-6 all year since 2022.
+  eq('parse dd/mm 24h', iso(parseTikTokDateTime('16/10/2026 11:53:21', true)), '2026-10-16T17:53:21.000Z');
+  eq('parse mm/dd PM', iso(parseTikTokDateTime('10/16/2026 01:53:21 PM', false)), '2026-10-16T19:53:21.000Z');
+  eq('parse airtable dd-mm-yy', iso(parseTikTokDateTime('16-10-26 11:53', true)), '2026-10-16T17:53:00.000Z');
+  eq('parse ISO passthrough', iso(parseTikTokDateTime('2026-10-16T17:53:00.000Z')), '2026-10-16T17:53:00.000Z');
+  eq('parse garbage', parseTikTokDateTime('mañana'), null);
+
+  eq('shopify paid', shopifyStatusFromFinancial('paid'), 'Pagado');
+  eq('shopify pending', shopifyStatusFromFinancial('pending'), 'No Pagado');
+  eq('shopify refunded', shopifyStatusFromFinancial('refunded'), 'CANCELLED');
+  eq('shopify absent', shopifyStatusFromFinancial(''), 'Pagado');
+
+  const parsedPlain = parseUserProp('abc|staff');
+  eq('password plain match', passwordMatches(parsedPlain, 'abc'), true);
+  const hashed = parseUserProp('sha256$salt$' + hashPassword('salt', 'pw1') + '|admin');
+  eq('password hash match', passwordMatches(hashed, 'pw1'), true);
+  eq('password hash mismatch', passwordMatches(hashed, 'pw2'), false);
+  eq('password hash role', hashed.role, 'admin');
+
+  // Price counted once per unique order id, summed across the shipment.
+  const recs = [];
+  for (let i = 0; i < 6; i++) recs.push({ order_substatus: 'Delivered', tracking_id: 'JMX1', order_id: '586600000000000001', order_amount: 100, product_name: 'p' + i, quantity: '1', sku_id: 's' + i, created_time: '16/10/2026 10:00:00' });
+  for (let i = 0; i < 12; i++) recs.push({ order_substatus: 'Delivered', tracking_id: 'JMX1', order_id: '586600000000000002', order_amount: 250, product_name: 'q' + i, quantity: '2', sku_id: 't' + i, created_time: '15/10/2026 09:00:00' });
+  const g = groupBackfillShipments(recs);
+  eq('grouping one shipment', g.length, 1);
+  eq('grouping price per order', g[0] && g[0].price, 350);
+  eq('grouping both order ids', g[0] && g[0].order_ids.length, 2);
+  eq('grouping earliest created', g[0] ? iso(new Date(g[0].created_ms)) : null, '2026-10-15T15:00:00.000Z');
+
+  Logger.log('Tests: ' + pass + ' passed, ' + fail + ' failed');
+  return { pass: pass, fail: fail };
 }
