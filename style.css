@@ -1984,7 +1984,8 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 }
 .vp-qc-count-badge {
   display: inline-block; border-radius: var(--radius-sm);
-  padding: 0px 6px; font-size: 11px; font-weight: 500;
+  padding: 1px 6px; font-size: 11px; font-weight: 500;
+  line-height: 1.6;
 }
 .vp-qc-count-badge.tiktok  { background: var(--blue-bg);  color: var(--blue-text); }
 .vp-qc-count-badge.shopify { background: var(--green-bg); color: var(--green-text); }
