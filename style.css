@@ -1960,3 +1960,17 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .vp-qc-ttid { font-family: monospace; font-size: 11px; font-weight: 400; color: var(--text-faint); }
 
 .cal-detail-order-link { font-size: 11px; color: var(--text-muted); text-decoration: underline; margin-left: 6px; }
+
+.cal-detail-photo-group { margin-bottom: 10px; }
+.cal-detail-photo-group:last-child { margin-bottom: 0; }
+.cal-detail-photo-group-label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-faint); margin-bottom: 4px; }
+
+.cal-detail-order-notes-toggle {
+  font-size: 11.5px; color: var(--amber-text); cursor: pointer;
+  padding: 6px 12px; border-top: 0.5px solid var(--border);
+}
+.cal-detail-order-notes {
+  max-height: 0; overflow: hidden; transition: max-height 0.2s ease;
+  font-size: 12.5px; color: var(--amber-text); padding: 0 12px;
+}
+.cal-detail-order-notes.open { max-height: 200px; padding: 0 12px 8px; }
