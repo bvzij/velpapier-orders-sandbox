@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.2';
+const SCRIPT_VERSION = '2026-10-18.3';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -4924,9 +4924,17 @@ function findDuplicateCustomers(e) {
   const feats = customers.map(dupFeatures);
 
   // Candidate generation: two customers are compared if they share ANY key.
+  // FIX_LOG 2026-10-18 (found via live testing): dupBlockingKeys() can
+  // return the same key twice for ONE customer (e.g. username "farlirod"
+  // and alias "farlirod2.0" both produce 'up:farli') -- without this Set,
+  // that customer's own index lands in the bucket twice, and the pairing
+  // loop below then compares that customer against itself, scoring 100%.
+  // Deduping per customer here is correct regardless of which key type
+  // causes the repeat, current or future.
   const buckets = {};
-  const addKey = (k, i) => { (buckets[k] || (buckets[k] = [])).push(i); };
-  feats.forEach((f, i) => dupBlockingKeys(f).forEach(k => addKey(k, i)));
+  const addKey = (k, i) => { (buckets[k] || (buckets[k] = new Set())).add(i); };
+  feats.forEach((f, i) => new Set(dupBlockingKeys(f)).forEach(k => addKey(k, i)));
+  Object.keys(buckets).forEach(k => { buckets[k] = Array.from(buckets[k]); });
 
   const seen = new Set();
   const pairs = [];
@@ -6292,6 +6300,20 @@ function runAllTests() {
   eq('grouping price per order', g[0] && g[0].price, 350);
   eq('grouping both order ids', g[0] && g[0].order_ids.length, 2);
   eq('grouping earliest created', g[0] ? iso(new Date(g[0].created_ms)) : null, '2026-10-15T15:00:00.000Z');
+
+  // Regression test for the 2026-10-18 self-pairing bug: a customer whose
+  // username and an alias share a 5-char prefix (e.g. "farlirod" /
+  // "farlirod2.0") must never be paired against themselves.
+  const selfPairCustomers = [
+    { 'Customer ID': 'TEST-A', 'Primary Username': 'farlirod', 'Aliases': 'farlirod2.0, other', 'Phone Partial': '', 'ZIP': '', 'City': '', 'Shopify Customer ID': '' },
+  ];
+  const selfPairFeats = selfPairCustomers.map(dupFeatures);
+  const selfPairBuckets = {};
+  selfPairFeats.forEach((f, i) => new Set(dupBlockingKeys(f)).forEach(k => {
+    (selfPairBuckets[k] || (selfPairBuckets[k] = new Set())).add(i);
+  }));
+  const anySelfPairBucket = Object.values(selfPairBuckets).some(s => s.size > 1);
+  eq('duplicate finder never buckets one customer twice (self-pair bug)', anySelfPairBucket, false);
 
   Logger.log('Tests: ' + pass + ' passed, ' + fail + ' failed');
   return { pass: pass, fail: fail };
