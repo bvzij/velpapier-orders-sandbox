@@ -42,13 +42,6 @@
         <button class="cal-sidebar-close" id="cal-sidebar-close" aria-label="Cerrar filtros">&times;</button>
       </div>
 
-      <label class="cal-field">
-        <span class="cal-field-label">Buscar</span>
-        <input class="vp-input" id="cal-search" type="text"
-               placeholder="Producto, guía, pedido, usuario…" autocomplete="off">
-        <span class="cal-field-hint">Producto, número de guía, pedido de TikTok o Shopify, o usuario</span>
-      </label>
-
       <div class="cal-field">
         <span class="cal-field-label">Cliente</span>
         <div class="cal-combo">
@@ -57,6 +50,26 @@
           <div class="cal-combo-list" id="cal-customer-list"></div>
         </div>
       </div>
+
+      <label class="cal-field">
+        <span class="cal-field-label">Pedido</span>
+        <input class="vp-input" id="cal-search-order" type="text"
+               placeholder="Guía o número de pedido…" autocomplete="off">
+        <span class="cal-field-checks">
+          <label><input type="checkbox" id="cal-order-tiktok" checked> TikTok</label>
+          <label><input type="checkbox" id="cal-order-shopify" checked> Shopify</label>
+        </span>
+      </label>
+
+      <label class="cal-field">
+        <span class="cal-field-label">Producto</span>
+        <input class="vp-input" id="cal-search-product" type="text"
+               placeholder="Nombre del producto…" autocomplete="off">
+        <span class="cal-field-checks">
+          <label><input type="checkbox" id="cal-product-tiktok" checked> TikTok</label>
+          <label><input type="checkbox" id="cal-product-shopify" checked> Shopify</label>
+        </span>
+      </label>
 
       <div class="cal-field">
         <span class="cal-field-label">Desde</span>
