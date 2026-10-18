@@ -34,6 +34,29 @@ window.VP = (function () {
 
   /* ── API ────────────────────────────────────────────────────────────── */
 
+  // Backend error codes -> plain Spanish for the screen (FIX_LOG 4.5).
+  // The original code stays on err.code for any caller that branches on it.
+  const ERROR_TEXT = {
+    unauthorized: 'Tu sesión no es válida o venció. Recarga la página e inicia sesión de nuevo.',
+    'Unknown action': 'El servidor no reconoce esta acción. Recarga la página (puede haber una versión nueva).',
+  };
+  function errText(code) {
+    const c = String(code || '');
+    if (ERROR_TEXT[c]) return ERROR_TEXT[c];
+    if (/^HTTP 5\d\d/.test(c)) return 'El servidor tuvo un problema (' + c + '). Intenta de nuevo en un momento.';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(c)) return 'Sin conexión con el servidor. Revisa el internet e intenta de nuevo.';
+    return c;
+  }
+  function backendError(code) {
+    if (code === 'unauthorized') {
+      // Session expired or revoked: forget it so the next page load asks again.
+      sessionStorage.removeItem('vp_token_verified_at');
+    }
+    const err = new Error(errText(code));
+    err.code = code;
+    return err;
+  }
+
   function get(qs) {
     return fetch(`${API}?${qs}&token=${encodeURIComponent(token)}`)
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -44,7 +67,7 @@ window.VP = (function () {
         // a failed request as a successful empty-ish response. Throwing
         // here means every existing try/catch around VP.get() now also
         // catches this case, with no change needed at the call site.
-        if (body && body.error) throw new Error(body.error);
+        if (body && body.error) throw backendError(body.error);
         return body;
       });
   }
@@ -118,7 +141,7 @@ window.VP = (function () {
     return { data: cached, pending };
   }
 
-  function post(data) {
+  function post(data, opts) {
     return fetch(API, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -127,7 +150,11 @@ window.VP = (function () {
       .then(body => {
         // Apps Script answers HTTP 200 even for its own errors -- see the
         // matching comment in VP.get() above.
-        if (body && body.error) throw new Error(body.error);
+        // opts.passErrors: codes returned as data instead of thrown
+        // (e.g. qc.js handles 'already_shipped' itself).
+        if (body && body.error && !(opts && opts.passErrors && opts.passErrors.indexOf(body.error) >= 0)) {
+          throw backendError(body.error);
+        }
         return body;
       });
   }
@@ -142,6 +169,31 @@ window.VP = (function () {
                                             // could even start.
   const TOKEN_PING_KEY = 'vp_token_verified_at';
 
+  // Exchanges a password for a session token (FIX_LOG 1.2). Returns the
+  // token, null for a wrong password, or false if the backend is older
+  // than 2026-10-19 and has no login action (then the password itself is
+  // used as before, so nothing breaks during the deploy window).
+  async function login(password) {
+    try {
+      const r = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'login', password: password }),
+      });
+      const body = await r.json();
+      if (body && body.token) return body.token;
+      if (body && body.error === 'unauthorized') return null;
+      if (body && body.error && /Demasiados/.test(body.error)) { alert(body.error); return null; }
+      return false;
+    } catch (e) { return false; }
+  }
+
+  function setToken(t) {
+    token = t;
+    localStorage.setItem(TOKEN_KEY, token);
+    sessionStorage.removeItem(TOKEN_PING_KEY);
+  }
+
   async function ensureToken() {
     for (;;) {
       if (token) {
@@ -151,6 +203,13 @@ window.VP = (function () {
           const r = await fetch(`${API}?action=ping&token=${encodeURIComponent(token)}`);
           const body = await r.json();
           if (body.ok) {
+            // A login saved before sessions existed is the raw password:
+            // swap it for a session token once, silently, so the password
+            // stops travelling in every request URL.
+            if (token.indexOf('sess_') !== 0) {
+              const t = await login(token);
+              if (t) token = t, localStorage.setItem(TOKEN_KEY, token);
+            }
             sessionStorage.setItem(TOKEN_PING_KEY, String(Date.now()));
             role = body.role || '';
             sessionStorage.setItem(ROLE_KEY, role);
@@ -158,16 +217,26 @@ window.VP = (function () {
           }
         } catch (e) { /* fall through to prompt */ }
       }
-      const input = prompt('Token de API:');
+      const input = prompt('Contraseña:');
       if (input === null) {
-        document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Acceso denegado.</p>';
+        document.body.innerHTML = '<p style="text-align:center;margin-top:4rem;font-family:sans-serif">Necesitas iniciar sesión para usar el panel. Recarga la página para intentarlo de nuevo.</p>';
         throw new Error('unauthenticated');
       }
-      token = input.trim();
-      localStorage.setItem(TOKEN_KEY, token);
-      sessionStorage.removeItem(TOKEN_PING_KEY); // force a real ping with the new token next loop
+      const pw = input.trim();
+      const t = await login(pw);
+      if (t === null) { alert('Contraseña incorrecta.'); token = ''; continue; }
+      setToken(t || pw);   // t === false -> backend without login: legacy mode
     }
   }
+
+  // Ends this device's session on the server and asks for the password again.
+  async function logout() {
+    try { await post({ action: 'logout' }); } catch (e) { /* already invalid */ }
+    localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.clear();
+    window.location.reload();
+  }
+
 
   // Pages that are admin-only call this right after ensureToken() to
   // redirect staff away before any page content loads. Role comes from
@@ -256,21 +325,21 @@ window.VP = (function () {
 
   /* ── Formatting ─────────────────────────────────────────────────────── */
 
-  const mxn = n => {
+  // Negative amounts (refunds) render as −$120, never $-120 (FIX_LOG 4.1).
+  const money = (n, dec) => {
     if (n === undefined || n === null || n === '' || isNaN(Number(n))) return '—';
-    return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    const v = Number(n);
+    const s = Math.abs(v).toLocaleString('es-MX', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    return (v < 0 ? '−$' : '$') + s;
   };
-
-  const mxnExact = n => {
-    if (n === undefined || n === null || n === '' || isNaN(Number(n))) return '—';
-    return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  };
+  const mxn = n => money(n, 0);
+  const mxnExact = n => money(n, 2);
 
   const num = n => Number(n || 0).toLocaleString('es-MX');
 
   const esc = s => String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   function asDate(v) {
     if (!v) return null;
@@ -285,19 +354,46 @@ window.VP = (function () {
     return (b.getTime() - a.getTime()) / DAY;
   }
 
+  // One date/time style for the whole dashboard (FIX_LOG 4.1): always
+  // Mexico City time, always 24-hour (es-MX defaults to "3:30 p.m."),
+  // dates as 18/10/2026.
+  const TZ = 'America/Mexico_City';
+  const F_DATE = new Intl.DateTimeFormat('es-MX', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric' });
+  const F_TIME = new Intl.DateTimeFormat('es-MX', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const F_HOUR = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' });
+
   function fmtDate(v) {
     const d = asDate(v);
+    return d ? F_DATE.format(d) : '—';
+  }
+
+  function fmtTime(v) {
+    const d = asDate(v);
+    return d ? F_TIME.format(d) : '—';
+  }
+
+  // Current (or given) hour 0-23 in Mexico City, regardless of phone settings.
+  function mxHour(v) {
+    const d = v ? asDate(v) : new Date();
+    return d ? Number(F_HOUR.format(d)) % 24 : 0;
+  }
+
+  // "hace 5 min", "hace 3 h", "ayer", else the date.
+  function fmtRel(v) {
+    const d = asDate(v);
     if (!d) return '—';
-    return d.toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+    const mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return 'ahora';
+    if (mins < 60) return 'hace ' + mins + ' min';
+    if (mins < 24 * 60) return 'hace ' + Math.round(mins / 60) + ' h';
+    if (mins < 48 * 60) return 'ayer';
+    return fmtDate(d);
   }
 
   function fmtDateTime(v) {
     const d = asDate(v);
     if (!d) return '—';
-    return d.toLocaleString('es-MX', {
-      day: '2-digit', month: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
+    return F_DATE.format(d) + ' ' + F_TIME.format(d);
   }
 
   // 3725 → "1h 2m" ; 95 → "1m 35s"
@@ -902,7 +998,8 @@ window.VP = (function () {
 
   return {
     API, get, getCached, post, ensureToken, mountNav, NAV, getTheme, setTheme,
-    mxn, mxnExact, num, esc, asDate, daysBetween, fmtDate, fmtDateTime,
+    mxn, mxnExact, num, esc, asDate, daysBetween, fmtDate, fmtDateTime, fmtTime, fmtRel, mxHour,
+    errText, logout,
     fmtDuration, initials, parseProducts, itemCount, baseProductName,
     toast, lightbox, showModal,
     chart: { area: areaChart, bars: barChart, rank: rankBars, donut, sparkline, funnel, SERIES },

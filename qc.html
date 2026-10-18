@@ -144,7 +144,8 @@
     }
 
     .add-photo-btn {
-      width: 100%; padding: 12px; font-size: 13px; font-weight: 600; font-family: inherit;
+      /* min-height for gloved / dusty fingers at the packing station (FIX_LOG 5.5) */
+      width: 100%; min-height: 52px; padding: 12px; font-size: 14px; font-weight: 600; font-family: inherit;
       border: 1.5px dashed var(--border-strong); border-radius: var(--radius-md); background: var(--surface);
       color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center;
       gap: 6px; position: relative; -webkit-tap-highlight-color: transparent;
@@ -160,12 +161,13 @@
     }
 
     .qc-submit {
-      width: 100%; padding: 15px; font-size: 15px; font-weight: 700; font-family: inherit;
+      width: 100%; min-height: 56px; padding: 15px; font-size: 16px; font-weight: 700; font-family: inherit;
       background: var(--text); color: var(--surface); border: none; border-radius: var(--radius-md);
       cursor: pointer; transition: opacity 0.15s;
     }
     .qc-submit:disabled { opacity: 0.3; cursor: not-allowed; }
     .qc-submit:not(:disabled):active { opacity: 0.7; }
+    .qc-submit:focus-visible, .add-photo-btn:focus-within { outline: 2px solid var(--text); outline-offset: 2px; }
 
     .toast {
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);

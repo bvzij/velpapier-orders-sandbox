@@ -34,6 +34,11 @@ function slimOrders(resp) {
     records: (resp.records || []).map(r => {
       const o = {};
       for (const f of ORDER_FIELDS) o[f] = r[f];
+      // Charts bucket by 'Created Date'. Since 2026-10-19 the real platform
+      // order time lives in 'Order Date' (Created Date = import time), so
+      // the slim copy carries the real time under the name the charts read.
+      // Rows imported before the fix fall back to Created Date (FIX_LOG 2.1).
+      o['Created Date'] = r['Order Date'] || r['Created Date'];
       return o;
     }),
   };
@@ -133,35 +138,9 @@ function ensureFullOrders() {
       render();
     }
 
-    let gotCache = false;
-    if (r30.data)        { DATA.orders = r30.data.records || []; gotCache = true; }
-    if (rCustomers.data) { DATA.customers = rCustomers.data.records || []; gotCache = true; }
-    if (rQc.data)        { DATA.qc = rQc.data.records || []; gotCache = true; }
-    if (rSessions.data)  { DATA.sessions = rSessions.data.records || []; gotCache = true; }
-
-    if (gotCache) {
-      rebuildById();
-      render();
-    } else {
-      // No cache at all yet (first visit this session) -- await the SAME
-      // in-flight fetches getCached already kicked off above (each writes
-      // its own sessionStorage entry in its own .then()). We must not
-      // issue separate VP.get() calls here -- that would race the cached
-      // ones and never write the cache, silently defeating it on every
-      // cold load.
-      const [o, c, q, s] = await Promise.all([
-        r30.pending,
-        rCustomers.pending,
-        rQc.pending.catch(() => ({ records: [] })),
-        rSessions.pending.catch(() => ({ records: [] })),
-      ]);
-      DATA.orders    = o.records || [];
-      DATA.customers = c.records || [];
-      DATA.qc        = q.records || [];
-      DATA.sessions  = s.records || [];
-      rebuildById();
-      render();
-    }
+    // (A second, duplicated copy of the block above was removed 2026-10-19:
+    // it redeclared gotCache -- a syntax error that stopped this whole page
+    // from loading -- and referenced rSessions, which no longer exists.)
 
         // Always prefetch full history in the background after the fast 30-day
     // view loads, regardless of which period is currently showing -- this

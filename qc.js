@@ -18,6 +18,11 @@ let selectedAddons = [];  // [{id, channel}] for checked add-on orders
 let currentQcId = null;
 let uploadsInFlight = 0;
 let savingInProgress = false; // true for the whole duration of a submitQC() call -- nothing else may re-enable the button while this is set
+// For orders with no tracking ID: ONE id per capture session, created when
+// the order is opened. It used to be 'MAN-' + Date.now() on every save, so
+// two quick saves could create two separate QC rows (FIX_LOG 0.5).
+let manualTrackingId = '';
+let wakeLock = null;
 let photoSyncsInFlight = 0; // pending pushAddPhoto/pushRemovePhoto calls -- the poll must not merge server state while one of these hasn't landed yet, or it overwrites a photo that uploaded fine but isn't in the sheet yet
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
@@ -31,20 +36,16 @@ async function ensureAuth() {
   API_TOKEN = VP.token;
 }
 
+// Both go through the shared VP layer, which throws on backend errors
+// (this page's own copies never checked them, so a failed save looked
+// like a success -- FIX_LOG 0.4). 'already_shipped' is still returned as
+// data because the callers below handle it themselves.
 async function apiGet(query) {
-  const r = await fetch(`${API}?${query}&token=${encodeURIComponent(API_TOKEN)}`);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+  return VP.get(query);
 }
 
 async function apiPost(data) {
-  const r = await fetch(API, {
-    method:  'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body:    JSON.stringify({ ...data, token: API_TOKEN }),
-  });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+  return VP.post(data, { passErrors: ['already_shipped'] });
 }
 
 
@@ -66,7 +67,7 @@ async function pushAddPhoto(group, url) {
       // Session ID is intentionally NOT set here — only at finalize (Enviar).
       // Otherwise a row that's touched but never shipped would still count
       // as "packed in this session," polluting counts and history.
-      tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
+      tracking_id:   selected.tracking_id || manualTrackingId,
       order_ids:     [...selected.order_ids, ...selectedAddons],
       customer_id:   selected.customer_id,
       username:      selected.username,
@@ -79,6 +80,7 @@ async function pushAddPhoto(group, url) {
     return res;
   } catch (e) {
     console.error('[pushAddPhoto] failed:', e);
+    showToast('La foto se subió pero no se guardó en el registro: ' + e.message, true);
     return null;
   }
 }
@@ -89,7 +91,7 @@ async function pushRemovePhoto(group, url) {
     const res = await apiPost({
       action:      'save_qc',
       qc_id:       currentQcId,
-      tracking_id: selected.tracking_id || ('MAN-' + Date.now()),
+      tracking_id: selected.tracking_id || manualTrackingId,
       [group === 'content' ? 'remove_content' : 'remove_box']: url,
     });
     if (res.error === 'already_shipped') return { blocked: true };
@@ -97,6 +99,7 @@ async function pushRemovePhoto(group, url) {
     return res;
   } catch (e) {
     console.error('[pushRemovePhoto] failed:', e);
+    showToast('No se pudo quitar la foto del registro: ' + e.message, true);
     return null;
   }
 }
@@ -108,7 +111,7 @@ async function pushNotesAndOrders() {
     const res = await apiPost({
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
-      tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
+      tracking_id:   selected.tracking_id || manualTrackingId,
       order_ids:     [...selected.order_ids, ...selectedAddons],
       customer_id:   selected.customer_id,
       username:      selected.username,
@@ -122,6 +125,7 @@ async function pushNotesAndOrders() {
     if (res.qc_id) currentQcId = res.qc_id;
   } catch (e) {
     console.error('[pushNotesAndOrders] failed:', e);
+    showToast('No se guardaron las notas: ' + e.message, true);
   }
 }
 
@@ -581,6 +585,8 @@ function openCapture(shipment) {
   cameFromTab = currentTab;
   pendingScrollY = window.scrollY;
   selected = shipment;
+  manualTrackingId = shipment.tracking_id ? '' : 'MAN-' + Date.now();
+  requestWakeLock();
   currentQcId = null;
   shippedLockShown = false;
   isEditingShipped = false;
@@ -645,6 +651,7 @@ let cameFromTab = 'pending';
 
 async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
+  releaseWakeLock();
   selected = null;
   currentQcId = null;
   localFinalizeInProgress = false;
@@ -784,7 +791,9 @@ function bindAddButton(group, btnId) {
       // out thinking the server is the source of truth.
       photoSyncsInFlight++;
       pushAddPhoto(group, uploaded.url).then(res => {
-        if (res && res.blocked) {
+        // Ignore 'blocked' when THIS device just finalized: the finalize
+        // call already carried the full photo list, so nothing was lost.
+        if (res && res.blocked && selected && !localFinalizeInProgress) {
           document.getElementById('edit-shipped-checkbox').checked = true;
           toggleEditShipped();
         }
@@ -825,6 +834,16 @@ async function submitQC() {
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
   if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
   if (uploadsInFlight > 0) { showToast('Espera a que terminen de subir las fotos', true); return; }
+  if (!isEditingShipped && gallery.box.length === 0 &&
+      !confirm('No hay foto de la caja cerrada. ¿Enviar de todos modos?')) return;
+  // Let background photo saves land first, so finalize never races them
+  // (FIX_LOG 5.1). Capped at 15 s; finalize carries the full list anyway.
+  if (photoSyncsInFlight > 0) {
+    btn.disabled = true;
+    btn.textContent = 'Guardando fotos…';
+    const t0 = Date.now();
+    while (photoSyncsInFlight > 0 && Date.now() - t0 < 15000) await new Promise(r => setTimeout(r, 200));
+  }
 
   // Editing an already-shipped order: full overwrite based on THIS device's
   // current gallery, explicitly confirmed. Does not touch order/ship status
@@ -869,7 +888,7 @@ async function submitQC() {
       action:        'save_qc',
       qc_id:         currentQcId || undefined,
       finalize:      true,
-      tracking_id:   selected.tracking_id || ('MAN-' + Date.now()),
+      tracking_id:   selected.tracking_id || manualTrackingId,
       order_ids:     allOrders,
       customer_id:   selected.customer_id,
       username:      selected.username,
@@ -932,9 +951,28 @@ function openLightbox(url) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+// One escape helper for the whole dashboard lives in common.js (FIX_LOG 4.2).
 function escapeHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return VP.esc(s);
 }
+
+// Keeps the phone screen awake while a packing capture is open (FIX_LOG 5.5).
+// Silently does nothing on browsers without the Wake Lock API.
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch (e) { wakeLock = null; }
+}
+function releaseWakeLock() {
+  try { if (wakeLock) wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && selected) requestWakeLock();
+});
 
 function escapeAttr(s) {
   return String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');

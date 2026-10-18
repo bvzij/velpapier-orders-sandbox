@@ -22,6 +22,11 @@ function slimOrders(resp) {
     records: (resp.records || []).map(r => {
       const o = {};
       for (const f of SLIM_FIELDS) o[f] = r[f];
+      // Charts bucket by 'Created Date'. Since 2026-10-19 the real platform
+      // order time lives in 'Order Date' (Created Date = import time), so
+      // the slim copy carries the real time under the name the charts read.
+      // Rows imported before the fix fall back to Created Date (FIX_LOG 2.1).
+      o['Created Date'] = r['Order Date'] || r['Created Date'];
       return o;
     }),
   };
@@ -97,11 +102,11 @@ function paintAll() {
 
 function paintDateline() {
   const now = new Date();
-  const h = now.getHours();
+  const h = VP.mxHour();   // Mexico City hour, whatever the phone's own setting
   const greet = h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches';
   document.getElementById('hero-greet').innerHTML = `${greet}<strong>.</strong>`;
   document.getElementById('hero-date').textContent =
-    now.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    now.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Mexico_City' });
 }
 
 function paintHeroLine() {

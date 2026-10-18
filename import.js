@@ -2,7 +2,17 @@
 
 const API         = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
 const N8N_URL     = 'https://n8n.srv2017849.hstgr.cloud/webhook/tiktok-import';
-const VP_TOKEN    = '0924';  // X-VP-Token header for N8N
+// ── n8n webhook authentication (FIX_LOG 1.1) ───────────────────────────
+// The old fixed token '0924' is public in this repo, so anyone could push
+// fake imports. New scheme: send the person's own session token in
+// X-VP-Session; the n8n workflow checks it with Apps Script (action=whoami)
+// and forwards the name as X-Requested-By.
+// STEP 1 (now): both headers are sent, so imports keep working while the
+//         n8n workflow is updated.
+// STEP 2: once n8n validates X-VP-Session, set this to false, then change
+//         the n8n webhook path so the old URL stops working.
+const N8N_SEND_LEGACY_TOKEN = true;
+const N8N_LEGACY_TOKEN = '0924';
 
 let API_TOKEN = localStorage.getItem('vp_token') || '';
 
@@ -146,7 +156,10 @@ async function runImport() {
 
     const resp = await fetch(N8N_URL, {
       method:  'POST',
-      headers: { 'X-VP-Token': VP_TOKEN },
+      headers: Object.assign(
+        { 'X-VP-Session': VP.token },
+        N8N_SEND_LEGACY_TOKEN ? { 'X-VP-Token': N8N_LEGACY_TOKEN } : {}
+      ),
       body:    fd,
     });
 
@@ -506,5 +519,5 @@ function showToast(msg, isError = false) {
 }
 
 function escHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return VP.esc(s);   // one shared helper (FIX_LOG 4.2)
 }

@@ -109,7 +109,9 @@ function mapFromApi(r) {
     ID: r['Order ID'],
     Cliente: r['Primary Username'] || '',
     Producto: r['Products'] || '',
-    Precio: Number(r['Price']) || 0,
+    // null (not 0) when the server withholds prices from this role, so the
+    // screen shows '—' and an edit can never write 0 over the real amount.
+    Precio: r['Price'] === undefined ? null : (Number(r['Price']) || 0),
     Notas: r['Notes'] || '',
     Status: r['Status'] || 'No Pagado',
     Channel: r['Channel'] || 'Manual',
@@ -152,24 +154,25 @@ let bulkItems = [{ producto: '', precio: '', notas: '' }];
 
 // ── HELPERS ──────────────────────────────────────────────────
 function daysSince(dateStr) { if (!dateStr) return 0; return Math.floor((new Date() - new Date(dateStr)) / 86400000); }
-function formatMXN(n) { if (n === undefined || n === null || n === '') return '—'; return '$' + Number(n).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 }); }
-function formatDate(dateStr) { if (!dateStr) return ''; return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'America/Mexico_City' }); }
+// Shared formats live in common.js (FIX_LOG 4.1): 18/10/2026, 24-hour,
+// Mexico City time, refunds as −$120.
+function formatMXN(n) {
+  if (n === undefined || n === null || n === '' || isNaN(Number(n))) return '—';
+  const v = Number(n);
+  return (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+function formatDate(dateStr) { if (!dateStr) return ''; const s = VP.fmtDate(dateStr); return s === '—' ? '' : s; }
 // Date + time, Mexico City. Created Date has always stored a full ISO
 // timestamp -- only the display was truncating it to the date.
 function formatDateTime(dateStr) {
   if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleString('es-MX', {
-    day: '2-digit', month: '2-digit', year: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-    timeZone: 'America/Mexico_City',
-  });
+  const s = VP.fmtDateTime(dateStr);
+  return s === '—' ? '' : s;
 }
 function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
-function escapeHtml(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function escapeHtml(s) { return VP.esc(s); }   // one shared helper (FIX_LOG 4.2)
 function summarizeProductCount(productsStr) {
   if (!productsStr) return '—';
   const parts = productsStr.split(';').map(s => s.trim()).filter(Boolean);
@@ -490,7 +493,7 @@ function showEditModal(id) {
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Editar pedido</div><div class="edit-form">
     <input type="text" id="edit-cliente" value="${(r.Cliente || '').replace(/"/g, '&quot;')}" placeholder="Usuario TikTok" />
     <input type="text" id="edit-producto" value="${(r.Producto || '').replace(/"/g, '&quot;')}" placeholder="Producto" />
-    <input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />
+    ${r.Precio === null ? '' : `<input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />`}
     <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
     <input type="text" id="edit-notas" value="${(r.Notas || '').replace(/"/g, '&quot;')}" placeholder="Notas (opcional)" />
   </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
@@ -661,13 +664,7 @@ function qcModalOrderBlock(id, channel, idx) {
 }
 
 function qcModalTime24h(v) {
-  if (!v) return '—';
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleString('es-MX', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+  return VP.fmtDateTime(v);   // was missing the Mexico City time zone
 }
 
 async function loadQCViewBody(trackingId) {
@@ -1216,15 +1213,18 @@ function requestDelete(id, producto) {
 async function saveEdit(id) {
   const cliente = document.getElementById('edit-cliente').value.trim();
   const producto = document.getElementById('edit-producto').value.trim();
-  const precio = parseFloat(document.getElementById('edit-precio').value) || 0;
+  const precioInput = document.getElementById('edit-precio');   // absent when prices are hidden
+  const precio = precioInput ? (parseFloat(precioInput.value) || 0) : null;
   const status = document.getElementById('edit-status').value;
   const notas = document.getElementById('edit-notas').value.trim();
   if (!cliente || !producto) { showToast('Faltan datos'); return; }
   try {
-    const result = await apiPost({ action: 'update_order', order_id: id, fields: mapToApiFields({ Cliente: cliente, Producto: producto, Precio: precio, Status: status, Notas: notas }) });
+    const editFields = { Cliente: cliente, Producto: producto, Status: status, Notas: notas };
+    if (precioInput) editFields.Precio = precio;
+    const result = await apiPost({ action: 'update_order', order_id: id, fields: mapToApiFields(editFields) });
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
     const rec = allRecords.find(r => r.ID === id);
-    if (rec) { rec.Cliente = cliente; rec.Producto = producto; rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
+    if (rec) { rec.Cliente = cliente; rec.Producto = producto; if (precioInput) rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
     closeModal();
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);

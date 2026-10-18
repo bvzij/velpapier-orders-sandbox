@@ -617,16 +617,11 @@ function renderDetailOrderBlock(id, channel, idx) {
   </div>`;
 }
 
-// 24h time, local to this timeline only -- VP.fmtDateTime is shared across
-// the whole app (Pedidos cards, etc.) and stays 12h there; nothing else
-// asked for that to change.
+// VP.fmtDateTime is 24-hour and Mexico City time everywhere since
+// 2026-10-19 (FIX_LOG 4.1); this private copy (which had no time zone)
+// is kept only as a name so existing calls keep working.
 function fmtTimeline24h(v) {
-  const d = VP.asDate(v);
-  if (!d) return '—';
-  return d.toLocaleString('es-MX', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+  return VP.fmtDateTime(v);
 }
 
 const AUDIT_ACTION_LABELS = {
