@@ -247,13 +247,22 @@ function filteredRows() {
     rows = rows.filter(r => String(r['Primary Username'] || '').toLowerCase().includes(custTyped));
   }
 
-  if (from) {
-    const fromMs = new Date(from + 'T00:00:00').getTime();
-    rows = rows.filter(r => { const d = VP.asDate(r['Timestamp']); return d && d.getTime() >= fromMs; });
-  }
-  if (to) {
-    const toMs = new Date(to + 'T23:59:59').getTime();
-    rows = rows.filter(r => { const d = VP.asDate(r['Timestamp']); return d && d.getTime() <= toMs; });
+  // QC rows carry no date of their own (same gap found throughout the QC
+  // pipeline) -- Desde/Hasta silently matched zero rows always, since
+  // VP.asDate(r['Timestamp']) was always undefined. The real date lives
+  // on the linked Order's Shipped Date.
+  if (from || to) {
+    const fromMs = from ? new Date(from + 'T00:00:00').getTime() : null;
+    const toMs = to ? new Date(to + 'T23:59:59').getTime() : null;
+    rows = rows.filter(r => {
+      const ids = orderIdsOf(r);
+      const linked = [...ids.tiktok, ...ids.shopify, ...ids.manual].map(id => ORDERS_BY_ID[id]).find(Boolean);
+      const d = linked ? VP.asDate(linked['Shipped Date']) : null;
+      if (!d) return false;
+      if (fromMs !== null && d.getTime() < fromMs) return false;
+      if (toMs !== null && d.getTime() > toMs) return false;
+      return true;
+    });
   }
 
   if (q) rows = rows.filter(r => searchBlob(r).includes(q));
