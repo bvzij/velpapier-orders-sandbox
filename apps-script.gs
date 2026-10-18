@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.2';
+const SCRIPT_VERSION = '2026-10-17.3';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -1820,7 +1820,11 @@ function saveQC(body) {
       blank[h.indexOf('Tracking ID')] = body.tracking_id;
       blank[h.indexOf('Customer ID')] = body.customer_id || '';
       blank[h.indexOf('Primary Username')] = body.username || '';
-      blank[h.indexOf('Packer')] = body.packer || '';
+      // Real logged-in identity, not whatever the client sends (previously
+      // always the frontend's hardcoded default) -- same fix as the update
+      // path below, needed here too since a brand-new row's first save
+      // never reaches that code.
+      blank[h.indexOf('Packer')] = _currentIdentity ? _currentIdentity.name : (body.packer || '');
       blank[h.indexOf('Timestamp')] = nowISO();
       blank[h.indexOf('Status')] = 'Activo';
       if (h.indexOf('Session ID') >= 0) blank[h.indexOf('Session ID')] = body.session_id || '';
@@ -2179,7 +2183,10 @@ function endSession(body) {
       ...String(qcRow['Manual Order IDs']  || '').split(' + '),
     ].filter(Boolean);
     allIds.forEach(id => {
-      const order = allOrders.find(o => o['Order ID'] === id);
+      // Order ID can be a " + "-joined combined-shipment string; an exact
+      // match against a single component id never hits in that case (same
+      // bug found in Calidad's order lookup and the backfill status sync).
+      const order = allOrders.find(o => String(o['Order ID'] || '').split(' + ').includes(id));
       if (!order || !order['Products']) { totalItems += 1; return; }
       const lines = String(order['Products']).split(/[\n;]+/).map(l => l.trim()).filter(Boolean);
       if (lines.length === 0) { totalItems += 1; return; }
