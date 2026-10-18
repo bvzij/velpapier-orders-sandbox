@@ -1993,5 +1993,5 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .vp-qc-count-badge.manual  { background: var(--amber-bg); color: var(--amber-text); }
 .vp-qc-info { font-size: 11px; color: var(--text-muted); line-height: 1.7; margin-top: 4px; }
 
-.vp-qc-count-label { display: inline-block; width: 46px; }
+.vp-qc-count-label { display: inline-block; width: 38px; }
 .vp-qc-count-num { display: inline-block; width: 14px; text-align: center; }
