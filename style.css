@@ -1977,9 +1977,16 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 
 /* ── Calidad card: username + prominent-but-smaller TikTok Order ID ── */
 .vp-qc-ttid-prominent {
-  font-family: monospace; font-size: 12px; font-weight: 600;
+  font-family: monospace; font-size: 12px; font-weight: 400;
   color: var(--text); background: var(--surface2);
   border-radius: var(--radius-sm); padding: 1px 6px;
   vertical-align: middle;
 }
+.vp-qc-count-badge {
+  display: inline-block; border-radius: var(--radius-sm);
+  padding: 1px 6px; font-size: 11px; font-weight: 500;
+}
+.vp-qc-count-badge.tiktok  { background: var(--blue-bg);  color: var(--blue-text); }
+.vp-qc-count-badge.shopify { background: var(--green-bg); color: var(--green-text); }
+.vp-qc-count-badge.manual  { background: var(--amber-bg); color: var(--amber-text); }
 .vp-qc-info { font-size: 11px; color: var(--text-muted); line-height: 1.7; margin-top: 4px; }
