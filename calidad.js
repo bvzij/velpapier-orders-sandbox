@@ -407,10 +407,18 @@ function channelTags(ids) {
   ].filter(Boolean).join('');
 }
 
+// How many of this shipment's linked orders have a Notes value -- the
+// manual notes people attach when confirming "send with this TikTok
+// order", not the QC row's own Notes field (that one's shown separately).
+function linkedOrderNotesCount(ids) {
+  const allIds = [...ids.tiktok, ...ids.shopify, ...ids.manual];
+  return allIds.map(id => ORDERS_BY_ID[id]).filter(o => o && o['Notes']).length;
+}
+
 function cardHtml(r) {
   const photos = photosOf(r);
   const ids    = orderIdsOf(r);
-  const prods  = productSummary(r);
+  const notesCount = linkedOrderNotesCount(ids);
 
   // The strip is a 3-column grid, so with 4+ photos we show 2 plus a counter
   // tile — otherwise the counter wraps onto its own row and the card breaks.
@@ -421,19 +429,25 @@ function cardHtml(r) {
     ? `<div class="vp-qc-photos-more" data-lightbox="1" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
     : '';
 
+  // Info list: packed date, guía, per-channel order counts, notes count --
+  // everything you'd actually want when troubleshooting for a customer.
+  // Product names and the QC row's own Notes text were dropped -- the
+  // card is a quick-scan summary now, full detail lives in the modal.
+  const infoLines = [
+    `Empacado ${fmtTimeline24h(r['Timestamp'])}`,
+    `Guía ${r['Tracking ID'] || '—'}`,
+    ids.tiktok.length  ? `${ids.tiktok.length} pedido${ids.tiktok.length !== 1 ? 's' : ''} TikTok` : '',
+    ids.shopify.length ? `${ids.shopify.length} pedido${ids.shopify.length !== 1 ? 's' : ''} Shopify` : '',
+    notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : '',
+  ].filter(Boolean);
+
   return `<article class="vp-qc-card" data-qcid="${VP.esc(r['QC ID'] || '')}">
     <div class="vp-qc-photos">
       ${photos.length ? cells + extra : '<div class="vp-qc-nophoto">Sin fotos</div>'}
     </div>
     <div class="vp-qc-body">
-      <div class="vp-qc-user">${VP.esc(r['Primary Username'] || '—')}${ids.tiktok.length ? ` <span class="vp-qc-ttid">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>` : ''}</div>
-      <div class="vp-qc-meta">
-        <code>${VP.esc(r['Tracking ID'] || '—')}</code><br>
-        ${VP.esc(VP.fmtDateTime(r['Timestamp']))}
-        ${prods.length ? `<br><span style="color:var(--text-faint)">${VP.esc(prods.slice(0, 3).join(', '))}${prods.length > 3 ? ` +${prods.length - 3}` : ''}</span>` : ''}
-        ${r['Notes'] ? `<br><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span>` : ''}
-      </div>
-      <div class="vp-qc-tags">${channelTags(ids)}</div>
+      <div class="vp-qc-user">${VP.esc(r['Primary Username'] || '—')}${ids.tiktok.length ? ` <span class="vp-qc-ttid-prominent">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>` : ''}</div>
+      <div class="vp-qc-info">${infoLines.map(l => `<div>${VP.esc(l)}</div>`).join('')}</div>
     </div>
   </article>`;
 }
@@ -513,8 +527,20 @@ function renderDetailOrderBlock(id, channel, idx) {
   const labelHtml = channel === 'Shopify'
     ? `<span class="cal-detail-order-id">Shopify #${VP.esc(idLabel)}</span>${idHref ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-link" onclick="event.stopPropagation()">Ver en Shopify →</a>` : ''}`
     : idHref
-      ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">${VP.esc(idLabel)}</a>`
+      ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">TikTok ${VP.esc(idLabel)}</a>`
       : `<span class="cal-detail-order-id">${VP.esc(idLabel)}</span>`;
+
+  // Collapsible, same open/close pattern as the item list above it, keyed
+  // separately so a visitor can open items and notes independently.
+  const notesDetailId = `cal-order-notes-${idx}`;
+  const noteText = o && o['Notes'] ? o['Notes'] : '';
+  const notesHtml = noteText
+    ? `<div class="cal-detail-order-notes-toggle" onclick="document.getElementById('${notesDetailId}').classList.toggle('open')">
+         <span class="cal-detail-order-chevron">▸</span> 1 nota
+       </div>
+       <div class="cal-detail-order-notes" id="${notesDetailId}">${VP.esc(noteText)}</div>`
+    : '';
+
   return `<div class="cal-detail-order">
     <div class="cal-detail-order-head" onclick="document.getElementById('${detailId}').classList.toggle('open')">
       <span class="cal-detail-order-chevron">▸</span>
@@ -522,6 +548,7 @@ function renderDetailOrderBlock(id, channel, idx) {
       <span class="cal-detail-order-summary">${itemCount} art. · ${price}</span>
     </div>
     <div class="cal-detail-order-items" id="${detailId}">${itemRows}</div>
+    ${notesHtml}
   </div>`;
 }
 
@@ -598,9 +625,19 @@ function showOrderDetailModal(r) {
       ? '<div class="vp-empty-sm">Cargando pedidos…</div>'
       : '<div class="vp-empty-sm">No se encontraron los pedidos originales.</div>';
 
-  const photoGrid = photos.length
-    ? `<div class="cal-detail-photos">${photos.map(u =>
-        `<img src="${VP.esc(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>`
+  // Grouped by Content vs Box, each with its own small label, instead of
+  // one flat strip with no way to tell which kind of photo you're looking at.
+  const contentPhotos = CONTENT_COLS.map(c => r[c]).filter(Boolean);
+  const boxPhotos = BOX_COLS.map(c => r[c]).filter(Boolean);
+  const photoGroupHtml = (label, urls) => urls.length
+    ? `<div class="cal-detail-photo-group">
+        <div class="cal-detail-photo-group-label">${label}</div>
+        <div class="cal-detail-photos">${urls.map(u =>
+          `<img src="${VP.esc(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
+      </div>`
+    : '';
+  const photoGrid = (contentPhotos.length || boxPhotos.length)
+    ? photoGroupHtml('Contenido', contentPhotos) + photoGroupHtml('Caja', boxPhotos)
     : '<div class="vp-empty-sm">Sin fotos</div>';
 
   // Empacado comes from the linked Order's own Shipped Date -- QC rows
