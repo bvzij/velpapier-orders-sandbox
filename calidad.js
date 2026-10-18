@@ -156,6 +156,25 @@ function wire() {
     const isText = id === 'cal-search-order' || id === 'cal-search-product';
     el.addEventListener(isText ? 'input' : 'change', () => { currentPage = 1; render(); });
   });
+
+  // Small × button inside each search field, so clearing it is one tap
+  // instead of select-all-then-backspace. Only one field's worth of text
+  // is cleared -- the other search box (and Cliente) stay exactly as they
+  // were, since the two are meant to be combined.
+  [['cal-search-order', 'cal-search-order-clear'], ['cal-search-product', 'cal-search-product-clear']].forEach(([inputId, btnId]) => {
+    const input = document.getElementById(inputId);
+    const btn = document.getElementById(btnId);
+    const syncVisibility = () => btn.classList.toggle('visible', input.value.trim().length > 0);
+    input.addEventListener('input', syncVisibility);
+    btn.addEventListener('click', () => {
+      input.value = '';
+      syncVisibility();
+      currentPage = 1;
+      render();
+      input.focus();
+    });
+    syncVisibility();
+  });
   ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => { currentPage = 1; render(); });
   });
@@ -316,16 +335,28 @@ function filteredRows() {
     });
   }
 
+  // Pedido matches ONLY the order ids from the checked channel(s) -- the
+  // earlier version also matched the guía (tracking id) unconditionally,
+  // which is why "153" matched an order whose real id never contained it
+  // (the guía did) regardless of which channel box was checked. For
+  // Shopify, also checks Shopify Order Number (the short "#1551" people
+  // actually search by) alongside the long raw Shopify Order ID -- the
+  // two are different fields and searching "1551" only ever matched the
+  // long id, which it isn't a substring of.
   if (orderQ) {
     rows = rows.filter(r => {
       const ids = orderIdsOf(r);
-      const tracking = String(r['Tracking ID'] || '').toLowerCase();
-      if (tracking.includes(orderQ)) return true;
-      const candidateIds = [
-        ...(orderTiktok ? ids.tiktok : []),
-        ...(orderShopify ? ids.shopify : []),
-      ];
-      return candidateIds.some(id => String(id).toLowerCase().includes(orderQ));
+      if (orderTiktok && ids.tiktok.some(id => String(id).toLowerCase().includes(orderQ))) return true;
+      if (orderShopify) {
+        const match = ids.shopify.some(id => {
+          if (String(id).toLowerCase().includes(orderQ)) return true;
+          const o = ORDERS_BY_ID[id];
+          const num = o && o['Shopify Order Number'] ? String(o['Shopify Order Number']).toLowerCase() : '';
+          return num.includes(orderQ) || num.replace('#', '').includes(orderQ);
+        });
+        if (match) return true;
+      }
+      return false;
     });
   }
 
