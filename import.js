@@ -11,7 +11,7 @@ const N8N_URL     = 'https://n8n.srv2017849.hstgr.cloud/webhook/tiktok-import';
 //         n8n workflow is updated.
 // STEP 2: once n8n validates X-VP-Session, set this to false, then change
 //         the n8n webhook path so the old URL stops working.
-const N8N_SEND_LEGACY_TOKEN = true;
+const N8N_SEND_LEGACY_TOKEN = false;
 const N8N_LEGACY_TOKEN = '0924';
 
 let API_TOKEN = localStorage.getItem('vp_token') || '';
