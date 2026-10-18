@@ -156,8 +156,6 @@ function wire() {
     const isText = id === 'cal-search-order' || id === 'cal-search-product';
     el.addEventListener(isText ? 'input' : 'change', () => { currentPage = 1; render(); });
   });
-  // Channel checkboxes for Pedido and Producto -- re-run the filter the
-  // moment either is toggled, same as typing in the text box.
   ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => { currentPage = 1; render(); });
   });
@@ -178,9 +176,6 @@ function wire() {
     document.getElementById('cal-from').value = '';
     document.getElementById('cal-to').value = '';
     document.getElementById('cal-customer').value = '';
-    // Checkboxes reset to their default "both channels" state, not
-    // unchecked -- an empty search box with both boxes off would look
-    // identical to "cleared" but actually match nothing if later typed into.
     ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
       document.getElementById(id).checked = true;
     });
@@ -189,6 +184,7 @@ function wire() {
     render();
     closeSidebar();
   });
+}
 
 function applyViewMode(mode) {
   viewMode = mode === 'list' ? 'list' : 'tiles';
@@ -306,10 +302,6 @@ function filteredRows() {
     rows = rows.filter(r => String(r['Primary Username'] || '').toLowerCase().includes(custTyped));
   }
 
-  // QC rows carry no date of their own (same gap found throughout the QC
-  // pipeline) -- Desde/Hasta silently matched zero rows always, since
-  // VP.asDate(r['Timestamp']) was always undefined. The real date lives
-  // on the linked Order's Shipped Date.
   if (from || to) {
     const fromMs = from ? new Date(from + 'T00:00:00').getTime() : null;
     const toMs = to ? new Date(to + 'T23:59:59').getTime() : null;
@@ -324,9 +316,6 @@ function filteredRows() {
     });
   }
 
-  // Pedido: matches the tracking ID (guía) always, plus the TikTok and/or
-  // Shopify order ids per the checkboxes -- an unchecked channel's own
-  // order ids never match, even if the text happens to overlap.
   if (orderQ) {
     rows = rows.filter(r => {
       const ids = orderIdsOf(r);
@@ -340,10 +329,6 @@ function filteredRows() {
     });
   }
 
-  // Producto: only matches product names from the checked channel(s) --
-  // this is the exact fix for the "ana" false-positive (a product name
-  // containing "ana" no longer surfaces every customer whose own name
-  // happens to match, since product and customer are now separate fields).
   if (productQ) {
     rows = rows.filter(r => {
       const names = productNamesForChannels(r, productTiktok, productShopify);
@@ -504,33 +489,25 @@ function cardHtml(r) {
 function listRowHtml(r) {
   const photos = photosOf(r);
   const ids    = orderIdsOf(r);
-  const notesCount = linkedOrderNotesCount(ids);
+  const prods  = productSummary(r);
   const thumb  = photos.length
     ? `<img class="cal-list-thumb" src="${VP.esc(photos[0])}" loading="lazy" alt=""
             data-lightbox="1" onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
     : `<div class="cal-list-thumb cal-list-thumb--empty">—</div>`;
 
-  // Same redesign as the card: prominent (non-bold) TikTok ID next to the
-  // username, product-name text dropped in favor of the fixed count badges.
-  const ttIdHtml = ids.tiktok.length
-    ? ` <span class="vp-qc-ttid-prominent">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>`
-    : '';
-
   return `<div class="cal-list-row" data-qcid="${VP.esc(r['QC ID'] || '')}">
     ${thumb}
     <div class="cal-list-main">
-      <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}${ttIdHtml}</div>
-      <div class="cal-list-sub">${VP.esc(r['Tracking ID'] || '—')}</div>
+      <div class="cal-list-user">${VP.esc(r['Primary Username'] || '—')}</div>
+      <div class="cal-list-sub">
+        <code>${VP.esc(r['Tracking ID'] || '—')}</code>
+        ${prods.length ? ` · ${VP.esc(prods.slice(0, 2).join(', '))}${prods.length > 2 ? ` +${prods.length - 2}` : ''}` : ''}
+      </div>
     </div>
-    <div class="cal-list-tags">
-      <span class="vp-qc-count-badge tiktok"><span class="vp-qc-count-label">TikTok:</span><span class="vp-qc-count-num">${ids.tiktok.length}</span></span>
-      <span class="vp-qc-count-badge shopify"><span class="vp-qc-count-label">Shopify:</span><span class="vp-qc-count-num">${ids.shopify.length}</span></span>
-      <span class="vp-qc-count-badge manual"><span class="vp-qc-count-label">Manual:</span><span class="vp-qc-count-num">${ids.manual.length}</span></span>
-    </div>
+    <div class="cal-list-tags">${channelTags(ids)}</div>
     <div class="cal-list-when">
       ${VP.esc(fmtTimeline24h(r['Timestamp']))}
       ${photos.length > 1 ? `<br><span class="cal-list-photocount">${photos.length} fotos</span>` : ''}
-      ${notesCount ? `<br>${notesCount} nota${notesCount !== 1 ? 's' : ''}` : ''}
     </div>
   </div>`;
 }
