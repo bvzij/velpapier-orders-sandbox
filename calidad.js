@@ -429,20 +429,18 @@ function cardHtml(r) {
     ? `<div class="vp-qc-photos-more" data-lightbox="1" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
     : '';
 
-  // Info list: packed date, guía, per-channel order counts, notes count --
-  // everything you'd actually want when troubleshooting for a customer.
-  // Product names and the QC row's own Notes text were dropped -- the
-  // card is a quick-scan summary now, full detail lives in the modal.
-  // Always four lines, same order, every card -- a count of 0 still shows
-  // as "0 Shopify" rather than the line disappearing, so the shape of the
-  // card never shifts between orders.
-  const infoLines = [
-    `Empacado ${fmtTimeline24h(r['Timestamp'])}`,
-    `Guía ${r['Tracking ID'] || '—'}`,
-    `${ids.tiktok.length} pedido${ids.tiktok.length !== 1 ? 's' : ''} TikTok`,
-    `${ids.shopify.length} pedido${ids.shopify.length !== 1 ? 's' : ''} Shopify`,
-    notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : 'Sin notas',
-  ];
+  // Fixed five-line info block, same order on every card: packed date,
+  // guía (no label -- the format alone reads as a tracking number),
+  // then a colored count badge per channel plus a notes badge. Counts
+  // always show, even at 0, so the shape never shifts card to card.
+  const infoHtml = `
+    <div>Empacado: ${VP.esc(fmtTimeline24h(r['Timestamp']))}</div>
+    <div>${VP.esc(r['Tracking ID'] || '—')}</div>
+    <div><span class="vp-qc-count-badge tiktok">TikTok: ${ids.tiktok.length}</span></div>
+    <div><span class="vp-qc-count-badge shopify">Shopify: ${ids.shopify.length}</span></div>
+    <div><span class="vp-qc-count-badge manual">Manual: ${ids.manual.length}</span></div>
+    <div>${notesCount ? `${notesCount} nota${notesCount !== 1 ? 's' : ''}` : 'Sin notas'}</div>
+  `;
 
   return `<article class="vp-qc-card" data-qcid="${VP.esc(r['QC ID'] || '')}">
     <div class="vp-qc-photos">
@@ -450,7 +448,7 @@ function cardHtml(r) {
     </div>
     <div class="vp-qc-body">
       <div class="vp-qc-user">${VP.esc(r['Primary Username'] || '—')}${ids.tiktok.length ? ` <span class="vp-qc-ttid-prominent">${VP.esc(ids.tiktok[0])}${ids.tiktok.length > 1 ? ' +' + (ids.tiktok.length - 1) : ''}</span>` : ''}</div>
-      <div class="vp-qc-info">${infoLines.map(l => `<div>${VP.esc(l)}</div>`).join('')}</div>
+      <div class="vp-qc-info">${infoHtml}</div>
     </div>
   </article>`;
 }
@@ -475,7 +473,7 @@ function listRowHtml(r) {
     </div>
     <div class="cal-list-tags">${channelTags(ids)}</div>
     <div class="cal-list-when">
-      ${VP.esc(VP.fmtDateTime(r['Timestamp']))}
+      ${VP.esc(fmtTimeline24h(r['Timestamp']))}
       ${photos.length > 1 ? `<br><span class="cal-list-photocount">${photos.length} fotos</span>` : ''}
     </div>
   </div>`;
@@ -655,7 +653,7 @@ function showOrderDetailModal(r) {
       <div class="cal-detail-scroll">
         <div class="cal-detail-meta">
           <div><span class="cal-detail-label">Guía</span><code>${VP.esc(r['Tracking ID'] || '—')}</code></div>
-          <div><span class="cal-detail-label">Empacado</span>${shippedDate ? VP.esc(VP.fmtDateTime(shippedDate)) : '—'}</div>
+          <div><span class="cal-detail-label">Empacado</span>${shippedDate ? VP.esc(fmtTimeline24h(shippedDate)) : '—'}</div>
           ${r['Packer'] ? `<div><span class="cal-detail-label">Empacador</span>${VP.esc(r['Packer'])}</div>` : ''}
           ${r['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span></div>` : ''}
         </div>
