@@ -587,7 +587,7 @@ async function performOrderUpdate(orderId, fields) {
 // this TikTok shipment" (the link picker elsewhere on this page). No
 // link yet -- offer the same picker here instead of a dead end.
 function showQCViewModal(r) {
-  const trackingId = r.Channel === 'TikTok' ? r.ID : r.LinkedShipment;
+  const trackingId = r.Channel === 'TikTok' ? r.TrackingId : r.LinkedShipment;
   if (!trackingId) {
     showNoShipmentLinkedModal(r);
     return;
