@@ -582,6 +582,88 @@ async function performOrderUpdate(orderId, fields) {
   return apiPost({ action: 'update_order', order_id: orderId, fields: fields });
 }
 
+// TikTok: the order's own ID is its tracking ID. Shopify/Manual: only
+// reachable via Linked Shipment, set when someone confirms "send with
+// this TikTok shipment" (the link picker elsewhere on this page). No
+// link yet -- offer the same picker here instead of a dead end.
+function showQCViewModal(r) {
+  const trackingId = r.Channel === 'TikTok' ? r.ID : r.LinkedShipment;
+  if (!trackingId) {
+    showNoShipmentLinkedModal(r);
+    return;
+  }
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal cal-detail-modal">
+    <div class="modal-title">Calidad · ${escapeHtml(trackingId)}</div>
+    <div class="cal-detail-scroll" id="qc-view-body"><div class="vp-loading">Cargando…</div></div>
+    <div class="modal-actions"><button class="btn" id="qc-view-close">Cerrar</button></div>
+  </div></div>`;
+  document.getElementById('qc-view-close').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target.id === 'modal-overlay') closeModal();
+  });
+  loadQCViewBody(trackingId);
+}
+
+async function loadQCViewBody(trackingId) {
+  const body = document.getElementById('qc-view-body');
+  try {
+    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(trackingId)}`);
+    const row = (data.records || [])[0];
+    if (!row) { body.innerHTML = '<div class="vp-empty-sm">Sin registro de calidad para esta guía.</div>'; return; }
+
+    const photoCols = ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5'];
+    const photos = photoCols.map(c => row[c]).filter(Boolean);
+    const photoGrid = photos.length
+      ? `<div class="cal-detail-photos">${photos.map(u =>
+          `<img src="${escapeHtml(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>`
+      : '<div class="vp-empty-sm">Sin fotos</div>';
+
+    body.innerHTML = `
+      <div class="cal-detail-meta">
+        <div><span class="cal-detail-label">Empacador</span>${escapeHtml(row['Packer'] || '—')}</div>
+        ${row['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${escapeHtml(row['Notes'])}</span></div>` : ''}
+      </div>
+      <div class="cal-detail-section-title">Fotos</div>
+      ${photoGrid}`;
+  } catch (e) {
+    body.innerHTML = '<div class="vp-empty-sm">Error al cargar el registro de calidad.</div>';
+  }
+}
+
+// Shown for a Shopify/Manual order with no Linked Shipment yet -- same
+// search/link UI as the status-change modal, reused here so "I don't know
+// which shipment this went with" doesn't need a separate trip to Pedidos.
+function showNoShipmentLinkedModal(r) {
+  const c = document.getElementById('modal-container');
+  const picker = renderLinkPicker('qcview-link', r.CustomerId, false);
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal">
+    <div class="modal-title">Sin envío vinculado</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-bottom:1rem">Este pedido de Shopify no está vinculado a ningún envío de TikTok. ¿Sabes con cuál se envió?</div>
+    ${picker || '<div class="vp-empty-sm">Este cliente no tiene pedidos de TikTok recientes para vincular.</div>'}
+    <div class="modal-actions">
+      <button class="btn" id="qcview-link-cancel">Cerrar</button>
+      ${picker ? `<button class="btn btn-primary" id="qcview-link-confirm">Vincular</button>` : ''}
+    </div>
+  </div></div>`;
+  document.getElementById('qcview-link-cancel').addEventListener('click', closeModal);
+  const confirmBtn = document.getElementById('qcview-link-confirm');
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', async () => {
+      const link = readLinkPicker('qcview-link');
+      if (!link) return;
+      try {
+        const result = await performOrderUpdate(r.ID, { 'Linked Shipment': link });
+        if (result.result !== 'updated') throw new Error(result.error || 'Error');
+        r.LinkedShipment = link;
+        closeModal();
+        showToast('✓ Vinculado');
+        showQCViewModal(r);
+      } catch (e) { showToast('Error: ' + e.message); }
+    });
+  }
+}
+
 function showStatusModal(id, currentStatus) {
   const next = nextStatuses(currentStatus);
   if (!next.length) { showToast('Sin siguiente estado'); return; }
@@ -1245,6 +1327,15 @@ function renderOrderRow(r, showActions) {
     undoBtn.className = 'btn btn-xs btn-undo'; undoBtn.textContent = '↩'; undoBtn.title = `Revertir a ${prev}`;
     undoBtn.addEventListener('click', () => requestUndo(id, status));
     hoverZone.appendChild(undoBtn);
+  }
+
+  // Only once an order has actually shipped does it have a real QC record
+  // to show -- before that there's nothing packed yet to look at.
+  if (isShipped(status)) {
+    const qcBtn = document.createElement('button');
+    qcBtn.className = 'btn btn-xs'; qcBtn.textContent = 'Ver calidad';
+    qcBtn.addEventListener('click', () => showQCViewModal(r));
+    hoverZone.appendChild(qcBtn);
   }
 
   const precio = document.createElement('div');
