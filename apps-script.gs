@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-17.6';
+const SCRIPT_VERSION = '2026-10-17.7';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 
@@ -3209,31 +3209,72 @@ function appendTikTokImportHistoryDeduped(allHistoryRecords) {
 
 // ─── HISTORICAL / BACKFILL CSV IMPORT ──────────────────────────────────────
 //
-// Standalone tool (Ajustes page). Enriches TikTok Import History ONLY --
-// never touches Orders or QC, by design (see To-Do list for full scoping).
+// Standalone tool (Ajustes page). Two jobs, in this order:
 //
-// Match key: Order ID + SKU ID (trimmed -- TikTok's export pads these with
-// a stray trailing tab character, same whitespace-trim convention used
-// everywhere else in this file).
+//   1. TikTok Import History: update-if-exists / insert-if-new.
+//        - 'Order Status' / 'Order Substatus' ALWAYS overwritten with the
+//          incoming CSV value (live lifecycle fields, expected to change).
+//        - Shipped/Delivered/Cancelled Time, Cancel By, Cancel Reason are
+//          filled ONLY IF CURRENTLY BLANK (one-time facts, never
+//          overwritten -- protects against a stale re-upload).
+//        - Unmatched rows inserted fresh with whatever fields are present.
 //
-// Per matched row:
-//   - 'Order Status' / 'Order Substatus' are ALWAYS overwritten with the
-//     incoming CSV value (these are live lifecycle fields expected to
-//     change run over run).
-//   - Shipped Time / Delivered Time / Cancelled Time / Cancel By /
-//     Cancel Reason are filled ONLY IF CURRENTLY BLANK (one-time facts,
-//     never overwritten once set -- protects against a stale re-upload).
-// Unmatched rows are inserted fresh with whatever fields are present.
+//   2. Orders: for records whose substatus means the courier already has
+//      the package (or is about to collect it), make sure an Orders row
+//      actually EXISTS -- creating it if it does not.
 //
-// Records with substatus 'Awaiting shipment' or 'Unpaid' should already be
-// filtered out client-side before this is ever called (no Tracking ID yet,
-// not useful), but this function silently skips them too as a safety net
-// in case the frontend filter is ever bypassed.
+// Job 2 is the fix for a silent, long-standing gap: this tool used to be
+// history-only by design, so a general TikTok export run through it would
+// log real shipped/delivered orders into History and leave Orders with no
+// corresponding row, forever, with nothing surfaced to the operator. An
+// order that has a Tracking ID but no Orders row is by definition an
+// anomaly -- better to create it and have it show up as unpacked work in
+// the dashboard than to swallow it silently.
+//
+// Substatus routing:
+//   Unpaid / Awaiting shipment -> History only (no Tracking ID yet; these
+//       are also already dropped client-side before they reach us).
+//   Canceled                   -> History only, never an Orders row.
+//   Awaiting collection        -> History + Orders, Status 'Pagado'
+//       (label printed, box packed, courier simply hasn't collected yet).
+//   In transit / Delivered     -> History + Orders, Status 'Enviado'.
+//   Completed                  -> History + Orders, Status 'Archivado'.
+//
+// Combined shipments: one physical package can carry several TikTok order
+// IDs under ONE Tracking ID, and the CSV repeats that Tracking ID on every
+// line-item row of every order in it. Orders rows are therefore built per
+// TRACKING ID, with Order ID stored " + "-joined -- the same convention
+// importTikTokOrders() uses. Price must be summed per UNIQUE ORDER ID
+// (Order Amount is the per-order total, repeated on each of that order's
+// SKU rows) -- never per row, which would multiply the total by the line
+// item count, and never once per shipment, which would drop every order
+// but one.
 
 const BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
 const BACKFILL_FILL_ONLY_FIELDS = [
   'Shipped Time', 'Delivered Time', 'Cancelled Time', 'Cancel By', 'Cancel Reason'
 ];
+
+// Maps a TikTok Order Substatus to the dashboard's own Status, for orders
+// that were never packed through this dashboard (pre-migration backlog,
+// or any future backfill of historical data). Status only ever moves
+// FORWARD along STATUS_FLOW order (No Pagado -> Pagado -> Enviado ->
+// Archivado) -- never backward, so a record that's behind an order's
+// current real status can't accidentally downgrade it.
+//
+// Keys are lowercased at lookup time (see backfillTargetStatus) because
+// TikTok's casing for these values has not proven stable across exports.
+const BACKFILL_SUBSTATUS_TO_STATUS = {
+  'awaiting collection': 'Pagado',
+  'in transit':          'Enviado',
+  'delivered':           'Enviado',
+  'completed':           'Archivado',
+};
+const STATUS_RANK = { 'No Pagado': 0, 'Pagado': 1, 'Enviado': 2, 'Archivado': 3 };
+
+function backfillTargetStatus(substatus) {
+  return BACKFILL_SUBSTATUS_TO_STATUS[String(substatus || '').trim().toLowerCase()] || '';
+}
 
 // order_id is digits-only here, matching the VPS's own cleaning
 // (tiktok_lib.py: re.sub(r"[^\d]", "", ...)) -- previously this only
@@ -3248,6 +3289,26 @@ function backfillKey(orderId, skuId) {
   return String(orderId || '').replace(/\D/g, '') + '||' + String(skuId || '').trim();
 }
 
+// Combined shipments store a " + "-joined Order ID (see importTikTokOrders).
+// One component order having a given substatus means the whole physical
+// shipment has it, so this maps every individual TikTok order_id to the
+// Orders row that contains it, however that row's Order ID is joined.
+function buildOrderIdComponentIndex(ordersSheet, oh) {
+  const iOrderId = oh.indexOf('Order ID');
+  const lastRow = ordersSheet.getLastRow();
+  if (lastRow < 2 || iOrderId < 0) return {};
+  const idVals = readColumn(ordersSheet, iOrderId);
+  const index = {};
+  idVals.forEach((v, i) => {
+    String(v || '').split(' + ').forEach(part => {
+      const p = part.trim();
+      if (p) index[p] = i; // 0-based data row index
+    });
+  });
+  return index;
+}
+
+// ─── HISTORY PASS ──────────────────────────────────────────────────────────
 // Shared by both preview and commit so the two can never drift apart.
 // dryRun = true -> compute counts only, no writes.
 function runTikTokBackfill(records, dryRun) {
@@ -3268,6 +3329,10 @@ function runTikTokBackfill(records, dryRun) {
   let updatedCount = 0, insertedCount = 0, skippedCount = 0;
   const newRows = [];
   const touchedRowIndexes = {};  // dedupe -- only meaningful for the summary
+  // Guard against the same order/SKU appearing twice in ONE incoming file:
+  // without this, both copies miss rowIndexByKey and get inserted, which is
+  // exactly how duplicate history rows accumulated across past runs.
+  const seenThisRun = {};
 
   records.forEach(rec => {
     const substatus = String(rec.order_substatus || '').trim();
@@ -3304,8 +3369,14 @@ function runTikTokBackfill(records, dryRun) {
           }
         }
       });
+    } else if (seenThisRun[key]) {
+      // Second copy of a key that is brand new to the sheet but already
+      // queued for insert by an earlier row in this same file.
+      skippedCount++;
+      return;
     } else {
       // ─── Not found: insert fresh row, all available fields ────────────
+      seenThisRun[key] = true;
       insertedCount++;
       if (dryRun) return;
 
@@ -3322,13 +3393,13 @@ function runTikTokBackfill(records, dryRun) {
     // Write back only the rows that changed (existingData was mutated in place),
     // then append any brand-new rows -- both in single batched calls.
     if (existingData.length) {
-            // Only the 7 columns this tool can change are written back, not the whole sheet
+      // Only the 7 columns this tool can change are written back, not the whole sheet
       ['Order Status', 'Order Substatus'].concat(BACKFILL_FILL_ONLY_FIELDS).forEach(name => {
         const c = headers.indexOf(name);
         if (c < 0) return;
         sheet.getRange(2, c + 1, existingData.length, 1).setValues(existingData.map(r => [r[c]]));
       });
-            // (full-sheet rewrite removed: too slow at 12k+ rows)
+      // (full-sheet rewrite removed: too slow at 12k+ rows)
     }
     if (newRows.length) {
       const startRow = sheet.getLastRow() + 1;
@@ -3345,43 +3416,287 @@ function runTikTokBackfill(records, dryRun) {
   };
 }
 
-function backfillTikTokHistoryPreview(body) {
-  const result = runTikTokBackfill(body.records || [], true);
-  return jsonResponse(result);
-}
+// ─── ORDERS PASS: grouping ─────────────────────────────────────────────────
+// Groups Orders-eligible records into one entry per Tracking ID, mirroring
+// the VPS's group_shipments() (tiktok_lib.py) so both import paths build
+// Orders rows from identically-shaped data.
+//
+// Price: order_amount is the per-ORDER total, repeated on every SKU row of
+// that order. We therefore take it once per unique order_id (max, so a
+// divergent row can never silently lower the total) and sum those per-order
+// figures across the shipment.
+function groupBackfillShipments(records) {
+  const groups = {};
 
-// Maps a TikTok Order Substatus to the dashboard's own Status, for orders
-// that were never packed through this dashboard (pre-migration backlog,
-// or any future backfill of historical data). Status only ever moves
-// FORWARD along STATUS_FLOW order (No Pagado -> Pagado -> Enviado ->
-// Archivado) -- never backward, so a record that's behind an order's
-// current real status can't accidentally downgrade it.
-const BACKFILL_SUBSTATUS_TO_STATUS = {
-  'Delivered':  'Enviado',
-  'In transit': 'Enviado',
-  'Completed':  'Archivado',
-};
-const STATUS_RANK = { 'No Pagado': 0, 'Pagado': 1, 'Enviado': 2, 'Archivado': 3 };
+  records.forEach(rec => {
+    const targetStatus = backfillTargetStatus(rec.order_substatus);
+    if (!targetStatus) return;                       // Canceled / Unpaid / Awaiting shipment / unmapped
 
-// Combined shipments store a " + "-joined Order ID (see importTikTokOrders).
-// One component order having a given substatus means the whole physical
-// shipment has it, so this maps every individual TikTok order_id to the
-// Orders row that contains it, however that row's Order ID is joined.
-function buildOrderIdComponentIndex(ordersSheet, oh) {
-  const iOrderId = oh.indexOf('Order ID');
-  const lastRow = ordersSheet.getLastRow();
-  if (lastRow < 2 || iOrderId < 0) return {};
-  const idVals = readColumn(ordersSheet, iOrderId);
-  const index = {};
-  idVals.forEach((v, i) => {
-    String(v || '').split(' + ').forEach(part => {
-      const p = part.trim();
-      if (p) index[p] = i; // 0-based data row index
-    });
+    const tid = String(rec.tracking_id || '').trim();
+    if (!tid) return;                                // no label yet -- cannot be an Orders row
+
+    const orderId = String(rec.order_id || '').replace(/\D/g, '');
+    if (!orderId) return;
+
+    if (!groups[tid]) {
+      groups[tid] = {
+        tracking_id:     tid,
+        order_ids:       [],
+        username:        '',
+        products:        [],
+        line_items:      [],
+        price_by_order:  {},
+        best_status:     'No Pagado',
+        created_time:    '',
+      };
+    }
+    const g = groups[tid];
+
+    if (g.order_ids.indexOf(orderId) === -1) g.order_ids.push(orderId);
+
+    // First non-empty buyer username wins; every row of a shipment carries
+    // the same buyer, so this is stable.
+    if (!g.username) g.username = String(rec.buyer_username || '').trim();
+
+    // Earliest Created Time across the shipment's rows, as a plain string
+    // compare -- TikTok's format sorts correctly lexicographically within a
+    // single export, and this is only ever used as a display/record date.
+    const ct = String(rec.created_time || '').trim();
+    if (ct && (!g.created_time || ct < g.created_time)) g.created_time = ct;
+
+    const qtyRaw = String(rec.quantity || '').trim();
+    const qty = /^\d+$/.test(qtyRaw) ? parseInt(qtyRaw, 10) : 1;
+    const name = String(rec.product_name || '').trim();
+    const variation = String(rec.variation || '').trim();
+    if (name) {
+      g.products.push(qty + 'x ' + name + (variation ? ' (' + variation + ')' : ''));
+      g.line_items.push({
+        sku_id:    String(rec.sku_id || '').trim(),
+        product:   name,
+        variation: variation,
+        qty:       qty,
+      });
+    }
+
+    // Per-unique-order price. rec.order_amount is already a number (the
+    // frontend strips the "MXN " prefix and comma separators before send).
+    const amt = Number(rec.order_amount) || 0;
+    const prev = g.price_by_order[orderId];
+    g.price_by_order[orderId] = (prev === undefined || amt > prev) ? amt : prev;
+
+    // Status for the whole shipment = the furthest-along status any of its
+    // component orders reports (never moves backward).
+    if (STATUS_RANK[targetStatus] > STATUS_RANK[g.best_status]) {
+      g.best_status = targetStatus;
+    }
   });
-  return index;
+
+  return Object.keys(groups).map(tid => {
+    const g = groups[tid];
+    let total = 0;
+    Object.keys(g.price_by_order).forEach(oid => { total += g.price_by_order[oid]; });
+    g.price = Math.round(total * 100) / 100;
+    g.products_str = g.products.join('; ');
+    delete g.price_by_order;
+    delete g.products;
+    return g;
+  });
 }
 
+// ─── ORDERS PASS: create the missing rows ──────────────────────────────────
+// Only ever CREATES rows that are absent. A shipment whose Tracking ID --
+// or any of whose component Order IDs -- is already represented in Orders
+// is left completely alone here; moving an existing row's status forward is
+// syncOrderStatusFromBackfill()'s job, not this one.
+//
+// Customer resolution is username-only (exact -> alias -> fuzzy, via the
+// shared findCustomerByUsername), because this path has no shipping-label
+// PDF and therefore no address/phone to match on. An unrecognised username
+// gets a bare stub customer (username only, no address) -- acceptable
+// because the Customers sheet is already rich enough that genuine new
+// stubs are rare, and they enrich naturally on the customer's next normal
+// order.
+function createMissingOrdersFromBackfill(records, dryRun) {
+  const shipments = groupBackfillShipments(records);
+  if (!shipments.length) {
+    return { orders_created: 0, customers_created: 0, orders_skipped_existing: 0 };
+  }
+
+  const orders = getOrdersSheet();
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const componentIndex = buildOrderIdComponentIndex(orders, oh);
+
+  const iTrk = oh.indexOf('Tracking ID');
+  const trackingSet = {};
+  if (iTrk >= 0 && orders.getLastRow() > 1) {
+    readColumn(orders, iTrk).forEach(v => {
+      const t = String(v || '').trim();
+      if (t) trackingSet[t] = true;
+    });
+  }
+
+  // Which shipments genuinely need a new row?
+  const toCreate = [];
+  let skippedExisting = 0;
+  shipments.forEach(s => {
+    if (trackingSet[s.tracking_id]) { skippedExisting++; return; }
+    const anyKnown = s.order_ids.some(oid => componentIndex[oid] !== undefined);
+    if (anyKnown) { skippedExisting++; return; }
+    toCreate.push(s);
+  });
+
+  if (!toCreate.length) {
+    return { orders_created: 0, customers_created: 0, orders_skipped_existing: skippedExisting };
+  }
+
+  // ─── Resolve customers (username-only: exact -> alias -> fuzzy) ─────────
+  const customersSheet = getCustomersSheet();
+  const customers = sheetToObjects(customersSheet);
+
+  let maxNum = 0;
+  customers.forEach(c => {
+    const id = c['Customer ID'];
+    if (typeof id === 'string' && id.indexOf('CUST-') === 0) {
+      const n = parseInt(id.replace('CUST-', ''), 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  });
+
+  const newCustomerRows = [];
+  const newCustomerLog = [];
+  const resolvedByUsername = {};   // normalized username -> Customer ID
+
+  toCreate.forEach(s => {
+    if (!s.username) { s.customer_id = ''; return; }
+    const norm = normalizeUsername(s.username);
+    if (resolvedByUsername[norm] !== undefined) {
+      s.customer_id = resolvedByUsername[norm];
+      return;
+    }
+    const hit = findCustomerByUsername(customers, s.username);
+    if (hit && hit.customer && hit.customer['Customer ID']) {
+      s.customer_id = hit.customer['Customer ID'];
+      resolvedByUsername[norm] = s.customer_id;
+      return;
+    }
+    // No match anywhere -- create a bare stub.
+    maxNum++;
+    const newId = 'CUST-' + String(maxNum).padStart(3, '0');
+    s.customer_id = newId;
+    resolvedByUsername[norm] = newId;
+    newCustomerLog.push({ customer_id: newId, username: s.username });
+    newCustomerRows.push({ customer_id: newId, username: s.username });
+  });
+
+  // ─── Resolve SKUs to Catalog IDs in ONE pass, as the live import does ───
+  const allLineItems = [];
+  toCreate.forEach(s => { (s.line_items || []).forEach(li => allLineItems.push(li)); });
+  const skuToCatalogId = (!dryRun && allLineItems.length) ? resolveLineItemsBatch(allLineItems) : {};
+
+  if (dryRun) {
+    return {
+      orders_created: toCreate.length,
+      customers_created: newCustomerRows.length,
+      orders_skipped_existing: skippedExisting,
+    };
+  }
+
+  // ─── Write the new customer stubs ──────────────────────────────────────
+  if (newCustomerRows.length) {
+    const ch = customersSheet.getRange(1, 1, 1, customersSheet.getLastColumn()).getValues()[0];
+    const rows = newCustomerRows.map(nc => {
+      const fieldValues = {
+        'Customer ID':          nc.customer_id,
+        'Primary Username':     nc.username,
+        'Aliases':              '',
+        'First Name':           '',
+        'Surname':              '',
+        'Initials (TT Format)': '',
+        'Street + Number':      '',
+        'City':                 '',
+        'State':                '',
+        'ZIP':                  '',
+        'Phone Partial':        '',
+        'Phone Full':           '',
+        'Email':                '',
+        'First Order Date':     nowISO(),
+        'Shipment Count':       0,
+        'Notes':                'Creado por la importación histórica de TikTok (sin dirección)',
+        'Merge Flag':           false,
+      };
+      return ch.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
+    });
+    customersSheet.getRange(customersSheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    newCustomerLog.forEach(c => {
+      logAuditEvent('create_customer', 'Customer', c.customer_id, {
+        primary_username: c.username || '',
+        source: 'tiktok_backfill',
+      });
+    });
+  }
+
+  // ─── Build the Orders rows ─────────────────────────────────────────────
+  const PRODUCT_SLOTS = 30;
+  const slotCols = [];
+  for (let n = 1; n <= PRODUCT_SLOTS; n++) {
+    slotCols.push({
+      catalogCol: oh.indexOf('Product ' + n + ' Catalog ID'),
+      qtyCol:     oh.indexOf('Product ' + n + ' Qty'),
+    });
+  }
+
+  const rows = [];
+  toCreate.forEach(s => {
+    const row = new Array(oh.length).fill('');
+    const joinedOrderIds = s.order_ids.join(' + ') || generateUUID();
+
+    row[oh.indexOf('Order ID')]         = joinedOrderIds;
+    row[oh.indexOf('Tracking ID')]      = s.tracking_id;
+    row[oh.indexOf('Customer ID')]      = s.customer_id || '';
+    row[oh.indexOf('Primary Username')] = s.username || '';
+    row[oh.indexOf('Channel')]          = 'TikTok';
+    row[oh.indexOf('Status')]           = s.best_status;
+    row[oh.indexOf('Products')]         = s.products_str || '';
+    row[oh.indexOf('Price')]            = Number(s.price) || 0;
+    row[oh.indexOf('Created Date')]     = s.created_time || nowISO();
+    row[oh.indexOf('Linked Shipment')]  = s.tracking_id;
+
+    const lineItems = s.line_items || [];
+    for (let i = 0; i < lineItems.length && i < PRODUCT_SLOTS; i++) {
+      const li = lineItems[i];
+      const catalogId = skuToCatalogId[String(li.sku_id || '').trim()] || '';
+      const slot = slotCols[i];
+      if (slot.catalogCol >= 0) row[slot.catalogCol] = catalogId;
+      if (slot.qtyCol >= 0)     row[slot.qtyCol] = Number(li.qty) || 0;
+    }
+
+    rows.push(row);
+  });
+
+  if (rows.length) {
+    const startRow = orders.getLastRow() + 1;
+    forceTextFormat(orders, oh, ['Order ID', 'Tracking ID'], startRow, rows.length);
+    orders.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+
+    toCreate.forEach(s => {
+      logAuditEvent('backfill_create_order', 'Order', s.order_ids.join(' + '), {
+        tracking_id: s.tracking_id,
+        channel:     'TikTok',
+        status:      s.best_status,
+        customer_id: s.customer_id || '',
+        source:      'tiktok_backfill',
+      });
+    });
+  }
+
+  return {
+    orders_created:          rows.length,
+    customers_created:       newCustomerRows.length,
+    orders_skipped_existing: skippedExisting,
+  };
+}
+
+// ─── ORDERS PASS: move EXISTING rows' status forward ───────────────────────
 // Called once per backfill commit, after runTikTokBackfill. Separate pass
 // over the SAME records, writing only to Orders' Status column -- the
 // import history write above is unaffected either way.
@@ -3397,14 +3712,13 @@ function syncOrderStatusFromBackfill(records) {
   const changeLog = []; // { rowIdx, orderId, before, after }
 
   records.forEach(rec => {
-    const substatus = String(rec.order_substatus || '').trim();
-    const targetStatus = BACKFILL_SUBSTATUS_TO_STATUS[substatus];
-    if (!targetStatus) return; // Unpaid / Awaiting* / Canceled / unmapped -- do nothing
+    const targetStatus = backfillTargetStatus(rec.order_substatus);
+    if (!targetStatus) return; // Unpaid / Awaiting shipment / Canceled / unmapped -- do nothing
 
     const orderId = String(rec.order_id || '').trim();
     if (!orderId) return;
     const rowIdx = componentIndex[orderId];
-    if (rowIdx === undefined) return; // not in Orders at all -- nothing to sync
+    if (rowIdx === undefined) return; // not in Orders -- createMissingOrders handles it
 
     const current = String(statusVals[rowIdx] || 'No Pagado');
     const currentRank = STATUS_RANK[current] !== undefined ? STATUS_RANK[current] : 0;
@@ -3429,10 +3743,27 @@ function syncOrderStatusFromBackfill(records) {
   return { status_updated: changed.length };
 }
 
+// ─── ENTRY POINTS ──────────────────────────────────────────────────────────
+
+function backfillTikTokHistoryPreview(body) {
+  const records = body.records || [];
+  const history = runTikTokBackfill(records, true);
+  const ordersPreview = createMissingOrdersFromBackfill(records, true);
+  return jsonResponse(Object.assign({}, history, ordersPreview));
+}
+
 function backfillTikTokHistoryCommit(body) {
-  const result = runTikTokBackfill(body.records || [], false);
-  const statusResult = syncOrderStatusFromBackfill(body.records || []);
-  const combined = Object.assign({}, result, statusResult);
+  const records = body.records || [];
+
+  // Order matters: history first (cheap, self-contained), then create any
+  // missing Orders rows, and only then sync statuses -- so a row created
+  // moments ago is already at its correct status and the sync pass finds
+  // nothing left to do for it.
+  const history = runTikTokBackfill(records, false);
+  const ordersResult = createMissingOrdersFromBackfill(records, false);
+  const statusResult = syncOrderStatusFromBackfill(records);
+
+  const combined = Object.assign({}, history, ordersResult, statusResult);
   logAuditEvent('backfill_tiktok_commit', 'TikTokImportHistory', '', combined);
   return jsonResponse(combined);
 }
@@ -5249,4 +5580,81 @@ function deleteMergedCustomerAction(body) {
   logAuditEvent('delete_merged_customer', 'Customer', loseId, { merge_id: mergeId, deleted_row: deletedSnapshot });
 
   return jsonResponse({ result: 'deleted', merge_id: mergeId, customer_id: loseId, username: deletedUsername });
+}
+
+function diagnoseOrphanedHistory() {
+  const orders = getOrdersSheet();
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const iOrderId = oh.indexOf('Order ID');
+  const ordersLastRow = orders.getLastRow();
+  const ordersData = ordersLastRow > 1 ? orders.getRange(2, 1, ordersLastRow - 1, oh.length).getValues() : [];
+
+  // Build a set of every individual Order ID that appears ANYWHERE in Orders,
+  // including inside "+"-joined combined-shipment cells.
+  const ordersIdSet = {};
+  ordersData.forEach(r => {
+    const raw = String(r[iOrderId] || '');
+    raw.split('+').map(s => s.trim()).filter(Boolean).forEach(id => { ordersIdSet[id] = true; });
+  });
+
+  const history = getTikTokImportHistorySheet();
+  const hh = history.getRange(1, 1, 1, history.getLastColumn()).getValues()[0];
+  const iHistOrderId = hh.indexOf('Order ID');
+  const iHistStatus = hh.indexOf('Order Status');
+  const iHistSubstatus = hh.indexOf('Order Substatus');
+  const histLastRow = history.getLastRow();
+  const histData = histLastRow > 1 ? history.getRange(2, 1, histLastRow - 1, hh.length).getValues() : [];
+
+  // ── Duplicate-row check within History itself ──
+  const keyCounts = {};
+  const iHistSku = hh.indexOf('SKU ID');
+  histData.forEach(r => {
+    const key = String(r[iHistOrderId] || '').trim() + '||' + String(r[iHistSku] || '').trim();
+    keyCounts[key] = (keyCounts[key] || 0) + 1;
+  });
+  const dupKeys = Object.keys(keyCounts).filter(k => keyCounts[k] > 1);
+  const dupRowSurplus = dupKeys.reduce((sum, k) => sum + (keyCounts[k] - 1), 0);
+
+  // ── Orphan check: History order IDs with no match anywhere in Orders ──
+  const orphanRows = [];
+  const uniqueOrphanOrderIds = {};
+  histData.forEach(r => {
+    const oid = String(r[iHistOrderId] || '').trim();
+    if (!oid) return;
+    if (!ordersIdSet[oid]) {
+      uniqueOrphanOrderIds[oid] = true;
+      orphanRows.push({
+        order_id: oid,
+        status: r[iHistStatus],
+        substatus: r[iHistSubstatus]
+      });
+    }
+  });
+
+  // Breakdown of orphans by status, so we know how many are "real" (Shipped/
+  // Delivered) vs legitimately-excluded (Cancelled/Unpaid/Awaiting shipment).
+  const statusBreakdown = {};
+  orphanRows.forEach(o => {
+    const key = (o.status || '(blank)') + ' / ' + (o.substatus || '(blank)');
+    statusBreakdown[key] = (statusBreakdown[key] || 0) + 1;
+  });
+
+  Logger.log('=== ORDERS SHEET ===');
+  Logger.log('Total Orders rows: ' + ordersData.length);
+  Logger.log('Unique individual Order IDs found in Orders (incl. "+"-joined): ' + Object.keys(ordersIdSet).length);
+
+  Logger.log('=== IMPORT HISTORY SHEET ===');
+  Logger.log('Total History rows: ' + histData.length);
+  Logger.log('Duplicate Order ID + SKU ID keys in History: ' + dupKeys.length + ' (surplus rows: ' + dupRowSurplus + ')');
+
+  Logger.log('=== ORPHAN CHECK (History order IDs missing from Orders) ===');
+  Logger.log('Total orphaned History rows: ' + orphanRows.length);
+  Logger.log('Unique orphaned Order IDs: ' + Object.keys(uniqueOrphanOrderIds).length);
+  Logger.log('--- Breakdown by Status/Substatus ---');
+  Object.keys(statusBreakdown).sort((a, b) => statusBreakdown[b] - statusBreakdown[a]).forEach(k => {
+    Logger.log(k + ': ' + statusBreakdown[k]);
+  });
+
+  Logger.log('--- First 20 orphaned order IDs (for spot-checking) ---');
+  orphanRows.slice(0, 20).forEach(o => Logger.log(o.order_id + ' | ' + o.status + ' / ' + o.substatus));
 }
