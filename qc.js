@@ -453,6 +453,7 @@ function renderHistoryList() {
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
+  const linkedOrders = allActiveOrders.filter(r => r['Channel'] !== 'TikTok' && r['Linked Shipment']);
   if (tikTokOrders.length === 0) {
     // "Nothing pending" and "nothing has loaded yet" look identical from
     // this filter alone -- hasLoadedOnce (set in loadPending) tells them
@@ -474,6 +475,11 @@ function renderPendingList() {
     const tid = r['Tracking ID'] || ('order:' + r['Order ID']);
     if (finalizedTids.has(tid)) return;
     if (!groups[tid]) groups[tid] = [];
+    groups[tid].push(r);
+  });
+  linkedOrders.forEach(r => {
+    const tid = r['Linked Shipment'];
+    if (!groups[tid]) return; // linked shipment isn't in this pending TikTok list
     groups[tid].push(r);
   });
 
@@ -510,7 +516,7 @@ function renderPendingList() {
   list.innerHTML = entries.map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
-    const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
+    const orderIds = orders.map(o => ({ id: o['Order ID'], channel: o['Channel'] || 'TikTok' })).filter(o => o.id);
 
     const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
     const photoCount = qcRow
@@ -521,9 +527,10 @@ function renderPendingList() {
       ? `<div class="pending-progress">✓ ${photoCount} foto${photoCount !== 1 ? 's' : ''} guardada${photoCount !== 1 ? 's' : ''}</div>`
       : '';
 
-    // Every order in this list is TikTok (renderPendingList filters to
-    // Channel === 'TikTok' before building groups), so orderIds here are
-    // always TikTok Order IDs -- no channel check needed before showing them.
+    // orderIds may now include linked Manual/Shopify orders alongside the
+    // TikTok ones (see linkedOrders above) -- only the first (always the
+    // TikTok order, since groups are seeded from tikTokOrders first) is
+    // shown prominently here.
     const ttIdHtml = orderIds.length
       ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(orderIds[0].id)}${orderIds.length > 1 ? ' +' + (orderIds.length - 1) : ''}</span>`
       : '';
