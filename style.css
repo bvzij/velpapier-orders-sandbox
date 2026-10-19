@@ -2027,3 +2027,11 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
   color: var(--text-faint);
   font-weight: 600;
 }
+
+.status-confirm-prompt {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 6px 0 10px;
+}
+.status-confirm-prompt strong { color: var(--text); }
