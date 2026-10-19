@@ -1323,17 +1323,32 @@ function requestRenameCliente(group) {
 function requestDelete(id, producto) {
   const label = /^https?:\/\/admin\.shopify\.com\//.test(producto || '') ? 'este pedido de Shopify' : producto;
   showConfirmModal(`¿Eliminar <strong>${label}</strong>? Esta acción no se puede deshacer.`, async () => {
+    // Same pending/greyed-out pattern as a status change (updateOrderStatusNew):
+    // the row stays visible but disabled instead of vanishing optimistically
+    // or waiting for the server before any feedback -- and it protects
+    // against a second delete click firing while the first is mid-flight.
+    pendingStatusOrderIds.add(id);
+    dataEpoch++;
+    renderAll();
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     try {
       const result = await apiPost({ action: 'delete_order', order_id: id });
       if (result.result !== 'deleted') throw new Error(result.error || 'Error');
+      pendingStatusOrderIds.delete(id);
       activeRecords = activeRecords.filter(r => r.ID !== id);
       enviadoRecords = enviadoRecords.filter(r => r.ID !== id);
       archivedRecords = archivedRecords.filter(r => r.ID !== id);
       rebuildAllRecords();
+      dataEpoch++;
       renderAll();
       if (searchSelectedCliente) runSearch(searchSelectedCliente);
       showToast('✓ Pedido eliminado');
-    } catch (e) { showToast('Error: ' + e.message); }
+    } catch (e) {
+      pendingStatusOrderIds.delete(id);
+      renderAll(); // bring the row back exactly as it was, fully interactive
+      if (searchSelectedCliente) runSearch(searchSelectedCliente);
+      showToast('Error: ' + e.message + ' — el pedido sigue aquí, nada se perdió');
+    }
   });
 }
 
