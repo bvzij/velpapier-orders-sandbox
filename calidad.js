@@ -474,7 +474,6 @@ function render() {
   wireCardClicks(el);
   saveSnapshot();
 }
-}
 
 function renderPagination(totalPages, totalCount, start, visibleCount) {
   if (totalPages <= 1) return '';
