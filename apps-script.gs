@@ -6222,6 +6222,10 @@ function importQcHistoryAction(body) {
     if (iPacked >= 0 && r.timestamp && oi !== undefined && !packedVals[oi]) {
       packedVals[oi] = r.timestamp; packedChanged.push(oi);
     }
+
+    logAuditEvent('import_qc_history', 'QC', tid, {
+      source: 'airtable', packer: r.packer || '', surtidor: r.surtidor || '', timestamp: r.timestamp || '',
+    });
   });
 
   if (!dryRun && rows.length) {
@@ -6230,11 +6234,7 @@ function importQcHistoryAction(body) {
     qcSheet.getRange(start, 1, rows.length, h.length).setValues(rows);
   }
   if (!dryRun && packedChanged.length) writeColumnChanges(orders, iPacked, packedVals, packedChanged);
-  if (!dryRun) {
-    logAuditEvent('import_qc_history', 'QC', '', {
-      source: 'airtable', inserted: rows.length, skipped: skipped.length, packed_date_filled: packedChanged.length,
-    });
-  }
+
   return jsonResponse({
     dry_run: dryRun, inserted: rows.length, packed_date_filled: packedChanged.length,
     skipped: skipped.length, skipped_detail: skipped.slice(0, 100),
