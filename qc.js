@@ -698,6 +698,39 @@ async function refreshQcBadges() {
   }
 }
 
+function addonLabel(o) {
+  const ch = o['Channel'] || 'Manual';
+  if (ch !== 'Shopify') return ch;
+  const n = String(o['Shopify Order Number'] || '').trim().replace(/^#/, '');
+  return n ? `Shopify #${n}` : 'Shopify';
+}
+
+function parseAddonProducts(str) {
+  return String(str || '').split(';').map(x => x.trim()).filter(Boolean).map(p => {
+    const m = p.match(/^(\d+)\s*x\s*(.*)$/i);
+    return m ? { qty: parseInt(m[1], 10), name: m[2] } : { qty: 1, name: p };
+  });
+}
+
+function addonQtyText(o) {
+  const total = parseAddonProducts(o['Products']).reduce((s, p) => s + p.qty, 0);
+  if (!total) return '—';
+  return total === 1 ? '1 producto' : `${total} productos`;
+}
+
+function openAddonModal(orderId) {
+  const o = allActiveOrders.find(r => String(r['Order ID']) === String(orderId));
+  if (!o) return;
+  const items = parseAddonProducts(o['Products']);
+  const rows = items.length
+    ? items.map(p => `<li style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)"><span style="font-weight:700;min-width:34px">${p.qty}×</span><span>${escapeHtml(p.name)}</span></li>`).join('')
+    : '<li style="padding:8px 0">—</li>';
+  VP.showModal(
+    `<h3 style="font-size:16px;font-weight:700;margin:0 40px 12px 0">${escapeHtml(addonLabel(o))}</h3><ul style="list-style:none;margin:0;padding:0">${rows}</ul>`,
+    { maxWidth: '480px' }
+  );
+}
+
 function renderAddonOrders(customerId) {
   const section = document.getElementById('addon-section');
   const list = document.getElementById('addon-list');
@@ -717,13 +750,13 @@ function renderAddonOrders(customerId) {
 
   section.style.display = 'block';
   list.innerHTML = addons.map(o => `
-    <div class="addon-item" id="addon-${escapeAttr(o['Order ID'])}" onclick="toggleAddon('${escapeAttr(o['Order ID'])}', '${escapeAttr(o['Channel'])}')">
-      <div class="addon-checkbox">
+    <div class="addon-item" id="addon-${escapeAttr(o['Order ID'])}" onclick="openAddonModal('${escapeAttr(o['Order ID'])}')">
+      <div class="addon-checkbox" onclick="event.stopPropagation(); toggleAddon('${escapeAttr(o['Order ID'])}', '${escapeAttr(o['Channel'])}')">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
       <div class="addon-text">
-        <div class="addon-channel">${escapeHtml(o['Channel'] || '')}${linkedHere(o) ? ' · anotado aquí' : ''}</div>
-        <div class="addon-products">${escapeHtml(o['Products'] || '—')}</div>
+        <div class="addon-channel">${escapeHtml(addonLabel(o))}</div>
+        <div class="addon-products">${escapeHtml(addonQtyText(o))}</div>
       </div>
     </div>
   `).join('');
