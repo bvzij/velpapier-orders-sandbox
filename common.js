@@ -10,9 +10,11 @@ window.VP = (function () {
   const TOKEN_KEY = 'vp_token';
   const THEME_KEY = 'vp_theme';
   const ROLE_KEY  = 'vp_role';
+  const NAME_KEY  = 'vp_name';
 
   let token = localStorage.getItem(TOKEN_KEY) || '';
   let role  = sessionStorage.getItem(ROLE_KEY) || '';
+  let userName = sessionStorage.getItem(NAME_KEY) || '';
 
   /* ── Theme ──────────────────────────────────────────────────────────── */
   // Applied immediately (synchronously, at script-load time, before the
@@ -213,6 +215,8 @@ window.VP = (function () {
             sessionStorage.setItem(TOKEN_PING_KEY, String(Date.now()));
             role = body.role || '';
             sessionStorage.setItem(ROLE_KEY, role);
+            userName = (body.name || '').toUpperCase();
+            sessionStorage.setItem(NAME_KEY, userName);
             return;
           }
         } catch (e) { /* fall through to prompt */ }
