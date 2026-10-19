@@ -2073,3 +2073,46 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
   padding: 6px 0 10px;
 }
 .status-confirm-prompt strong { color: var(--text); }
+
+/* ── Status modal fixes: wide, always-visible buttons, own scroll, × button ── */
+.modal.scm-modal {
+  width: 640px;
+  max-width: calc(100vw - 24px);
+  max-height: 92vh;
+  max-height: calc(100dvh - 24px);
+  position: relative;
+}
+.modal.scm-modal > * { flex-shrink: 0; }
+.modal.scm-modal > .scm-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal.scm-modal .scm-row-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.scm-title { padding-right: 36px; }
+.scm-x {
+  position: absolute; top: 12px; right: 12px;
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 0.5px solid var(--border-strong);
+  background: var(--surface); color: var(--text-muted);
+  font-size: 20px; line-height: 1; cursor: pointer; font-family: inherit;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.scm-x:hover { background: var(--surface2); color: var(--text); }
+
+/* Page behind any open modal can't scroll */
+body:has(.modal-overlay),
+body:has(.vp-modal-overlay) { overflow: hidden; }
+.modal-overlay { overscroll-behavior: contain; }
+
+/* Autocomplete: aliases in small grey text */
+.ac-aliases { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 4px; }
