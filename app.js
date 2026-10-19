@@ -1031,6 +1031,7 @@ async function apiPost(data) {
   // Apps Script answers HTTP 200 even for its own errors -- see the
   // matching fix in VP.post() (common.js).
   if (body && body.error) throw new Error(body.error);
+  if (body && body._timings) console.log('[create_order timings]', body._timings);
   return body;
 }
 
