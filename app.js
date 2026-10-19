@@ -521,7 +521,15 @@ function showNewOrderModal(prefillUsername) {
   document.getElementById('no-save-btn').addEventListener('click', submitNewOrder);
 }
 
+// Guards the exact failure Vel hit: Guardar stayed fully clickable for the
+// whole 6s request with no visual feedback, so spamming it fired several
+// independent create_order calls and produced duplicate orders. isSubmittingNewOrder
+// blocks a second click even if the DOM disable somehow lags; the button
+// itself is also disabled and relabeled the instant the first click lands.
+let isSubmittingNewOrder = false;
+
 async function submitNewOrder() {
+  if (isSubmittingNewOrder) return;
   const username = document.getElementById('no-username').value.trim();
   const channel = document.getElementById('no-channel').value;
   const products = document.getElementById('no-products').value.trim();
@@ -529,6 +537,14 @@ async function submitNewOrder() {
   const notes = document.getElementById('no-notes').value.trim();
   const shopifyId = document.getElementById('no-shopify-id').value.trim();
   if (!username || !products) { showToast('Faltan datos'); return; }
+
+  isSubmittingNewOrder = true;
+  const saveBtn = document.getElementById('no-save-btn');
+  const cancelBtn = document.getElementById('no-cancel-btn');
+  const originalLabel = saveBtn ? saveBtn.textContent : 'Guardar';
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Guardando…'; }
+  if (cancelBtn) cancelBtn.disabled = true;
+
   try {
     const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
     if (result.result !== 'created') throw new Error(result.error || 'Error');
@@ -536,7 +552,16 @@ async function submitNewOrder() {
     closeModal();
     renderAll();
     showToast('✓ Orden agregada');
-  } catch (e) { showToast('Error: ' + e.message); }
+  } catch (e) {
+    // Re-enable so the person can retry -- but the flag and the disabled
+    // button together mean this only ever happens after a real failure,
+    // never from an impatient second click.
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = originalLabel; }
+    if (cancelBtn) cancelBtn.disabled = false;
+    showToast('Error: ' + e.message);
+  } finally {
+    isSubmittingNewOrder = false;
+  }
 }
 
 // ── TikTok shipment linking ─────────────────────────────────
