@@ -3,11 +3,21 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ORDERS_SHEET_ID = '1ghfPmDU6NvOWhzAdyqMcXap2DH3_j47tv5kTCwh4BTg';
+// Caches each spreadsheet handle for the life of ONE request. openById()
+// is a real round trip to Google's backend -- a single status update was
+// opening Orders, then Customers (shipment count), then the Audit Log
+// separately, paying that cost three times for one click. Cleared at the
+// top of doPost/doGet so nothing survives between requests.
+let _ssCache = {};
+function openSheetCached(id) {
+  if (!_ssCache[id]) _ssCache[id] = SpreadsheetApp.openById(id);
+  return _ssCache[id];
+}
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.6';
+const SCRIPT_VERSION = '2026-10-18.8';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -39,7 +49,7 @@ const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
 // ─── Sheet accessors ───────────────────────────────────────────────────────────
 
 function getOrdersSheet() {
-  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheetByName('Orders');
+  return openSheetCached(ORDERS_SHEET_ID).getSheetByName('Orders');
 }
 
 // Finds the current year's log tab ("Log 2026", "Log 2027", ...) by name.
@@ -50,7 +60,7 @@ function getOrdersSheet() {
 // fails for a missing tab -- it just lands in last year's until the new
 // one is created.
 function getAuditLogSheet() {
-  const ss = SpreadsheetApp.openById(AUDIT_LOG_SHEET_ID);
+  const ss = openSheetCached(AUDIT_LOG_SHEET_ID);
   const year = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy');
   const current = ss.getSheetByName('Log ' + year);
   if (current) return current;
@@ -62,17 +72,17 @@ function getAuditLogSheet() {
 }
 
 function getShopifyMatchesSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Shopify Customer Matches');
+  return openSheetCached(CUSTOMERS_SHEET_ID).getSheetByName('Shopify Customer Matches');
 }
 
 function getCustomersSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Customers');
+  return openSheetCached(CUSTOMERS_SHEET_ID).getSheetByName('Customers');
 }
 
 const QC_ID_COLUMNS = ['Tracking ID', 'TikTok Order IDs', 'Shopify Order IDs', 'Manual Order IDs'];
 
 function getQCSheet() {
-  const ss = SpreadsheetApp.openById(QC_SHEET_ID);
+  const ss = openSheetCached(QC_SHEET_ID);
 
   // Fast path: the tab name found last time (cached), as long as it still exists.
   const cache = CacheService.getScriptCache();
@@ -335,6 +345,7 @@ function findCustomerByUsername(customers, rawUsername) {
 
 function doGet(e) {
   try {
+    _ssCache = {};
     const action = e.parameter.action || 'orders';
 
     // 'ping' is what the frontend's ensureToken() uses to validate a saved
@@ -754,7 +765,7 @@ function getAuditTrailAction(e) {
   if (!qcId && !orderIds.length) return jsonResponse({ entries: [] });
 
   const wantIds = new Set([qcId, ...orderIds].filter(Boolean));
-  const ss = SpreadsheetApp.openById(AUDIT_LOG_SHEET_ID);
+  const ss = openSheetCached(AUDIT_LOG_SHEET_ID);
   const entries = [];
 
   ss.getSheets().filter(sh => /^Log \d{4}$/.test(sh.getName())).forEach(sheet => {
@@ -784,6 +795,7 @@ function doPost(e) {
     // login is the one POST that runs before authentication: it is how a
     // password becomes a session token.
     if (action === 'login') return loginAction(body);
+    _ssCache = {};
     _stepTimings = {};
     const _tAuth = Date.now();
     const identity = getIdentity(body.token);
@@ -2469,15 +2481,15 @@ function findRowByColumn(sheet, columnLetters, value) {
 const PRODUCT_CATALOG_SHEET_ID = '1XZY9Azw-YizHC6D3l54IMCMKIAFT9qqcVkg4FGf2vSA';
 
 function getProductParentsSheet() {
-  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Parents');
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Parents');
 }
 
 function getProductVariantsSheet() {
-  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Variants');
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Variants');
 }
 
 function getCatalogSuggestionsSheet() {
-  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Catalog Suggestions');
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Catalog Suggestions');
 }
 
 function generateParentID(existingParents) {
@@ -3280,7 +3292,7 @@ function getShopifyMatches(e) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function getTikTokImportHistorySheet() {
-  return SpreadsheetApp.openById(ORDERS_SHEET_ID).getSheetByName('TikTok Import History');
+  return openSheetCached(ORDERS_SHEET_ID).getSheetByName('TikTok Import History');
 }
 
 // Column order matches the sheet's header row exactly. Writing by explicit
@@ -4029,11 +4041,11 @@ function backfillTikTokHistoryCommit(body) {
 // code is used.
 
 function getDismissedProductPairsSheet() {
-  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Dismissed Product Pairs');
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Dismissed Product Pairs');
 }
 
 function getProductMergeHistorySheet() {
-  return SpreadsheetApp.openById(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Merge History');
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Merge History');
 }
 
 function dismissedProductPairKey(idA, idB) {
@@ -4918,7 +4930,7 @@ function dupScorePair(fa, fb) {
 }
 
 function getDismissedDuplicatesSheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Dismissed Duplicates');
+  return openSheetCached(CUSTOMERS_SHEET_ID).getSheetByName('Dismissed Duplicates');
 }
 
 // Order-independent key so A|B and B|A always match the same dismissal.
@@ -5555,7 +5567,7 @@ function dismissDuplicatePairAction(body) {
 }
 
 function getMergeHistorySheet() {
-  return SpreadsheetApp.openById(CUSTOMERS_SHEET_ID).getSheetByName('Merge History');
+  return openSheetCached(CUSTOMERS_SHEET_ID).getSheetByName('Merge History');
 }
 
 function getMergeHistory(e) {
@@ -6247,7 +6259,7 @@ function runHealthChecks() {
 }
 
 function getHealthSheet() {
-  const ss = SpreadsheetApp.openById(ORDERS_SHEET_ID);
+  const ss = openSheetCached(ORDERS_SHEET_ID);
   return ss.getSheetByName('Health') || ss.insertSheet('Health');
 }
 
