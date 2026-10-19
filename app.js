@@ -947,7 +947,24 @@ function shortDate(dateStr) {
   return s ? s.slice(0, 5) : '';
 }
 
+// Mon..Sun -> Lun..Dom, in Mexico City time (same zone as the dates shown elsewhere)
+function shortWeekday(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d)) return '';
+  const w = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Mexico_City' });
+  return { Mon: 'Lun', Tue: 'Mar', Wed: 'Mie', Thu: 'Jue', Fri: 'Vie', Sat: 'Sab', Sun: 'Dom' }[w] || '';
+}
+
 function shipmentLabel(s) {
+  if (s.unknown) return `Guía …${String(s.tid).slice(-6)}`;
+  const d = shortDate(s.date);
+  const when = d ? `${shortWeekday(s.date)} ${d}` : 'Sin fecha';
+  const ids = (s.ids || []).join(' + ') || `${s.count} pedido${s.count !== 1 ? 's' : ''} TikTok`;
+  return `${when} · ${ids}${s.shipped ? ' · ya salió' : ''}`;
+}
+
+function shipmentLabelOld(s) {
   if (s.unknown) return `Guía …${String(s.tid).slice(-6)}`;
   const n = `${s.count} pedido${s.count !== 1 ? 's' : ''} TikTok`;
   return `${shortDate(s.date) || 'Sin fecha'} · ${n}${s.shipped ? ' · ya salió' : ''}`;
@@ -970,8 +987,9 @@ function getShipmentOptions(customerId, orders) {
   const byTid = {};
   allRecords.forEach(r => {
     if (r.Channel !== 'TikTok' || !r.TrackingId || r.CustomerId !== customerId) return;
-    const s = byTid[r.TrackingId] || (byTid[r.TrackingId] = { tid: r.TrackingId, date: r['Fecha Creación'], count: 0, shipped: false });
+    const s = byTid[r.TrackingId] || (byTid[r.TrackingId] = { tid: r.TrackingId, date: r['Fecha Creación'], count: 0, shipped: false, ids: [] });
     s.count++;
+    if (r.ID && !s.ids.includes(r.ID)) s.ids.push(r.ID);
     if (isShipped(r.Status)) s.shipped = true;
     if (new Date(r['Fecha Creación'] || 0) < new Date(s.date || 0)) s.date = r['Fecha Creación'];
   });
