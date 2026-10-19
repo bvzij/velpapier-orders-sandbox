@@ -19,13 +19,7 @@
     <div class="vp-hero-date" id="cal-count">—</div>
   </section>
 
-  <div class="cal-toolbar">
     <button class="refresh-btn cal-filter-toggle" id="cal-filter-toggle">Filtros</button>
-    <select class="vp-select" id="cal-per-page" aria-label="Envíos por página">
-      <option value="20">20 / página</option>
-      <option value="50">50 / página</option>
-      <option value="100" selected>100 / página</option>
-    </select>
     <div class="cal-toolbar-right">
       <div class="vp-period" id="cal-viewmode">
         <button class="vp-period-btn is-active" data-mode="tiles">Mosaico</button>
@@ -81,6 +75,15 @@
           <label><input type="checkbox" id="cal-product-shopify" checked> Shopify</label>
         </span>
       </label>
+
+      <div class="cal-field">
+        <span class="cal-field-label">Envíos por página</span>
+        <select class="vp-input" id="cal-per-page" aria-label="Envíos por página">
+          <option value="20">20</option>
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+        </select>
+      </div>
 
       <div class="cal-field">
         <span class="cal-field-label">Desde</span>
