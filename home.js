@@ -3,7 +3,7 @@
    One question per block: how are we doing, what needs me, where do I go.
    ==========================================================================*/
 
-const PAID_STATES = ['Pagado', 'Enviado', 'Archivado'];
+const PAID_STATES = ['Pagado', 'Anotado', 'Enviado', 'Archivado'];
 const isPaid  = r => PAID_STATES.includes(r['Status']);
 const price   = r => Number(r['Price']) || 0;
 const created = r => VP.asDate(r['Created Date']);
