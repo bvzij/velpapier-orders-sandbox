@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.4';
+const SCRIPT_VERSION = '2026-10-18.5';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1022,7 +1022,7 @@ function updateOrderStatus(body) {
 
   const oldStatus = sheet.getRange(rowIndex, statusCol).getValue();
   sheet.getRange(rowIndex, statusCol).setValue(body.status);
-  applyStatusSideEffects(sheet, rowIndex, body.status, headers);
+  applyStatusSideEffects(sheet, rowIndex, body.status, headers, oldStatus);
   if (String(oldStatus) !== String(body.status)) {
     logAudit('update_order_status', 'Order', body.order_id, 'Status', oldStatus, body.status);
   }
@@ -1276,6 +1276,11 @@ function updateOrder(body) {
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
+  // Captured before the write loop below touches Status, so
+  // applyStatusSideEffects can diff old vs new without a full rescan.
+  const statusColForOld = headers.indexOf('Status') + 1;
+  const oldStatusForSideEffects = statusColForOld > 0 ? sheet.getRange(rowIndex, statusColForOld).getValue() : null;
+
   // One read per changed field before its write, so the log shows a real
   // before/after. A handful of fields per call (this is a manual edit
   // form, not a bulk loop), so the extra reads are cheap here.
@@ -1293,7 +1298,7 @@ function updateOrder(body) {
 
   tmark('field_writes_ms', _tFields);
   if (body.fields && body.fields['Status']) {
-    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
+    applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers, oldStatusForSideEffects);
   }
 
   return jsonResponse({ result: 'updated', order_id: body.order_id });
@@ -1391,7 +1396,12 @@ function autoArchiveOldOrders() {
 }
 
 // Shared side-effects for ANY status change, regardless of which endpoint caused it.
-function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
+// oldStatus is optional: when the caller already knows it, we can do a
+// cheap +1/-1 delta instead of rescanning every Orders row just to
+// recompute one customer's count (that full-column scan was costing
+// 9+ seconds per status change once the sheet grew). Pass null when the
+// old status isn't known yet -- falls back to the safe full recalc.
+function applyStatusSideEffects(sheet, rowIndex, newStatus, headers, oldStatus) {
   const shippedCol = headers.indexOf('Shipped Date') + 1;
   const archiveCol = headers.indexOf('Archive Date') + 1;
   const channelCol = headers.indexOf('Channel') + 1;
@@ -1407,9 +1417,16 @@ function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
   const channel = channelCol > 0 ? sheet.getRange(rowIndex, channelCol).getValue() : '';
   const customerID = customerIdCol > 0 ? sheet.getRange(rowIndex, customerIdCol).getValue() : '';
   if ((channel === 'TikTok' || channel === 'Shopify') && customerID) {
-    const _tShip = Date.now();
-    recalculateShipmentCount(customerID);
-    tmark('shipment_count_ms', _tShip);
+    const wasCounted = oldStatus === 'Enviado' || oldStatus === 'Archivado';
+    const nowCounted = newStatus === 'Enviado' || newStatus === 'Archivado';
+    if (oldStatus == null) {
+      recalculateShipmentCount(customerID); // old status unknown -- safe full recalc
+    } else if (nowCounted && !wasCounted) {
+      incrementShipmentCounts({ [customerID]: 1 });
+    } else if (!nowCounted && wasCounted) {
+      incrementShipmentCounts({ [customerID]: -1 });
+    }
+    // nowCounted === wasCounted (e.g. No Pagado -> Pagado): no change, skip entirely
   }
 }
 
