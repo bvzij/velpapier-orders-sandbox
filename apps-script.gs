@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.5';
+const SCRIPT_VERSION = '2026-10-18.6';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1013,15 +1013,20 @@ function createCustomer(body) {
 // ─── Update order status ───────────────────────────────────────────────────────
 
 function updateOrderStatus(body) {
+  const _tRow = Date.now();
   const sheet = getOrdersSheet();
   const rowIndex = findOrderRow(sheet, body.order_id);
+  tmark('find_order_row_ms', _tRow);
   if (!rowIndex) return jsonResponse({ error: 'Order not found' });
 
+  const _tFields = Date.now();
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const statusCol = headers.indexOf('Status') + 1;
 
   const oldStatus = sheet.getRange(rowIndex, statusCol).getValue();
   sheet.getRange(rowIndex, statusCol).setValue(body.status);
+  tmark('field_writes_ms', _tFields);
+
   applyStatusSideEffects(sheet, rowIndex, body.status, headers, oldStatus);
   if (String(oldStatus) !== String(body.status)) {
     logAudit('update_order_status', 'Order', body.order_id, 'Status', oldStatus, body.status);
