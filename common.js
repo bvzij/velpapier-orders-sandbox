@@ -245,9 +245,15 @@ window.VP = (function () {
   // Pages that are admin-only call this right after ensureToken() to
   // redirect staff away before any page content loads. Role comes from
   // the cached ping result -- no extra request needed on the common path.
+  const STAFF_HOME = { MAU: 'qc.html', MARTHA: 'qc.html' };
+
+  function staffHome() {
+    return STAFF_HOME[userName] || 'pedidos.html';
+  }
+
   function requireAdminPage() {
     if (role !== 'admin') {
-      window.location.href = 'pedidos.html';
+      window.location.href = staffHome();
       throw new Error('not authorized for this page');
     }
   }
@@ -274,7 +280,7 @@ window.VP = (function () {
   // directly (requireAdminPage()).
   function mountNav(active) {
     const visibleNav = NAV.filter(n => !n.adminOnly || role === 'admin');
-    const homeHref = role === 'admin' ? 'index.html' : 'pedidos.html';
+    const homeHref = role === 'admin' ? 'index.html' : staffHome();
     const el = document.createElement('nav');
     el.className = 'vp-nav';
     el.innerHTML = `
