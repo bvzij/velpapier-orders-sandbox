@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.8';
+const SCRIPT_VERSION = '2026-10-18.9';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -876,12 +876,16 @@ function dispatchPostAction(action, body, role) {
 // ─── Create order ──────────────────────────────────────────────────────────────
 
 function createOrder(body) {
+  const _tSheets = Date.now();
   const ordersSheet = getOrdersSheet();
   const customersSheet = getCustomersSheet();
+  tmark('get_sheets_ms', _tSheets);
 
   if (body.channel === 'TikTok' && body.tracking_id) {
+    const _tDupCheck = Date.now();
     const existing = sheetToObjects(ordersSheet);
     const dup = existing.find(o => o['Tracking ID'] === body.tracking_id);
+    tmark('tiktok_dup_check_ms', _tDupCheck);
     if (dup) {
       const sameOrderID = dup['Order ID'] === body.order_id;
       return jsonResponse({
@@ -895,8 +899,12 @@ function createOrder(body) {
     }
   }
 
+  const _tCustRead = Date.now();
   const customers = sheetToObjects(customersSheet);
+  tmark('customers_full_read_ms', _tCustRead);
+  const _tResolve = Date.now();
   const resolution = findCustomerByUsername(customers, body.username);
+  tmark('resolve_customer_ms', _tResolve);
   let customerID = '';
   let primaryUsername = body.username || '';
   let mergeFlag = false;
@@ -948,9 +956,11 @@ function createOrder(body) {
     'Linked Shipment': body.linked_shipment || '',
   };
 
+  const _tWrite = Date.now();
   const row = oh.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : ''));
   const newRowNum = ordersSheet.getLastRow() + 1;
   forceTextFormat(ordersSheet, oh, ['Order ID', 'Tracking ID'], newRowNum, 1);
+  tmark('order_write_ms', _tWrite);
   ordersSheet.appendRow(row);
   logAuditEvent('create_order', 'Order', orderID, { customer_id: customerID, channel: body.channel || '', status: status });
 
