@@ -22,7 +22,65 @@ let hasFullOrdersLoaded = false; // set once the actual action=orders payload (n
 // slow uncached fetch on every load -- which is also what made the modal
 // timing bug so easy to hit. Only the few fields this page actually reads
 // need to be cached, same slimming pattern as home.js's slimOrders.
-const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date'];
+const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date', 'Notes'];
+
+// Page-1 snapshot in localStorage so returning to Calidad paints instantly
+// instead of a blank/empty state while the (uncacheable) full QC loads.
+const SNAP_KEY = 'vp_cal_page1';
+let showingSnapshot = false;
+
+function indexOrders(records) {
+  ORDERS_BY_ID = {};
+  (records || []).forEach(r => {
+    String(r['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
+      ORDERS_BY_ID[id] = r;
+    });
+  });
+}
+
+function loadSnapshot() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SNAP_KEY) || 'null');
+    if (!s || !s.rows || !s.rows.length) return;
+    QC = s.rows;
+    indexOrders(s.orders);
+    showingSnapshot = true;
+    hasLoadedOnce = true;
+    render();
+  } catch (e) { /* corrupt snapshot, ignore */ }
+}
+
+function saveSnapshot() {
+  if (showingSnapshot || !hasFullOrdersLoaded || anyFilterActive() || currentPage !== 1) return;
+  try {
+    const rows = QC.slice(0, PER_PAGE);
+    const seen = new Set(), orders = [];
+    rows.forEach(r => {
+      const ids = orderIdsOf(r);
+      [...ids.tiktok, ...ids.shopify, ...ids.manual].forEach(id => {
+        const o = ORDERS_BY_ID[id];
+        if (o && !seen.has(o)) {
+          seen.add(o);
+          const slim = {};
+          for (const f of SLIM_ORDER_FIELDS) slim[f] = o[f];
+          orders.push(slim);
+        }
+      });
+    });
+    localStorage.setItem(SNAP_KEY, JSON.stringify({ rows, orders }));
+  } catch (e) { console.warn('[calidad] snapshot write failed', e); }
+}
+
+// Packed time = the QC row's own Timestamp (what the card shows as
+// "Empacado"); falls back to the linked order's Shipped Date.
+function packedTime(r) {
+  const t = VP.asDate(r['Timestamp']);
+  if (t) return t.getTime();
+  const ids = orderIdsOf(r);
+  const o = [...ids.tiktok, ...ids.shopify, ...ids.manual].map(id => ORDERS_BY_ID[id]).find(Boolean);
+  const d = o ? VP.asDate(o['Shipped Date']) : null;
+  return d ? d.getTime() : 0;
+}
 function slimOrdersForCalidad(resp) {
   return {
     records: (resp.records || []).map(r => {
@@ -36,32 +94,20 @@ function slimOrdersForCalidad(resp) {
 let openModalQcId = null; // which order's modal is currently open, if any
 
 function applyQcData(q, o) {
-  QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
-  if (o && o.records) hasFullOrdersLoaded = true;
-  ORDERS_BY_ID = {};
-  (o.records || []).forEach(r => {
-    // A combined shipment's Order ID is itself a " + "-joined string
-    // ("123 + 456"), so a single component ID (what QC rows store, split
-    // out by orderIdsOf) never matched this key. Index every component
-    // individually -- the row is unchanged, just reachable by each of its
-    // own order IDs, not only the full joined string.
-    String(r['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
-      ORDERS_BY_ID[id] = r;
-    });
-  });
-  // Sort by packed date (the linked order's Shipped Date), newest first.
-  // QC rows carry no date of their own -- same gap as the modal's
-  // "Empacado" field below. Falls back to QC ID (creation order) when no
-  // linked order/date is found yet, so unmatched rows don't jump around.
+  const incoming = (q && q.records) || [];
+  // An empty QC list here is the init placeholder (orders landed first),
+  // not a real result -- don't let it wipe the snapshot or mark "loaded".
+  if (!incoming.length && (showingSnapshot || !hasLoadedOnce)) {
+    if (o && o.records && o.records.length) { indexOrders(o.records); hasFullOrdersLoaded = true; }
+    return;
+  }
+  showingSnapshot = false;
+  QC = incoming.filter(r => r['Status'] === 'Enviado');
+  if (o && o.records && o.records.length) hasFullOrdersLoaded = true;
+  indexOrders(o && o.records);
   QC.sort((a, b) => {
-    const da = orderIdsOf(a).tiktok.concat(orderIdsOf(a).shopify, orderIdsOf(a).manual).map(id => ORDERS_BY_ID[id]).find(Boolean);
-    const db = orderIdsOf(b).tiktok.concat(orderIdsOf(b).shopify, orderIdsOf(b).manual).map(id => ORDERS_BY_ID[id]).find(Boolean);
-    const ta = da ? VP.asDate(da['Shipped Date']) : null;
-    const tb = db ? VP.asDate(db['Shipped Date']) : null;
-    if (ta && tb) return tb.getTime() - ta.getTime();
-    if (ta) return -1;
-    if (tb) return 1;
-    return String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || ''));
+    const diff = packedTime(b) - packedTime(a);
+    return diff || String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || ''));
   });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
   hasLoadedOnce = true;
@@ -102,6 +148,7 @@ async function manualRefresh() {
 (async function init() {
   wire();
   applyViewMode(viewMode);
+  loadSnapshot();
   try {
     await VP.ensureToken();
     VP.mountNav('calidad');
@@ -401,7 +448,7 @@ function render() {
 
   if (!rows.length) {
     let msg;
-    if (!hasLoadedOnce) msg = '⚠ No se pudo cargar. Toca el botón de actualizar.';
+    if (!hasLoadedOnce) msg = 'Cargando envíos…';
     else if (anyFilterActive()) msg = 'Ningún envío coincide con esos filtros.';
     else msg = 'Todavía no hay envíos registrados.';
     el.innerHTML = `<div class="vp-empty-sm">${msg}</div>`;
@@ -425,6 +472,8 @@ function render() {
   document.getElementById('cal-pagination-bottom').innerHTML = paginationHtml;
 
   wireCardClicks(el);
+  saveSnapshot();
+}
 }
 
 function renderPagination(totalPages, totalCount, start, visibleCount) {
