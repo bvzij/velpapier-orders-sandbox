@@ -362,7 +362,7 @@ async function runSearch(name) {
   else if (searchFilter === 'Anotado') all = all.filter(r => r.Status === 'Anotado');
   else if (searchFilter === 'Enviado') all = all.filter(r => r.Status === 'Enviado');
   else if (searchFilter === 'Archivo') all = all.filter(r => r.Status === 'Archivado');
-  else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status));
+else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado');
   else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
   else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
   // 'Todos' -- no filter
@@ -2075,7 +2075,7 @@ function renderClientList() {
 }
 
 function renderAll() {
-  const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const anotado = allRecords.filter(r => r.Status === 'Anotado');
