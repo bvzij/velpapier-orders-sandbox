@@ -2016,3 +2016,14 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
   background: var(--border, #e5e5e5);
   margin: 8px 0;
 }
+
+.order-row.row-pending-save {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.order-row.row-pending-save .order-actions::after {
+  content: 'Guardando…';
+  font-size: 11px;
+  color: var(--text-faint);
+  font-weight: 600;
+}
