@@ -7,7 +7,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.3';
+const SCRIPT_VERSION = '2026-10-18.4';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -192,6 +192,10 @@ function sheetToObjects(sheet) {
 }
 
 function findOrderRow(sheet, orderID) {
+  const _tFind = Date.now();
+  try { return _findOrderRowInner(sheet, orderID); } finally { tmark('find_order_row_ms', _tFind); }
+}
+function _findOrderRowInner(sheet, orderID) {
   const idColumn = sheet.getRange('A:A');
   const finder = idColumn.createTextFinder(orderID).matchEntireCell(true);
   const found = finder.findNext();
@@ -454,7 +458,10 @@ function doGet(e) {
 // than a half-applied write.
 function withWriteLock(fn) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) {
+  const _tLock = Date.now();
+  const _gotLock = lock.tryLock(30000);
+  tmark('lock_wait_ms', _tLock);
+  if (!_gotLock) {
     return jsonResponse({ error: 'Servidor ocupado, intenta de nuevo en unos segundos.' });
   }
   try {
@@ -487,6 +494,9 @@ function withWriteLock(fn) {
 // the ~20 mutation functions -- each Apps Script execution handles
 // exactly one request, so this is safe.
 let _currentIdentity = null;
+// Per-request step timings, merged into the response's _timings by doPost.
+let _stepTimings = {};
+function tmark(label, t0) { _stepTimings[label] = (_stepTimings[label] || 0) + (Date.now() - t0); }
 let _auditBuffer = [];
 
 function logAudit(action, recordType, recordId, field, before, after) {
@@ -774,10 +784,13 @@ function doPost(e) {
     // login is the one POST that runs before authentication: it is how a
     // password becomes a session token.
     if (action === 'login') return loginAction(body);
+    _stepTimings = {};
+    const _tAuth = Date.now();
     const identity = getIdentity(body.token);
     if (!identity) return jsonResponse({ error: 'unauthorized' });
     const role = identity.role;
     _currentIdentity = identity; // read by logAudit() -- see audit log section
+    tmark('auth_ms', _tAuth);
     if (!serviceActionAllowed(identity, action)) { flushAudit(); return jsonResponse({ error: 'unauthorized' }); }
     return withWriteLock(function () {
       const _tDispatch = Date.now();
@@ -795,6 +808,7 @@ function doPost(e) {
           parsed._timings = parsed._timings || {};
           parsed._timings.dispatch_total_ms = dispatchMs;
           parsed._timings.flush_audit_ms = flushMs;
+          Object.assign(parsed._timings, _stepTimings);
           return jsonResponse(parsed);
         } catch (e) { /* not JSON for some reason, fall through unmodified */ }
       }
@@ -1265,6 +1279,7 @@ function updateOrder(body) {
   // One read per changed field before its write, so the log shows a real
   // before/after. A handful of fields per call (this is a manual edit
   // form, not a bulk loop), so the extra reads are cheap here.
+  const _tFields = Date.now();
   Object.entries(body.fields || {}).forEach(([key, value]) => {
     const col = headers.indexOf(key) + 1;
     if (col > 0) {
@@ -1276,6 +1291,7 @@ function updateOrder(body) {
     }
   });
 
+  tmark('field_writes_ms', _tFields);
   if (body.fields && body.fields['Status']) {
     applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers);
   }
@@ -1391,7 +1407,9 @@ function applyStatusSideEffects(sheet, rowIndex, newStatus, headers) {
   const channel = channelCol > 0 ? sheet.getRange(rowIndex, channelCol).getValue() : '';
   const customerID = customerIdCol > 0 ? sheet.getRange(rowIndex, customerIdCol).getValue() : '';
   if ((channel === 'TikTok' || channel === 'Shopify') && customerID) {
+    const _tShip = Date.now();
     recalculateShipmentCount(customerID);
+    tmark('shipment_count_ms', _tShip);
   }
 }
 
