@@ -811,9 +811,14 @@ function showStatusModal(id, currentStatus) {
 // error the id is cleared and renderAll() brings the row straight back,
 // fully interactive, with a toast explaining what happened.
 const pendingStatusOrderIds = new Set();
+// Bumped on every local status write. Any fetch that STARTED before the
+// latest bump is discarded when it lands -- otherwise a slow response
+// carrying pre-write data overwrites allRecords and the row flickers back.
+let dataEpoch = 0;
 
 async function updateOrderStatusNew(id, status, linkTrackingId) {
   pendingStatusOrderIds.add(id);
+  dataEpoch++; // invalidate every fetch already in flight
   renderAll(); // row now visible but greyed out + disabled
   if (searchSelectedCliente) runSearch(searchSelectedCliente);
   try {
@@ -837,6 +842,7 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     // Confirm against the server once, right away, instead of waiting up
     // to 10s for the next autoRefresh tick to catch any drift (e.g. a
     // second person's change landing at the same time).
+    dataEpoch++; // anything that started while the write was pending is stale too
     autoRefresh();
   } catch (e) {
     pendingStatusOrderIds.delete(id);
@@ -1018,7 +1024,9 @@ function getCached(qs, onFresh) {
     if (raw) cached = JSON.parse(raw);
   } catch (e) { /* corrupt entry, ignore */ }
 
+  const epoch = dataEpoch;
   apiGet(qs).then(fresh => {
+    if (epoch !== dataEpoch) return; // a status write happened since this started -- stale, drop it
     try { sessionStorage.setItem(key, JSON.stringify(fresh)); } catch (e) { /* storage full, non-fatal */ }
     if (onFresh) onFresh(fresh);
   }).catch(() => { /* background refresh failed silently */ });
@@ -1156,17 +1164,34 @@ async function manualRefresh() {
   }
 }
 
+// Polls only ever apply FRESH server data. The sessionStorage shortcut in
+// fetchActive() is for first page load; using it on a poll re-applied an
+// old snapshot and made just-changed rows reappear.
+async function fetchActiveFresh(epoch) {
+  const qsActive = 'action=orders&status=' + encodeURIComponent('No Pagado,Pagado');
+  const [activeData, customersData, matchesData] = await Promise.all([
+    apiGet(qsActive), apiGet('action=customers'), apiGet('action=shopify_matches')
+  ]);
+  if (epoch !== dataEpoch) return false; // a write happened mid-fetch -- discard
+  try {
+    sessionStorage.setItem(CACHE_PREFIX + qsActive, JSON.stringify(activeData));
+    sessionStorage.setItem(CACHE_PREFIX + 'action=customers', JSON.stringify(customersData));
+    sessionStorage.setItem(CACHE_PREFIX + 'action=shopify_matches', JSON.stringify(matchesData));
+  } catch (e) { /* storage full, non-fatal */ }
+  applyActiveData(activeData, customersData, matchesData);
+  return true;
+}
+
 async function autoRefresh() {
-  // Skip while a status change is mid-flight: a poll landing here would
-  // overwrite allRecords with pre-update data and visibly un-grey /
-  // re-show a row that updateOrderStatusNew is still waiting on, which
-  // is what was making rows take far longer than the actual request to
-  // disappear.
-  if (pendingStatusOrderIds.size > 0) return;
+  if (pendingStatusOrderIds.size > 0) return; // a write is mid-flight
+  const epoch = dataEpoch;
   try {
     if (currentTab === 'enviado' && tabDataLoaded.enviado) await fetchEnviado();
     else if (currentTab === 'archivo' && tabDataLoaded.archivo) await fetchArchivo();
-    else if (currentTab !== 'enviado' && currentTab !== 'archivo') await fetchActive();
+    else if (currentTab !== 'enviado' && currentTab !== 'archivo') {
+      if (!(await fetchActiveFresh(epoch))) return;
+    }
+    if (epoch !== dataEpoch) return;
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) { /* silent */ }
