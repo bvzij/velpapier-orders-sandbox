@@ -25,7 +25,12 @@ const FIELD_MAP = {
   ArchiveDate: 'Archive Date'
 };
 
-const STATUS_FLOW = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
+const STATUS_FLOW = ['No Pagado', 'Pagado', 'Anotado', 'Enviado', 'Archivado'];
+// Not shipped yet = shown in the active tabs and changed through the
+// status modal. Anotado = written on a TikTok shipment's label, waiting
+// to leave with it (Linked Shipment = that shipment's tracking ID).
+const ACTIVE_STATUSES = ['No Pagado', 'Pagado', 'Anotado'];
+const ACTIVE_STATUS_QS = encodeURIComponent(ACTIVE_STATUSES.join(','));
 function nextStatuses(current) {
   const idx = STATUS_FLOW.indexOf(current);
   if (idx === -1 || idx === STATUS_FLOW.length - 1) return [];
@@ -96,6 +101,7 @@ async function performRedo() {
 function statusPillClass(status) {
   if (status === 'No Pagado') return 'pill-nopagado';
   if (status === 'Pagado') return 'pill-pagado';
+  if (status === 'Anotado') return 'pill-anotado';
   return 'pill-enviado';
 }
 
@@ -171,7 +177,7 @@ function formatDateTime(dateStr) {
 }
 function showToast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }function getInitials(name) { return (name || '?').replace('@', '').substring(0, 2).toUpperCase(); }
 function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || cliente.trim().toLowerCase().includes('sin nombre'); }
-function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
+function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Anotado') return 'Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return VP.esc(s); }   // one shared helper (FIX_LOG 4.2)
 function summarizeProductCount(productsStr) {
   // Coerce first: Sheets can hand back a non-string (e.g. a cell that
@@ -353,9 +359,10 @@ async function runSearch(name) {
 
   if (searchFilter === 'Por cobrar') all = all.filter(r => r.Status === 'No Pagado');
   else if (searchFilter === 'Por enviar') all = all.filter(r => r.Status === 'Pagado');
+  else if (searchFilter === 'Anotado') all = all.filter(r => r.Status === 'Anotado');
   else if (searchFilter === 'Enviado') all = all.filter(r => r.Status === 'Enviado');
   else if (searchFilter === 'Archivo') all = all.filter(r => r.Status === 'Archivado');
-  else if (searchFilter === 'Activos') all = all.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado');
+  else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status));
   else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
   else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
   // 'Todos' -- no filter
@@ -364,7 +371,7 @@ async function runSearch(name) {
   results.innerHTML = '';
   if (!all.length) { results.innerHTML = `<div class="empty-state">Sin resultados en este filtro</div>`; return; }
 
-  const active   = all.filter(r => r.Status === 'No Pagado' || r.Status === 'Pagado');
+  const active   = all.filter(r => ACTIVE_STATUSES.includes(r.Status));
   const shipped  = all.filter(r => r.Status === 'Enviado');
   const archived = all.filter(r => r.Status === 'Archivado');
 
@@ -406,7 +413,7 @@ function renderSearchFilterBar(totalCount) {
   const bar = document.getElementById('search-filter-bar');
   if (!bar) return;
   if (!totalCount) { bar.innerHTML = ''; return; }
-  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Enviado', 'Archivo', 'TikTok', 'Shopify'];
+  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Anotado', 'Enviado', 'Archivo', 'TikTok', 'Shopify'];
   bar.innerHTML = options.map(o =>
     `<button class="search-filter-btn${o === searchFilter ? ' active' : ''}" data-filter="${escapeHtml(o)}">${escapeHtml(o)}</button>`
   ).join('');
@@ -499,7 +506,7 @@ function showEditModal(id) {
     <input type="text" id="edit-cliente" value="${(r.Cliente || '').replace(/"/g, '&quot;')}" placeholder="Usuario TikTok" />
     <input type="text" id="edit-producto" value="${(r.Producto || '').replace(/"/g, '&quot;')}" placeholder="Producto" />
     ${r.Precio === null ? '' : `<input type="number" id="edit-precio" value="${r.Precio || 0}" placeholder="Precio" min="0" step="1" />`}
-    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option><option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
+    <select id="edit-status"><option value="No Pagado" ${r.Status === 'No Pagado' ? 'selected' : ''}>No Pagado</option><option value="Pagado" ${r.Status === 'Pagado' ? 'selected' : ''}>Pagado</option>${r.Status === 'Anotado' ? '<option value="Anotado" selected>Anotado</option>' : ''}<option value="Enviado" ${r.Status === 'Enviado' ? 'selected' : ''}>Enviado</option><option value="Archivado" ${r.Status === 'Archivado' ? 'selected' : ''}>Archivado</option></select>
     <input type="text" id="edit-notas" value="${(r.Notas || '').replace(/"/g, '&quot;')}" placeholder="Notas (opcional)" />
   </div><div class="modal-actions"><button class="btn" id="edit-cancel-btn">Cancelar</button><button class="btn btn-primary" id="edit-save-btn">Guardar</button></div></div></div>`;
   document.getElementById('edit-cancel-btn').addEventListener('click', closeModal);
@@ -811,6 +818,14 @@ function showNoShipmentLinkedModal(r) {
 }
 
 function showStatusModal(id, currentStatus) {
+  // Every not-yet-shipped order goes through the bulk/single status modal.
+  // This older modal is only left for Enviado -> Archivado.
+  if (ACTIVE_STATUSES.includes(currentStatus)) {
+    const rec = allRecords.find(r => String(r.ID) === String(id));
+    if (!rec) return;
+    openStatusChangeModal(rec.Cliente || customersById[rec.CustomerId] || '', [rec], true);
+    return;
+  }
   const next = nextStatuses(currentStatus);
   if (!next.length) { showToast('Sin siguiente estado'); return; }
   const rec0 = allRecords.find(r => String(r.ID) === String(id));
@@ -865,7 +880,7 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     const _tNet = performance.now() - _t0;
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) {
-      rec.Status = status;
+      rec.Status = result.status || status;
       if (linkTrackingId) rec.LinkedShipment = linkTrackingId;
     }
     pendingStatusOrderIds.delete(id);
@@ -887,113 +902,294 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
   }
 }
 
-let bulkModalSelectedStatus = null;
-let bulkCurrentOrders = [];
+// ── STATUS MODAL (bulk + single) ────────────────────────────
+// One modal for every status change of a not-yet-shipped order.
+//   Top half (bulk): a button that instantly FILLS every row below, and
+//   re-fills all of them each time it's tapped. It saves nothing itself.
+//   Bottom half (rows): one outcome chip per order. Only these are saved.
+// So there is never a question of which setting wins -- what the rows
+// show is exactly what Aplicar does. With a single order the bulk half
+// stays visible but greyed out, so the layout never jumps around.
+//
+// Row target values: '' = Sin cambio, 'No Pagado', 'Pagado',
+// 'Enviado' (shipped on its own), 'Anotado|<tracking id>'.
+let scmOrders = [];
+let scmTargets = [];
+let scmShipments = [];
+let scmSingle = false;
+let scmBulk = '';
+let scmSaving = false;
 
-// Two ways to set a status here, deliberately: the pills at the top apply
-// to every CHECKED row at once (the common case), while each row's own
-// dropdown overrides that for just that row. "No cambiar" is the row
-// default, so a row only moves if you explicitly ask it to or it's checked
-// under a pill. Same shape for linking: one shared picker at the top, plus
-// a per-row picker that wins when set.
-function showBulkStatusModal(group) {
-  bulkModalSelectedStatus = null;
-  const cliente = group.name;
-  const orders = group.items.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
-  if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
-  bulkCurrentOrders = orders;
-  const custId = (orders[0] && orders[0].CustomerId) || '';
-  const statusOpts = ['No Pagado', 'Pagado', 'Enviado', 'Archivado'];
-
-  const c = document.getElementById('modal-container');
-  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal bulk-status-modal">
-    <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
-    <div class="bulk-section-label">Aplicar a los seleccionados</div>
-    <div class="status-pills">${['No Pagado', 'Pagado', 'Enviado'].map(s => `<button class="status-pill-toggle" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>
-    ${renderLinkPicker('bulk-link', custId, false)}
-    <div class="bulk-section-label">Pedidos</div>
-    <div class="bulk-order-list">${orders.map((r, i) => `<div class="bulk-order-item">
-        <input type="checkbox" class="bulk-order-check" data-row="${i}" checked />
-        <div class="bulk-order-main">
-          <span class="bulk-order-product">${shopifyOrderLine(r)}</span>
-          <span class="bulk-order-meta">${escapeHtml(formatDateTime(r['Fecha Creación']))}</span>
-        </div>
-        <span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span>
-        <select class="bulk-row-status" data-row="${i}">
-          <option value="">No cambiar</option>
-          ${statusOpts.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
-        </select>
-        ${r.Channel !== 'TikTok' ? renderLinkPicker('bulk-row-' + i + '-link', r.CustomerId, true) : ''}
-      </div>`).join('')}</div>
-    <div class="modal-actions"><button class="btn" id="bulk-status-cancel-btn">Cerrar</button><button class="btn btn-primary" id="bulk-status-confirm-btn" disabled>Confirmar</button></div>
-  </div></div>`;
-
-  document.getElementById('bulk-status-cancel-btn').addEventListener('click', closeModal);
-  c.querySelectorAll('.status-pill-toggle').forEach(btn => btn.addEventListener('click', () => {
-    // Clicking the active pill again clears it, so you can go back to
-    // "per-row only" without closing the modal.
-    bulkModalSelectedStatus = bulkModalSelectedStatus === btn.dataset.status ? null : btn.dataset.status;
-    c.querySelectorAll('.status-pill-toggle').forEach(b => b.classList.toggle('active', b.dataset.status === bulkModalSelectedStatus));
-    updateBulkConfirmState();
-  }));
-  c.querySelectorAll('.bulk-order-check, .bulk-row-status, .link-picker-check, .link-picker-select')
-    .forEach(el => el.addEventListener('change', updateBulkConfirmState));
-  document.getElementById('bulk-status-confirm-btn').addEventListener('click', applyBulkStatus);
-  updateBulkConfirmState();
+function shortDate(dateStr) {
+  const s = formatDate(dateStr);   // dd/mm/yyyy
+  return s ? s.slice(0, 5) : '';
 }
 
-// Resolves what each row would actually do, so the Confirmar button and
-// the save path can never disagree about it.
-function bulkRowPlan() {
-  const sharedLink = readLinkPicker('bulk-link');
-  const plan = [];
-  bulkCurrentOrders.forEach((r, i) => {
-    const chk = document.querySelector(`.bulk-order-check[data-row="${i}"]`);
-    const sel = document.querySelector(`.bulk-row-status[data-row="${i}"]`);
-    const checked = chk ? chk.checked : false;
-    const rowStatus = sel ? sel.value : '';
-    const rowLink = readLinkPicker('bulk-row-' + i + '-link');
+function shipmentLabel(s) {
+  if (s.unknown) return `Guía …${String(s.tid).slice(-6)}`;
+  const n = `${s.count} pedido${s.count !== 1 ? 's' : ''} TikTok`;
+  return `${shortDate(s.date) || 'Sin fecha'} · ${n}${s.shipped ? ' · ya salió' : ''}`;
+}
 
-    const status = rowStatus || (checked && bulkModalSelectedStatus ? bulkModalSelectedStatus : '');
-    const link = rowLink || (checked ? sharedLink : '');
-    const statusChanges = status && status !== r.Status;
-    const linkChanges = link && link !== r.LinkedShipment;
-    if (!statusChanges && !linkChanges) return;
-    plan.push({ id: String(r.ID), status: statusChanges ? status : '', link: linkChanges ? link : '' });
+// "Envío TikTok 18/10" for an Anotado order's row in Pedidos.
+function anotadoShipmentText(r) {
+  const tid = r.LinkedShipment;
+  if (!tid) return 'Anotado sin envío';
+  const tk = allRecords.filter(x => x.Channel === 'TikTok' && x.TrackingId === tid);
+  if (!tk.length) return `Envío guía …${String(tid).slice(-6)}`;
+  const first = tk.reduce((a, b) => new Date(a['Fecha Creación'] || 0) <= new Date(b['Fecha Creación'] || 0) ? a : b);
+  return `Envío TikTok ${shortDate(first['Fecha Creación'])}`;
+}
+
+// TikTok shipments these orders can be written on, grouped by tracking ID.
+// Pending ones first (newest first); shipped ones only when already in
+// memory, max 3 -- picking one of those saves as Enviado (server rule).
+function getShipmentOptions(customerId, orders) {
+  const byTid = {};
+  allRecords.forEach(r => {
+    if (r.Channel !== 'TikTok' || !r.TrackingId || r.CustomerId !== customerId) return;
+    const s = byTid[r.TrackingId] || (byTid[r.TrackingId] = { tid: r.TrackingId, date: r['Fecha Creación'], count: 0, shipped: false });
+    s.count++;
+    if (isShipped(r.Status)) s.shipped = true;
+    if (new Date(r['Fecha Creación'] || 0) < new Date(s.date || 0)) s.date = r['Fecha Creación'];
+  });
+  const byDateDesc = (a, b) => new Date(b.date || 0) - new Date(a.date || 0);
+  const all = Object.values(byTid);
+  const list = [...all.filter(s => !s.shipped).sort(byDateDesc), ...all.filter(s => s.shipped).sort(byDateDesc).slice(0, 3)];
+  // An Anotado order's current shipment must always be pickable, even if
+  // that TikTok order isn't loaded (e.g. it belongs to another customer ID).
+  orders.forEach(r => {
+    if (r.Status === 'Anotado' && r.LinkedShipment && !list.some(s => s.tid === r.LinkedShipment)) {
+      list.push({ tid: r.LinkedShipment, date: '', count: 0, shipped: false, unknown: true });
+    }
+  });
+  return list;
+}
+
+function scmIsNoChange(r, target) {
+  if (!target) return true;
+  if (target === r.Status) return true;
+  return r.Status === 'Anotado' && target === 'Anotado|' + r.LinkedShipment;
+}
+
+function scmWarnings(r, target) {
+  if (scmIsNoChange(r, target)) return [];
+  const [st, tid] = target.split('|');
+  const out = [];
+  if ((st === 'Anotado' || st === 'Enviado') && r.Status === 'No Pagado') out.push('Sin pagar');
+  if (st === 'Anotado') {
+    const s = scmShipments.find(x => x.tid === tid);
+    if (s && s.shipped) out.push('Este envío ya salió: quedará como Enviado');
+  }
+  if (r.Status === 'Anotado' && st !== 'Anotado') out.push('Se quitará el vínculo con el envío TikTok');
+  return out;
+}
+
+function scmChipKind(target) {
+  if (!target) return 'none';
+  const st = target.split('|')[0];
+  return { 'No Pagado': 'nopagado', 'Pagado': 'pagado', 'Enviado': 'enviado', 'Anotado': 'anotado' }[st] || 'none';
+}
+
+function scmOptionsHtml(r, target) {
+  const opt = (v, label, disabled) =>
+    `<option value="${escapeHtml(v)}"${v === target ? ' selected' : ''}${disabled ? ' disabled' : ''}>${escapeHtml(label)}</option>`;
+  let html = opt('', 'Sin cambio');
+  if (r.Status !== 'No Pagado') html += opt('No Pagado', 'No pagado');
+  if (r.Status !== 'Pagado') html += opt('Pagado', 'Pagado');
+  // A TikTok order IS the shipment: it can't be Anotado. Enviado stays
+  // available for the rare case it left without going through Empacar.
+  if (r.Channel === 'TikTok') return html + opt('Enviado', 'Enviado');
+  html += opt('Enviado', 'Enviado aparte');
+  html += '<optgroup label="Anotado en envío TikTok">';
+  if (!scmShipments.length) html += opt('__none', 'Sin envío TikTok pendiente', true);
+  scmShipments.forEach(s => {
+    const current = r.Status === 'Anotado' && r.LinkedShipment === s.tid;
+    html += opt('Anotado|' + s.tid, shipmentLabel(s) + (current ? ' (actual)' : ''));
+  });
+  html += '</optgroup>';
+  return html;
+}
+
+function scmFill(action) {
+  scmBulk = action;
+  const shipSel = document.getElementById('scm-bulk-ship');
+  const tid = shipSel ? shipSel.value : '';
+  scmOrders.forEach((r, i) => {
+    let t = '';
+    if (action === 'Pagado') t = r.Status === 'No Pagado' ? 'Pagado' : '';
+    else if (r.Channel === 'TikTok') t = '';
+    else if (action === 'Enviado') t = 'Enviado';
+    else if (action === 'Anotado' && tid) t = 'Anotado|' + tid;
+    scmTargets[i] = scmIsNoChange(r, t) ? '' : t;
+  });
+  scmRender();
+}
+
+function scmPlan() {
+  const plan = [];
+  scmOrders.forEach((r, i) => {
+    const target = scmTargets[i];
+    if (scmIsNoChange(r, target)) return;
+    const [st, tid] = target.split('|');
+    const fields = { Status: st };
+    if (st === 'Anotado') fields['Linked Shipment'] = tid;
+    else if (r.Status === 'Anotado') fields['Linked Shipment'] = '';
+    plan.push({ rec: r, fields, kind: st });
   });
   return plan;
 }
 
-function updateBulkConfirmState() {
-  const btn = document.getElementById('bulk-status-confirm-btn');
-  if (btn) btn.disabled = bulkRowPlan().length === 0;
+function scmRender() {
+  const list = document.getElementById('scm-row-list');
+  if (!list) return;
+  list.innerHTML = scmOrders.map((r, i) => {
+    const target = scmTargets[i] || '';
+    const warns = scmWarnings(r, target);
+    const changed = !scmIsNoChange(r, target);
+    const meta = [formatDateTime(r['Fecha Creación'])];
+    if (r.Status === 'Anotado') meta.push(anotadoShipmentText(r));
+    return `<div class="scm-row${changed ? ' is-changed' : ''}">
+      <div class="scm-row-top">
+        <div class="scm-row-main">
+          <span class="scm-row-title">${channelTag(r.Channel)} ${shopifyOrderLine(r)}</span>
+          <span class="scm-row-meta">${escapeHtml(meta.filter(Boolean).join(' · '))}</span>
+        </div>
+        <span class="status-pill ${statusPillClass(r.Status)}">${escapeHtml(r.Status)}</span>
+        <span class="scm-arrow">→</span>
+        <select class="scm-chip scm-chip--${scmChipKind(changed ? target : '')}" data-row="${i}" aria-label="Nuevo estado">${scmOptionsHtml(r, changed ? target : '')}</select>
+      </div>
+      ${warns.length ? `<div class="scm-row-warn">⚠ ${escapeHtml(warns.join(' · '))}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.scm-chip').forEach(sel => sel.addEventListener('change', () => {
+    scmTargets[Number(sel.dataset.row)] = sel.value;
+    scmBulk = '';   // a hand edit means the rows no longer match one bulk action
+    scmRender();
+  }));
+
+  document.querySelectorAll('.scm-bulk-btn').forEach(b =>
+    b.classList.toggle('active', !scmSingle && b.dataset.bulk === scmBulk));
+
+  // Summary line + button text -- the button always says exactly what happens.
+  const plan = scmPlan();
+  const counts = {};
+  plan.forEach(p => { counts[p.kind] = (counts[p.kind] || 0) + 1; });
+  const words = { 'Pagado': ['pagado', 'pagados'], 'No Pagado': ['no pagado', 'no pagados'], 'Anotado': ['anotado', 'anotados'], 'Enviado': ['enviado aparte', 'enviados aparte'] };
+  const parts = Object.keys(words).filter(k => counts[k]).map(k => `${counts[k]} ${words[k][counts[k] === 1 ? 0 : 1]}`);
+  const btn = document.getElementById('scm-apply');
+  if (btn && !scmSaving) {
+    btn.disabled = !plan.length;
+    btn.textContent = plan.length ? `Aplicar: ${parts.join(', ')}` : 'Sin cambios';
+  }
+
+  const warnCounts = {};
+  scmOrders.forEach((r, i) => scmWarnings(r, scmTargets[i] || '').forEach(w => { warnCounts[w] = (warnCounts[w] || 0) + 1; }));
+  const summary = document.getElementById('scm-summary');
+  if (summary) {
+    const w = Object.entries(warnCounts);
+    summary.innerHTML = w.length
+      ? `⚠ ${w.map(([text, n]) => `${n} pedido${n !== 1 ? 's' : ''}: ${escapeHtml(text.toLowerCase())}`).join(' · ')}`
+      : '';
+    summary.style.display = w.length ? 'block' : 'none';
+  }
 }
 
-async function applyBulkStatus() {
-  const plan = bulkRowPlan();
-  if (!plan.length) { showToast('Nada que cambiar'); return; }
-  let done = 0;
-  try {
-    for (const p of plan) {
-      const fields = {};
-      if (p.status) fields.Status = p.status;
-      if (p.link) fields['Linked Shipment'] = p.link;
-      const result = await performOrderUpdate(p.id, fields);
-      if (result.result !== 'updated') continue;
-      const rec = allRecords.find(r => String(r.ID) === p.id);
-      if (rec) {
-        if (p.status) rec.Status = p.status;
-        if (p.link) rec.LinkedShipment = p.link;
-      }
-      done++;
-    }
-    closeModal();
-    updateUndoRedoButtons();
-    renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(`✓ ${done} pedido${done !== 1 ? 's' : ''} actualizado${done !== 1 ? 's' : ''}`);
-  } catch (e) { showToast('Error: ' + e.message); }
+function openStatusChangeModal(cliente, orders, single) {
+  scmOrders = orders;
+  scmSingle = !!single || orders.length === 1;
+  scmBulk = '';
+  scmSaving = false;
+  const custId = (orders[0] && orders[0].CustomerId) || '';
+  scmShipments = getShipmentOptions(custId, orders);
+  scmTargets = orders.map(() => '');
+  const pendingShipments = scmShipments.filter(s => !s.shipped && !s.unknown);
+  const disabledAttr = scmSingle ? ' disabled' : '';
+
+  const shipOptions = scmShipments.length
+    ? scmShipments.map(s => `<option value="${escapeHtml(s.tid)}">${escapeHtml(shipmentLabel(s))}</option>`).join('')
+    : '<option value="">Sin envío TikTok pendiente</option>';
+
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal scm-modal">
+    <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
+
+    <div class="scm-half scm-bulk${scmSingle ? ' is-disabled' : ''}">
+      <div class="scm-half-label">Todos los pedidos</div>
+      ${scmSingle ? '<div class="scm-hint">Solo un pedido · cámbialo abajo</div>' : '<div class="scm-hint">Rellena todos los pedidos de abajo. Luego puedes ajustar cada uno.</div>'}
+      <div class="scm-bulk-actions">
+        <button class="scm-bulk-btn" data-bulk="Pagado"${disabledAttr}>Pagado</button>
+        <div class="scm-bulk-anotado">
+          <button class="scm-bulk-btn" data-bulk="Anotado"${disabledAttr || (scmShipments.length ? '' : ' disabled')}>Anotado en envío</button>
+          <select id="scm-bulk-ship" class="scm-bulk-ship"${disabledAttr || (scmShipments.length ? '' : ' disabled')}>${shipOptions}</select>
+        </div>
+        <button class="scm-bulk-btn" data-bulk="Enviado"${disabledAttr}>Enviado aparte</button>
+      </div>
+    </div>
+
+    <div class="scm-half scm-rows">
+      <div class="scm-half-label">Cada pedido · toca el resultado para cambiarlo</div>
+      <div id="scm-row-list" class="scm-row-list"></div>
+    </div>
+
+    <div id="scm-summary" class="scm-summary" style="display:none"></div>
+    <div class="modal-actions"><button class="btn" id="scm-close">Cerrar</button><button class="btn btn-primary" id="scm-apply" disabled>Sin cambios</button></div>
+  </div></div>`;
+
+  document.getElementById('scm-close').addEventListener('click', closeModal);
+  document.getElementById('scm-apply').addEventListener('click', scmApply);
+  c.querySelectorAll('.scm-bulk-btn').forEach(b => b.addEventListener('click', () => scmFill(b.dataset.bulk)));
+  document.getElementById('scm-bulk-ship').addEventListener('change', () => { if (scmBulk === 'Anotado') scmFill('Anotado'); });
+
+  // The 99% case: write everything on the customer's pending TikTok
+  // shipment. Pre-filled so it's one tap on Aplicar.
+  if (pendingShipments.length && orders.some(r => r.Channel !== 'TikTok')) scmFill('Anotado');
+  else scmRender();
 }
+
+// Entry point from the customer group's "Cambiar estado" button.
+function showBulkStatusModal(group) {
+  const orders = group.items.filter(r => ACTIVE_STATUSES.includes(r.Status));
+  if (!orders.length) { showToast('Sin pedidos pendientes'); return; }
+  openStatusChangeModal(group.name, orders, false);
+}
+
+async function scmApply() {
+  if (scmSaving) return;
+  const plan = scmPlan();
+  if (!plan.length) return;
+  scmSaving = true;
+  const btn = document.getElementById('scm-apply');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+  dataEpoch++; // any fetch already in flight carries pre-write data
+
+  let done = 0, failed = 0, lastError = '';
+  for (const p of plan) {
+    try {
+      const result = await performOrderUpdate(p.rec.ID, p.fields);
+      if (result.result !== 'updated') throw new Error(result.error || 'Error');
+      p.rec.Status = result.status || p.fields.Status;   // server may turn Anotado into Enviado
+      if (p.fields['Linked Shipment'] !== undefined) p.rec.LinkedShipment = p.fields['Linked Shipment'];
+      done++;
+    } catch (e) {
+      failed++; lastError = e.message;
+      console.warn('[scmApply] failed for', p.rec.ID, e);
+    }
+  }
+
+  scmSaving = false;
+  closeModal();
+  updateUndoRedoButtons();
+  renderAll();
+  if (searchSelectedCliente) runSearch(searchSelectedCliente);
+  showToast(failed
+    ? `${done} actualizado${done !== 1 ? 's' : ''}, ${failed} con error: ${lastError}`
+    : `✓ ${done} pedido${done !== 1 ? 's' : ''} actualizado${done !== 1 ? 's' : ''}`);
+  dataEpoch++;
+  autoRefresh();
+}
+
 function openCustomerHistory(customerId, displayName) {
   if (!customerId) { showToast('Cliente sin ID asociado'); return; }
   showCustomerHistoryModal(customerId, displayName);
@@ -1098,7 +1294,7 @@ async function fetchActive() {
   let gotCache = false;
   let cachedActive = { records: [] }, cachedCustomers = { records: [] }, cachedMatches = { records: [] };
 
-  const freshActive = getCached('action=orders&status=' + encodeURIComponent('No Pagado,Pagado'), fresh => {
+  const freshActive = getCached('action=orders&status=' + ACTIVE_STATUS_QS, fresh => {
     cachedActive = fresh;
     applyActiveData(cachedActive, cachedCustomers, cachedMatches);
     renderAll();
@@ -1124,7 +1320,7 @@ async function fetchActive() {
   }
 
   const [activeData, customersData, matchesData] = await Promise.all([
-    apiGet('action=orders&status=' + encodeURIComponent('No Pagado,Pagado')),
+    apiGet('action=orders&status=' + ACTIVE_STATUS_QS),
     apiGet('action=customers'),
     apiGet('action=shopify_matches')
   ]);
@@ -1204,7 +1400,7 @@ async function manualRefresh() {
 // fetchActive() is for first page load; using it on a poll re-applied an
 // old snapshot and made just-changed rows reappear.
 async function fetchActiveFresh(epoch) {
-  const qsActive = 'action=orders&status=' + encodeURIComponent('No Pagado,Pagado');
+  const qsActive = 'action=orders&status=' + ACTIVE_STATUS_QS;
   const [activeData, customersData, matchesData] = await Promise.all([
     apiGet(qsActive), apiGet('action=customers'), apiGet('action=shopify_matches')
   ]);
@@ -1267,7 +1463,10 @@ async function updateStatus(id, status) {
     const fromStatus = rec ? rec.Status : null;
     const result = await performStatusUpdate(id, status);
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
-    if (rec) rec.Status = status;
+    if (rec) {
+      if (rec.Status === 'Anotado' && status !== 'Anotado') rec.LinkedShipment = ''; // server clears the link too
+      rec.Status = result.status || status;
+    }
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
@@ -1553,6 +1752,7 @@ function renderOrderRow(r, showActions) {
   let pillClass = statusPillClass(status), pillText = status === 'No Pagado' ? `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}` : status === 'Pagado' ? `Pagado${isOverduePaid ? ' ⚠' : ''}` : status;
 
   const metaParts = [formatDateTime(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
+  if (status === 'Anotado') metaParts.push(anotadoShipmentText(r));
   const notasHtml = renderNotas(r.Notas);
   const id = r.ID;
 
@@ -1833,26 +2033,31 @@ function renderClientList() {
 }
 
 function renderAll() {
-  const activos = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const anotado = allRecords.filter(r => r.Status === 'Anotado');
   const enviado = allRecords.filter(r => r.Status === 'Enviado');
   const archivo = allRecords.filter(r => r.Status === 'Archivado');
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
   document.getElementById('badge-enviar').textContent = enviar.length;
+  const anotadoBadge = document.getElementById('badge-anotado');
+  if (anotadoBadge) anotadoBadge.textContent = anotado.length;
   document.getElementById('badge-enviado').textContent = tabDataLoaded.enviado ? enviado.length : '';
   document.getElementById('badge-archivo').textContent = tabDataLoaded.archivo ? archivo.length : '';
 
   const unpaidTotal = cobrar.reduce((s, r) => s + (r.Precio || 0), 0);
-  const paidTotal = enviar.reduce((s, r) => s + (r.Precio || 0), 0);
+  // Anotado is paid-but-not-gone, same as Pagado, so it stays in this total.
+  const paidTotal = [...enviar, ...anotado].reduce((s, r) => s + (r.Precio || 0), 0);
   const alerts = cobrar.filter(r => daysSince(r['Fecha Creación']) >= 3).length + enviar.filter(r => daysSince(r['Fecha Creación']) >= 7).length;
 
   document.getElementById('stat-unpaid-amount').textContent = formatMXN(unpaidTotal);
   document.getElementById('stat-unpaid-count').textContent = `${cobrar.length} item${cobrar.length !== 1 ? 's' : ''}`;
   document.getElementById('stat-paid-pending').textContent = formatMXN(paidTotal);
-  document.getElementById('stat-paid-count').textContent = `${enviar.length} item${enviar.length !== 1 ? 's' : ''}`;
+  const paidCount = enviar.length + anotado.length;
+  document.getElementById('stat-paid-count').textContent = `${paidCount} item${paidCount !== 1 ? 's' : ''}`;
   document.getElementById('stat-alerts').textContent = alerts;
   document.getElementById('stat-total').textContent = formatMXN(unpaidTotal + paidTotal);
 
@@ -1863,6 +2068,7 @@ function renderAll() {
   renderGrouped(activos, 'activos-list', true);
   renderGrouped(cobrar, 'cobrar-list', true);
   renderGrouped(enviar, 'enviar-list', true);
+  if (document.getElementById('anotado-list')) renderGrouped(anotado, 'anotado-list', true);
   renderGrouped(enviado, 'enviado-list', true);
   renderGrouped(archivo, 'archivo-list', false);
   renderAnalytics();
@@ -2048,7 +2254,7 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'enviado', 'archivo', 'tiktok', 'shopify-pend'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'anotado', 'enviado', 'archivo', 'tiktok', 'shopify-pend'].forEach(t => {
     const node = document.getElementById(`tab-${t}`);
     if (!node) return;
     node.style.display = t === tab ? 'block' : 'none';
