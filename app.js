@@ -551,7 +551,6 @@ async function submitNewOrder() {
   if (cancelBtn) cancelBtn.disabled = true;
 
   try {
-  try {
     const _t0 = performance.now();
     const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
     const _tTotal = performance.now() - _t0;
