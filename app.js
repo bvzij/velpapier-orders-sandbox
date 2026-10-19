@@ -582,6 +582,29 @@ function readLinkPicker(idPrefix) {
 // Writes any combination of fields on one order. update_order_status only
 // handles Status; linking needs Linked Shipment written in the SAME call
 // so status and link can never half-apply.
+// Prints where a status change spent its time. Server parts come from
+// _timings on the Apps Script response; "network + Apps Script startup"
+// is everything the code itself didn't account for (Google's web-app
+// overhead, cold start, the HTTP round trip).
+function logStatusTiming(id, status, netMs, totalMs, t) {
+  t = t || {};
+  const server = (t.auth_ms || 0) + (t.lock_wait_ms || 0) + (t.dispatch_total_ms || 0) + (t.flush_audit_ms || 0);
+  const knownDispatch = (t.find_order_row_ms || 0) + (t.field_writes_ms || 0) + (t.shipment_count_ms || 0);
+  console.group(`⏱ ${id} → ${status}: ${Math.round(totalMs)} ms total`);
+  console.table({
+    'Network + Apps Script startup': Math.round(netMs - server),
+    'Auth (token check)': t.auth_ms || 0,
+    'Lock wait': t.lock_wait_ms || 0,
+    'Find order row': t.find_order_row_ms || 0,
+    'Field writes + audit reads': t.field_writes_ms || 0,
+    'Shipment count recalc': t.shipment_count_ms || 0,
+    'Other server work': Math.max(0, (t.dispatch_total_ms || 0) - knownDispatch),
+    'Audit log flush': t.flush_audit_ms || 0,
+    'Browser re-render': Math.round(totalMs - netMs),
+  });
+  console.groupEnd();
+}
+
 async function performOrderUpdate(orderId, fields) {
   return apiPost({ action: 'update_order', order_id: orderId, fields: fields });
 }
@@ -773,7 +796,9 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     const rec = allRecords.find(r => r.ID === id);
     const fields = { Status: status };
     if (linkTrackingId) fields['Linked Shipment'] = linkTrackingId;
+    const _t0 = performance.now();
     const result = await performOrderUpdate(id, fields);
+    const _tNet = performance.now() - _t0;
     if (result.result !== 'updated') throw new Error(result.error || 'Error');
     if (rec) {
       rec.Status = status;
@@ -782,7 +807,8 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
-    showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);
+    logStatusTiming(id, status, _tNet, performance.now() - _t0, result._timings);
+    showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);  
   } catch (e) { showToast('Error: ' + e.message); }
 }
 
@@ -1487,6 +1513,39 @@ function groupByCliente(records) {
   return order.map(k => groups[k]);
 }
 
+// Pending (Pagado) TikTok orders for one customer -- same test as the
+// "Tiene Pedido de TikTok" badge. Usually one, but can be several.
+function showPendingTikTokModal(custId, cliente) {
+  const orders = allRecords
+    .filter(r => r.CustomerId === custId && r.Channel === 'TikTok' && r.Status === 'Pagado')
+    .sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
+  if (!orders.length) { showToast('Sin pedidos de TikTok pendientes'); return; }
+
+  const blocks = orders.map((o, i) => {
+    const items = VP.parseProducts(o.Producto || '');
+    const itemRows = items.length
+      ? items.map(p => `<div class="cal-detail-item"><span>${escapeHtml(p.qty)}×</span><span>${escapeHtml(p.name)}</span>${p.price ? `<span class="cal-detail-item-price">${formatMXN(p.price)}</span>` : ''}</div>`).join('')
+      : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
+    return `<div style="border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:10px 12px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">${shopifyOrderLine(o)}</div>
+      <div style="font-size:12px;color:var(--text-faint);margin-bottom:8px">Pedido ${escapeHtml(formatDateTime(o['Fecha Creación']))}${o.TrackingId ? ' · Guía ' + escapeHtml(o.TrackingId) : ''}${o.Precio ? ' · ' + formatMXN(o.Precio) : ''}</div>
+      ${itemRows}
+      <div style="margin-top:10px"><button class="btn tt-pending-qc-btn" data-idx="${i}">Ver en Calidad</button></div>
+    </div>`;
+  }).join('');
+
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal cal-detail-modal">
+    <div class="modal-title">TikTok pendiente · ${escapeHtml(cliente)}</div>
+    <div class="cal-detail-scroll">${blocks}</div>
+    <div class="modal-actions"><button class="btn" id="tt-pending-close">Cerrar</button></div>
+  </div></div>`;
+  document.getElementById('tt-pending-close').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+  c.querySelectorAll('.tt-pending-qc-btn').forEach(b =>
+    b.addEventListener('click', () => showQCViewModal(orders[Number(b.dataset.idx)])));
+}
+
 function renderGrouped(records, containerId, showActions) {
   const el = document.getElementById(containerId);
   el.innerHTML = '';
@@ -1507,7 +1566,7 @@ function renderGrouped(records, containerId, showActions) {
       r.Status === 'Pagado'
     );
     const tikTokIndicator = hasPendingTikTok
-    ? `<span style="display:inline-flex;align-items:center;background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-border);border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px">Tiene Pedido de TikTok</span>`
+    ? `<span class="tiktok-pending-badge" title="Ver pedido de TikTok pendiente" style="display:inline-flex;align-items:center;background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-border);border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px;cursor:pointer;text-decoration:underline dotted">Tiene Pedido de TikTok</span>`
     : '';
     header.setAttribute('data-tiktok-ready', hasPendingTikTok);
     group.setAttribute('data-tiktok-ready', hasPendingTikTok);
@@ -1522,6 +1581,10 @@ function renderGrouped(records, containerId, showActions) {
     header.innerHTML = `<div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}${shipBadge}${tikTokIndicator}</div><span class="customer-owed">${unpaid > 0 ? '· Por cobrar: ' + formatMXN(unpaid) : ''}</span><div class="customer-bulk-actions"></div>`;
     const headerNameEl = header.querySelector('.customer-name');
     if (headerNameEl && custId) headerNameEl.addEventListener('click', () => openCustomerHistory(custId, cliente));
+    // Badge sits inside the clickable name -- stopPropagation so it opens
+    // its own modal instead of the customer history.
+    const ttBadge = header.querySelector('.tiktok-pending-badge');
+    if (ttBadge) ttBadge.addEventListener('click', e => { e.stopPropagation(); showPendingTikTokModal(custId, cliente); });
 
     if (suggestionHtml) {
       const hintEl = document.createElement('div');
