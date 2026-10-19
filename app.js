@@ -490,7 +490,7 @@ function handleGiftRecipientInput() {
   list.style.display = 'block';
 }
 
-function getUniqueClient// "primary (alias / alias)" label, used by every username autocomplete
+// "primary (alias / alias)" label, used by every username autocomplete
 function clienteLabelHtml(c) {
   const primary = String(c.name || '');
   const aliases = (c.aliases || []).filter(a => a && a.toLowerCase() !== primary.toLowerCase());
@@ -500,7 +500,7 @@ function clienteLabelHtml(c) {
   return `<span>${escapeHtml(primary)}${sub}</span>`;
 }
 
-function getUniqueClientes() {es() {
+function getUniqueClientes() {
   const seen = {};
   Object.entries(allCustomers).forEach(([key, c]) => {
     const primary = (c.name || '').trim();
@@ -2754,7 +2754,7 @@ async function ajShopApply() {
       applied += res.applied || 0;
       (res.results || []).filter(r => !r.ok).forEach(r => failed.push(r));
     } catch (e) {
-      aborted = e.message;                              //Bob// already-applied batches stay applied; the reload shows what is left
+      aborted = e.message;                              // already-applied batches stay applied; the reload shows what is left
       break;
     }
     done += batch.length;
