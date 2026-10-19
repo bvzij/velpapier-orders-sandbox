@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.11';
+const SCRIPT_VERSION = '2026-10-19.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1145,15 +1145,83 @@ function updateOrderStatus(body) {
   const statusCol = headers.indexOf('Status') + 1;
 
   const oldStatus = sheet.getRange(rowIndex, statusCol).getValue();
-  sheet.getRange(rowIndex, statusCol).setValue(body.status);
+
+  // Same Anotado rules as update_order (see normalizeAnotadoFields), so the
+  // undo button can never leave a stale link or an unlinked Anotado.
+  const fields = { Status: body.status };
+  const anotadoError = normalizeAnotadoFields(sheet, rowIndex, headers, fields, oldStatus);
+  if (anotadoError) return jsonResponse({ error: anotadoError });
+
+  sheet.getRange(rowIndex, statusCol).setValue(fields.Status);
+  if (fields['Linked Shipment'] !== undefined) {
+    const linkCol = headers.indexOf('Linked Shipment') + 1;
+    if (linkCol > 0) {
+      const oldLink = sheet.getRange(rowIndex, linkCol).getValue();
+      sheet.getRange(rowIndex, linkCol).setValue(fields['Linked Shipment']);
+      if (String(oldLink) !== String(fields['Linked Shipment'])) {
+        logAudit('update_order_status', 'Order', body.order_id, 'Linked Shipment', oldLink, fields['Linked Shipment']);
+      }
+    }
+  }
   tmark('field_writes_ms', _tFields);
 
-  applyStatusSideEffects(sheet, rowIndex, body.status, headers, oldStatus);
-  if (String(oldStatus) !== String(body.status)) {
-    logAudit('update_order_status', 'Order', body.order_id, 'Status', oldStatus, body.status);
+  applyStatusSideEffects(sheet, rowIndex, fields.Status, headers, oldStatus);
+  if (String(oldStatus) !== String(fields.Status)) {
+    logAudit('update_order_status', 'Order', body.order_id, 'Status', oldStatus, fields.Status);
   }
 
-  return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.status });
+  return jsonResponse({ result: 'updated', order_id: body.order_id, status: fields.Status });
+}
+
+// ─── Anotado ───────────────────────────────────────────────────────────────────
+// Anotado = a Shopify/Manual order written on a TikTok shipment's label,
+// physically waiting to leave inside that package. Linked Shipment holds
+// the TikTok TRACKING ID. The Empacar finalize (saveQC) later moves it to
+// Enviado together with the TikTok order. Rules enforced here so every page
+// behaves identically:
+//   - Anotado needs a Linked Shipment (sent now or already on the row)
+//   - TikTok orders can never be Anotado (they ARE the shipment)
+//   - Anotado to a shipment that already left saves as Enviado instead
+//   - Anotado -> Pagado / No Pagado clears the link
+// Mutates fields in place. Returns an error string, or null when fine.
+function normalizeAnotadoFields(sheet, rowIndex, headers, fields, oldStatus) {
+  if (!fields || !fields['Status']) return null;
+  const iLink = headers.indexOf('Linked Shipment');
+  const iChan = headers.indexOf('Channel');
+  const newStatus = String(fields['Status']);
+
+  if (newStatus === 'Anotado') {
+    const chan = iChan >= 0 ? String(sheet.getRange(rowIndex, iChan + 1).getValue()) : '';
+    if (chan === 'TikTok') return 'Un pedido de TikTok no puede quedar como Anotado';
+    const link = String(fields['Linked Shipment'] !== undefined
+      ? fields['Linked Shipment']
+      : (iLink >= 0 ? sheet.getRange(rowIndex, iLink + 1).getValue() : '')).trim();
+    if (!link) return 'Anotado requiere un envío de TikTok vinculado';
+    if (isTrackingShipped(sheet, headers, link)) fields['Status'] = 'Enviado';
+  } else if (String(oldStatus) === 'Anotado' &&
+             (newStatus === 'Pagado' || newStatus === 'No Pagado') &&
+             fields['Linked Shipment'] === undefined) {
+    fields['Linked Shipment'] = '';
+  }
+  return null;
+}
+
+// True when any TikTok order carrying this tracking ID is already
+// Enviado/Archivado. TextFinder on the Tracking ID column only -- no full
+// sheet read.
+function isTrackingShipped(sheet, headers, trackingId) {
+  const iTid = headers.indexOf('Tracking ID');
+  const iStat = headers.indexOf('Status');
+  const iChan = headers.indexOf('Channel');
+  if (iTid < 0 || iStat < 0 || sheet.getLastRow() < 2) return false;
+  const col = sheet.getRange(2, iTid + 1, sheet.getLastRow() - 1, 1);
+  const hits = col.createTextFinder(String(trackingId)).matchEntireCell(true).findAll();
+  return hits.some(h => {
+    const r = h.getRow();
+    if (iChan >= 0 && String(sheet.getRange(r, iChan + 1).getValue()) !== 'TikTok') return false;
+    const s = String(sheet.getRange(r, iStat + 1).getValue());
+    return s === 'Enviado' || s === 'Archivado';
+  });
 }
 
 // ─── Recalculate shipment count ────────────────────────────────────────────────
@@ -1407,6 +1475,9 @@ function updateOrder(body) {
   const statusColForOld = headers.indexOf('Status') + 1;
   const oldStatusForSideEffects = statusColForOld > 0 ? sheet.getRange(rowIndex, statusColForOld).getValue() : null;
 
+  const anotadoError = normalizeAnotadoFields(sheet, rowIndex, headers, body.fields, oldStatusForSideEffects);
+  if (anotadoError) return jsonResponse({ error: anotadoError });
+
   // One read per changed field before its write, so the log shows a real
   // before/after. A handful of fields per call (this is a manual edit
   // form, not a bulk loop), so the extra reads are cheap here.
@@ -1415,6 +1486,9 @@ function updateOrder(body) {
     const col = headers.indexOf(key) + 1;
     if (col > 0) {
       const oldValue = sheet.getRange(rowIndex, col).getValue();
+      // Linked Shipment holds a tracking ID -- same corruption risk as the
+      // Tracking ID column itself (FIX: forceTextFormat principle).
+      if (key === 'Linked Shipment') sheet.getRange(rowIndex, col).setNumberFormat('@');
       sheet.getRange(rowIndex, col).setValue(value);
       if (String(oldValue) !== String(value)) {
         logAudit('update_order', 'Order', body.order_id, key, oldValue, value);
@@ -1427,7 +1501,7 @@ function updateOrder(body) {
     applyStatusSideEffects(sheet, rowIndex, body.fields['Status'], headers, oldStatusForSideEffects);
   }
 
-  return jsonResponse({ result: 'updated', order_id: body.order_id });
+  return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.fields ? body.fields['Status'] : undefined });
 }
 
 function deleteOrder(body) {
@@ -3596,7 +3670,7 @@ const BACKFILL_SUBSTATUS_TO_STATUS = {
   'delivered':           'Enviado',
   'completed':           'Archivado',
 };
-const STATUS_RANK = { 'No Pagado': 0, 'Pagado': 1, 'Enviado': 2, 'Archivado': 3 };
+const STATUS_RANK = { 'No Pagado': 0, 'Pagado': 1, 'Anotado': 1.5, 'Enviado': 2, 'Archivado': 3 };
 
 function backfillTargetStatus(substatus) {
   return BACKFILL_SUBSTATUS_TO_STATUS[String(substatus || '').trim().toLowerCase()] || '';
@@ -6478,4 +6552,62 @@ function runAllTests() {
 
   Logger.log('Tests: ' + pass + ' passed, ' + fail + ' failed');
   return { pass: pass, fail: fail };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ONE-OFF MIGRATION -- Enviado -> Anotado. Run migrateAnotadoPreview() first
+// and read the log. If the list is right, run migrateAnotadoApply(). Then
+// DELETE this whole block (both functions + helper) and redeploy.
+// Finds Shopify/Manual orders marked Enviado whose Linked Shipment points at
+// a TikTok shipment that has NOT shipped yet (all its TikTok orders still
+// Pagado / No Pagado) -- i.e. written on a label, not actually gone.
+// ═══════════════════════════════════════════════════════════════════════════
+function _anotadoMigrationCandidates() {
+  const sheet = getOrdersSheet();
+  const data = sheet.getDataRange().getValues();
+  const h = data[0];
+  const iId = h.indexOf('Order ID'), iChan = h.indexOf('Channel'), iStat = h.indexOf('Status');
+  const iTid = h.indexOf('Tracking ID'), iLink = h.indexOf('Linked Shipment'), iCust = h.indexOf('Customer ID');
+  const iUser = h.indexOf('Primary Username');
+  const tiktokByTid = {};
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][iChan]) !== 'TikTok') continue;
+    const tid = String(data[i][iTid] || '').trim();
+    if (!tid) continue;
+    (tiktokByTid[tid] = tiktokByTid[tid] || []).push(String(data[i][iStat]));
+  }
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (String(r[iChan]) === 'TikTok' || String(r[iStat]) !== 'Enviado') continue;
+    const link = String(r[iLink] || '').trim();
+    const tk = tiktokByTid[link];
+    if (!link || !tk || !tk.length) continue;
+    if (tk.some(s => s === 'Enviado' || s === 'Archivado')) continue;
+    out.push({ row: i + 1, id: String(r[iId]), channel: String(r[iChan]), user: String(r[iUser] || ''), link, cust: String(r[iCust] || '') });
+  }
+  return { sheet, headers: h, rows: out };
+}
+
+function migrateAnotadoPreview() {
+  const c = _anotadoMigrationCandidates();
+  Logger.log(`${c.rows.length} pedido(s) pasarían de Enviado a Anotado:`);
+  c.rows.forEach(r => Logger.log(`  ${r.id} · ${r.channel} · ${r.user} · envío ${r.link}`));
+}
+
+function migrateAnotadoApply() {
+  const c = _anotadoMigrationCandidates();
+  const iStat = c.headers.indexOf('Status'), iShipped = c.headers.indexOf('Shipped Date');
+  const decrement = {};
+  c.rows.forEach(r => {
+    c.sheet.getRange(r.row, iStat + 1).setValue('Anotado');
+    if (iShipped >= 0) c.sheet.getRange(r.row, iShipped + 1).setValue('');
+    logAudit('migrate_anotado', 'Order', r.id, 'Status', 'Enviado', 'Anotado');
+    // Enviado counted toward Shipment Count for Shopify; Anotado does not.
+    if (r.channel === 'Shopify' && r.cust) decrement[r.cust] = (decrement[r.cust] || 0) - 1;
+  });
+  if (Object.keys(decrement).length) incrementShipmentCounts(decrement);
+  flushAudit();
+  Logger.log(`${c.rows.length} pedido(s) cambiados a Anotado.`);
 }
