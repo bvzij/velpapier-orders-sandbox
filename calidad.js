@@ -38,10 +38,6 @@ let openModalQcId = null; // which order's modal is currently open, if any
 function applyQcData(q, o) {
   QC = (q.records || []).filter(r => r['Status'] === 'Enviado');
   if (o && o.records) hasFullOrdersLoaded = true;
-  // QC rows have no Timestamp column -- this sort was comparing '' to ''
-  // and doing nothing. QC ID is 'QC-<zero-padded row>-<rand>', so it
-  // sorts reliably by creation order (same fix as Historial in qc.js).
-  QC.sort((a, b) => String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || '')));
   ORDERS_BY_ID = {};
   (o.records || []).forEach(r => {
     // A combined shipment's Order ID is itself a " + "-joined string
@@ -52,6 +48,20 @@ function applyQcData(q, o) {
     String(r['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
       ORDERS_BY_ID[id] = r;
     });
+  });
+  // Sort by packed date (the linked order's Shipped Date), newest first.
+  // QC rows carry no date of their own -- same gap as the modal's
+  // "Empacado" field below. Falls back to QC ID (creation order) when no
+  // linked order/date is found yet, so unmatched rows don't jump around.
+  QC.sort((a, b) => {
+    const da = orderIdsOf(a).tiktok.concat(orderIdsOf(a).shopify, orderIdsOf(a).manual).map(id => ORDERS_BY_ID[id]).find(Boolean);
+    const db = orderIdsOf(b).tiktok.concat(orderIdsOf(b).shopify, orderIdsOf(b).manual).map(id => ORDERS_BY_ID[id]).find(Boolean);
+    const ta = da ? VP.asDate(da['Shipped Date']) : null;
+    const tb = db ? VP.asDate(db['Shipped Date']) : null;
+    if (ta && tb) return tb.getTime() - ta.getTime();
+    if (ta) return -1;
+    if (tb) return 1;
+    return String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || ''));
   });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
   hasLoadedOnce = true;
