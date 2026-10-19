@@ -226,6 +226,44 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .pill-nopagado { background: var(--amber-bg); color: var(--amber-text); }
 .pill-pagado { background: var(--green-bg); color: var(--green-text); }
 .pill-enviado { background: var(--surface2); color: var(--text-faint); border: 0.5px solid var(--border); }
+.pill-anotado { background: var(--purple-bg); color: var(--purple-text); }
+
+/* ── Status modal (bulk + single) ── */
+.scm-modal { width: 600px; max-width: calc(100vw - 24px); }
+.scm-half { border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 12px; }
+.scm-half-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); margin-bottom: 4px; }
+.scm-hint { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+.scm-bulk { background: var(--surface2); }
+.scm-bulk.is-disabled { opacity: 0.55; }
+.scm-bulk-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scm-bulk-btn { padding: 8px 12px; font-size: 13px; font-weight: 500; border-radius: var(--radius-sm); border: 0.5px solid var(--border-strong); background: var(--surface); color: var(--text); cursor: pointer; font-family: inherit; white-space: nowrap; }
+.scm-bulk-btn:hover:not(:disabled) { background: var(--bg); }
+.scm-bulk-btn:disabled { cursor: not-allowed; }
+.scm-bulk-btn.active { background: var(--text); color: var(--surface); border-color: var(--text); }
+.scm-bulk-anotado { display: flex; flex: 1; min-width: 220px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.scm-bulk-anotado .scm-bulk-btn { border: none; border-radius: 0; border-right: 0.5px solid var(--border); }
+.scm-bulk-ship { flex: 1; min-width: 0; border: none; background: transparent; font-size: 12px; padding: 0 8px; color: var(--text); font-family: inherit; }
+.scm-row-list { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
+.scm-row { padding: 9px 2px; border-top: 0.5px solid var(--border); }
+.scm-row:first-child { border-top: none; }
+.scm-row-top { display: flex; align-items: center; gap: 8px; }
+.scm-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.scm-row-title { font-size: 13px; }
+.scm-row-meta { font-size: 11px; color: var(--text-faint); }
+.scm-arrow { color: var(--text-faint); font-size: 13px; }
+.scm-chip { font-size: 12px; font-weight: 500; padding: 5px 8px; border-radius: var(--radius-sm); border: 0.5px solid var(--border-strong); background: var(--surface); color: var(--text-muted); font-family: inherit; max-width: 200px; cursor: pointer; }
+.scm-chip--pagado { background: var(--green-bg); color: var(--green-text); border-color: var(--green-border); }
+.scm-chip--nopagado { background: var(--amber-bg); color: var(--amber-text); border-color: var(--amber-border); }
+.scm-chip--anotado { background: var(--purple-bg); color: var(--purple-text); border-color: var(--purple-text); }
+.scm-chip--enviado { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-text); }
+.scm-row-warn { font-size: 11px; color: var(--amber-text); margin-top: 4px; text-align: right; }
+.scm-summary { font-size: 12px; color: var(--amber-text); background: var(--amber-bg); border: 0.5px solid var(--amber-border); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 12px; }
+@media (max-width: 520px) {
+  .scm-row-top { flex-wrap: wrap; }
+  .scm-row-main { flex-basis: 100%; }
+  .scm-arrow { margin-left: auto; }
+  .scm-chip { max-width: 60%; }
+}
 
 .order-actions { display: flex; gap: 4px; min-width: 75px; justify-content: flex-end; }
 
