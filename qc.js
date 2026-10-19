@@ -698,6 +698,8 @@ async function refreshQcBadges() {
   }
 }
 
+const SHOPIFY_STORE_HANDLE = '41uqww-0a';
+
 function addonLabel(o) {
   const ch = o['Channel'] || 'Manual';
   if (ch !== 'Shopify') return ch;
@@ -755,7 +757,7 @@ function renderAddonOrders(customerId) {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
       <div class="addon-text">
-        <div class="addon-channel">${escapeHtml(addonLabel(o))}</div>
+<div class="addon-channel">${o['Shopify Order ID'] ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeAttr(o['Shopify Order ID'])}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline" onclick="event.stopPropagation()">${escapeHtml(addonLabel(o))}</a>` : escapeHtml(addonLabel(o))}</div>
         <div class="addon-products">${escapeHtml(addonQtyText(o))}</div>
       </div>
     </div>
