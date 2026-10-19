@@ -791,7 +791,18 @@ function showStatusModal(id, currentStatus) {
   document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
 }
 
+// Orders currently mid-save: their row stays visible but greyed out and
+// unclickable instead of either (a) waiting for the server before
+// removing the row -- slow -- or (b) removing it immediately and hoping
+// the background call succeeds -- risks a silent loss on failure. On
+// error the id is cleared and renderAll() brings the row straight back,
+// fully interactive, with a toast explaining what happened.
+const pendingStatusOrderIds = new Set();
+
 async function updateOrderStatusNew(id, status, linkTrackingId) {
+  pendingStatusOrderIds.add(id);
+  renderAll(); // row now visible but greyed out + disabled
+  if (searchSelectedCliente) runSearch(searchSelectedCliente);
   try {
     const rec = allRecords.find(r => r.ID === id);
     const fields = { Status: status };
@@ -804,12 +815,18 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
       rec.Status = status;
       if (linkTrackingId) rec.LinkedShipment = linkTrackingId;
     }
+    pendingStatusOrderIds.delete(id);
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     logStatusTiming(id, status, _tNet, performance.now() - _t0, result._timings);
-    showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);  
-  } catch (e) { showToast('Error: ' + e.message); }
+    showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);
+  } catch (e) {
+    pendingStatusOrderIds.delete(id);
+    renderAll(); // bring the row back exactly as it was, fully interactive
+    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    showToast('Error: ' + e.message + ' — el pedido sigue aquí, nada se perdió');
+  }
 }
 
 let bulkModalSelectedStatus = null;
@@ -1418,6 +1435,7 @@ function renderOrderRow(r, showActions) {
 
   const row = document.createElement('div');
   row.className = rowClass;
+  row.dataset.orderId = id;
 
   const info = document.createElement('div');
   // The username used to repeat on every row even though the group header
@@ -1467,6 +1485,10 @@ function renderOrderRow(r, showActions) {
     const btn = document.createElement('button'); btn.className = 'btn btn-sm btn-enviado'; btn.textContent = 'Estado ▾';
     btn.addEventListener('click', () => showStatusModal(id, status));
     actionCell.appendChild(btn);
+  }
+  if (pendingStatusOrderIds.has(id)) {
+    row.classList.add('row-pending-save');
+    row.querySelectorAll('button').forEach(b => b.disabled = true);
   }
 
   row.appendChild(info); row.appendChild(hoverZone); row.appendChild(precio); row.appendChild(pill); row.appendChild(actionCell);
