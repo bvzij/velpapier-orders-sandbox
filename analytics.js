@@ -4,7 +4,7 @@
    so "September revenue" means orders placed in September.
    ==========================================================================*/
 
-const PAID = ['Pagado', 'Enviado', 'Archivado'];
+const PAID = ['Pagado', 'Anotado', 'Enviado', 'Archivado'];
 const SHIPPED = ['Enviado', 'Archivado'];
 
 const isPaid    = r => PAID.includes(r['Status']);
@@ -413,6 +413,7 @@ function blockChannelAndFunnel(now) {
   const stages = [
     { label: 'No pagado', value: now.filter(r => r['Status'] === 'No Pagado').length, color: '#854f0b' },
     { label: 'Pagado',    value: now.filter(r => r['Status'] === 'Pagado').length,    color: '#185fa5' },
+    { label: 'Anotado',   value: now.filter(r => r['Status'] === 'Anotado').length,   color: '#534ab7' },
     { label: 'Enviado',   value: now.filter(r => r['Status'] === 'Enviado').length,   color: '#3b6d11' },
     { label: 'Archivado', value: now.filter(r => r['Status'] === 'Archivado').length, color: '#6b6860' },
   ];
