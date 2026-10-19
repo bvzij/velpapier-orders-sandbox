@@ -783,10 +783,23 @@ function showStatusModal(id, currentStatus) {
   const linkHtml = (rec0 && rec0.Channel !== 'TikTok') ? renderLinkPicker('single-link', rec0.CustomerId, false) : '';
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Actualizar estado</div><div class="status-options">${next.map(s => `<button class="btn btn-block status-option-btn" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}</div>${linkHtml}<div class="modal-actions"><button class="btn" id="status-cancel-btn">Cancelar</button></div></div></div>`;
+  // One extra click, inline, instead of a second popup: clicking a status
+  // swaps the whole options block for a "¿Confirmar X?" / "Cancelar" pair
+  // rather than firing the update straight away -- an accidental tap on
+  // "Estado ▾" -> first status in the list no longer silently moves an
+  // order.
   c.querySelectorAll('.status-option-btn').forEach(btn => btn.addEventListener('click', () => {
-    const link = readLinkPicker('single-link');
-    updateOrderStatusNew(id, btn.dataset.status, link);
-    closeModal();
+    const status = btn.dataset.status;
+    const optionsEl = c.querySelector('.status-options');
+    optionsEl.innerHTML = `<div class="status-confirm-prompt">¿Confirmar <strong>${escapeHtml(status)}</strong>?</div>
+      <button class="btn btn-block btn-primary" id="status-confirm-btn">Confirmar</button>
+      <button class="btn btn-block" id="status-confirm-cancel-btn">Cancelar</button>`;
+    document.getElementById('status-confirm-btn').addEventListener('click', () => {
+      const link = readLinkPicker('single-link');
+      updateOrderStatusNew(id, status, link);
+      closeModal();
+    });
+    document.getElementById('status-confirm-cancel-btn').addEventListener('click', () => showStatusModal(id, currentStatus));
   }));
   document.getElementById('status-cancel-btn').addEventListener('click', closeModal);
 }
@@ -817,10 +830,14 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     }
     pendingStatusOrderIds.delete(id);
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
-    renderAll();
+    renderAll(); // instant feedback from the local mutation above
     if (searchSelectedCliente) runSearch(searchSelectedCliente);
     logStatusTiming(id, status, _tNet, performance.now() - _t0, result._timings);
     showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);
+    // Confirm against the server once, right away, instead of waiting up
+    // to 10s for the next autoRefresh tick to catch any drift (e.g. a
+    // second person's change landing at the same time).
+    autoRefresh();
   } catch (e) {
     pendingStatusOrderIds.delete(id);
     renderAll(); // bring the row back exactly as it was, fully interactive
@@ -1140,6 +1157,12 @@ async function manualRefresh() {
 }
 
 async function autoRefresh() {
+  // Skip while a status change is mid-flight: a poll landing here would
+  // overwrite allRecords with pre-update data and visibly un-grey /
+  // re-show a row that updateOrderStatusNew is still waiting on, which
+  // is what was making rows take far longer than the actual request to
+  // disappear.
+  if (pendingStatusOrderIds.size > 0) return;
   try {
     if (currentTab === 'enviado' && tabDataLoaded.enviado) await fetchEnviado();
     else if (currentTab === 'archivo' && tabDataLoaded.archivo) await fetchArchivo();
