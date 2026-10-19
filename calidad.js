@@ -771,7 +771,7 @@ function showOrderDetailModal(r) {
   // carry no date of their own (same gap as the Historial sort fix).
   const allIds = [...ids.tiktok, ...ids.shopify, ...ids.manual];
   const linkedOrder = allIds.map(id => ORDERS_BY_ID[id]).find(Boolean);
-  const shippedDate = linkedOrder ? linkedOrder['Shipped Date'] : '';
+  const shippedDate = r['Timestamp'] || (linkedOrder ? linkedOrder['Shipped Date'] : '');
 
   modalRoot.innerHTML = `<div class="modal-overlay" id="modal-overlay">
     <div class="modal cal-detail-modal">
