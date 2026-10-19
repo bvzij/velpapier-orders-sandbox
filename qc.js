@@ -271,7 +271,7 @@ async function loadPending(forceFresh) {
     // the wrapper (undefined), wiping allActiveOrders to [] on every call
     // and returning before the real fetch. That is what emptied the
     // pending list every 20s, and why only the manual refresh fixed it.
-    const ordersRes = VP.getCached('action=orders&status=Pagado,No Pagado', fresh => {
+    const ordersRes = VP.getCached('action=orders&status=Pagado,No Pagado,Anotado', fresh => {
       cachedOrdersData = fresh;
       applyPendingData(cachedOrdersData, cachedQcData);
       renderPendingList();
@@ -295,7 +295,7 @@ async function loadPending(forceFresh) {
   list.innerHTML = '<div class="empty-state">Cargando…</div>';
   try {
     let [ordersData, qcData] = await Promise.all([
-      apiGet('action=orders&status=Pagado,No Pagado'),
+      apiGet('action=orders&status=Pagado,No Pagado,Anotado'),
       apiGet('action=qc'),
     ]);
     // Apps Script occasionally returns a valid-but-empty response under load
@@ -307,7 +307,7 @@ async function loadPending(forceFresh) {
     if ((ordersData.records || []).length === 0) {
       console.warn('[loadPending] orders came back empty on first try, retrying once...');
       await new Promise(r => setTimeout(r, 600));
-      ordersData = await apiGet('action=orders&status=Pagado,No Pagado');
+      ordersData = await apiGet('action=orders&status=Pagado,No Pagado,Anotado');
     }
     applyPendingData(ordersData, qcData);
   } catch (e) {
@@ -450,10 +450,20 @@ function renderHistoryList() {
     : '');
 }
 
+function anotadoOrdersByTracking() {
+  const out = {};
+  allActiveOrders.forEach(r => {
+    if (r['Channel'] === 'TikTok' || r['Status'] !== 'Anotado') return;
+    const tid = String(r['Linked Shipment'] || '').trim();
+    if (!tid) return;
+    (out[tid] = out[tid] || []).push(r);
+  });
+  return out;
+}
+
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
-  const linkedOrders = allActiveOrders.filter(r => r['Channel'] !== 'TikTok' && r['Linked Shipment']);
   if (tikTokOrders.length === 0) {
     // "Nothing pending" and "nothing has loaded yet" look identical from
     // this filter alone -- hasLoadedOnce (set in loadPending) tells them
@@ -477,11 +487,11 @@ function renderPendingList() {
     if (!groups[tid]) groups[tid] = [];
     groups[tid].push(r);
   });
-  linkedOrders.forEach(r => {
-    const tid = r['Linked Shipment'];
-    if (!groups[tid]) return; // linked shipment isn't in this pending TikTok list
-    groups[tid].push(r);
-  });
+
+  // Shopify/Manual orders written on a shipment's label in Pedidos
+  // (Status Anotado, Linked Shipment = that tracking ID). Shown on the
+  // card here and pre-selected as add-ons when the shipment is opened.
+  const anotadoByTid = anotadoOrdersByTracking();
 
   // Search filter — by username or tracking ID
   const searchInput = document.getElementById('search-input');
@@ -516,7 +526,7 @@ function renderPendingList() {
   list.innerHTML = entries.map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
-    const orderIds = orders.map(o => ({ id: o['Order ID'], channel: o['Channel'] || 'TikTok' })).filter(o => o.id);
+    const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
 
     const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
     const photoCount = qcRow
@@ -527,10 +537,9 @@ function renderPendingList() {
       ? `<div class="pending-progress">✓ ${photoCount} foto${photoCount !== 1 ? 's' : ''} guardada${photoCount !== 1 ? 's' : ''}</div>`
       : '';
 
-    // orderIds may now include linked Manual/Shopify orders alongside the
-    // TikTok ones (see linkedOrders above) -- only the first (always the
-    // TikTok order, since groups are seeded from tikTokOrders first) is
-    // shown prominently here.
+    // Every order in this list is TikTok (renderPendingList filters to
+    // Channel === 'TikTok' before building groups), so orderIds here are
+    // always TikTok Order IDs -- no channel check needed before showing them.
     const ttIdHtml = orderIds.length
       ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(orderIds[0].id)}${orderIds.length > 1 ? ' +' + (orderIds.length - 1) : ''}</span>`
       : '';
@@ -543,7 +552,7 @@ function renderPendingList() {
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
           <span class="pending-username">${escapeHtml(username)}${ttIdHtml}</span>
-          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}</span>
+          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${(anotadoByTid[tid] || []).length ? ` · +${anotadoByTid[tid].length} anotado${anotadoByTid[tid].length !== 1 ? 's' : ''}` : ''}</span>
         </div>
         ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
         ${progressBadge}
@@ -631,6 +640,17 @@ function openCapture(shipment) {
     }
   }
 
+  // Anotado orders for this shipment come pre-selected -- they were
+  // already written on this label in Pedidos. Finalize then moves them to
+  // Enviado together with the TikTok order. Not on an already-shipped row
+  // (that view is a read-only look back).
+  if (shipment.tracking_id && !rowIsShipped) {
+    (anotadoOrdersByTracking()[shipment.tracking_id] || []).forEach(o => {
+      const id = String(o['Order ID']);
+      if (!selectedAddons.some(a => String(a.id) === id)) selectedAddons.push({ id, channel: o['Channel'] });
+    });
+  }
+
   if (restored && !rowIsShipped) showToast('Progreso anterior restaurado');
 
   renderGallery('content');
@@ -681,12 +701,15 @@ function renderAddonOrders(customerId) {
   const section = document.getElementById('addon-section');
   const list = document.getElementById('addon-list');
 
-  if (!customerId) { section.style.display = 'none'; return; }
-
+  const tid = selected ? selected.tracking_id : '';
+  const linkedHere = r => r['Status'] === 'Anotado' && tid && String(r['Linked Shipment'] || '') === tid;
+  // Customer's open Shopify/Manual orders, plus anything Anotado on THIS
+  // shipment (even under another customer ID). Orders Anotado on a
+  // DIFFERENT shipment are left out -- they belong to that package.
   const addons = allActiveOrders.filter(r =>
-    r['Customer ID'] === customerId &&
     r['Channel'] !== 'TikTok' &&
-    !['Enviado', 'Archivado'].includes(r['Status'])
+    !['Enviado', 'Archivado'].includes(r['Status']) &&
+    (linkedHere(r) || (customerId && r['Customer ID'] === customerId && r['Status'] !== 'Anotado'))
   );
 
   if (addons.length === 0) { section.style.display = 'none'; return; }
@@ -698,7 +721,7 @@ function renderAddonOrders(customerId) {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
       <div class="addon-text">
-        <div class="addon-channel">${escapeHtml(o['Channel'] || '')}</div>
+        <div class="addon-channel">${escapeHtml(o['Channel'] || '')}${linkedHere(o) ? ' · anotado aquí' : ''}</div>
         <div class="addon-products">${escapeHtml(o['Products'] || '—')}</div>
       </div>
     </div>
