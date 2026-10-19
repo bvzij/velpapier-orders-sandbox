@@ -1372,6 +1372,21 @@ async function createRecord() {
   const items = bulkItems.filter(item => item.producto.trim());
   if (!items.length) { showToast('Falta al menos un producto'); return; }
 
+  // Snapshot + clear the form IMMEDIATELY, before any network call.
+  // A second tap now finds an empty form (no duplicates), and the next
+  // order can be typed while this one saves in the background.
+  const snapshot = { cliente, channel, status, isGift, recipient };
+  document.getElementById('new-cliente').value = '';
+  document.getElementById('new-channel').value = 'Manual';
+  document.getElementById('new-status').value = 'No Pagado';
+  document.getElementById('gift-checkbox').checked = false;
+  document.getElementById('gift-recipient').value = '';
+  document.getElementById('gift-recipient-section').style.display = 'none';
+  bulkItems = [{ producto: '', precio: '', notas: '' }];
+  renderBulkItems();
+  showToast('Guardando…');
+
+  let saved = 0;
   try {
     for (const item of items) {
       if (isGift) {
@@ -1455,21 +1470,30 @@ async function createRecord() {
           });
           rebuildAllRecords();
         }
-      }
+            }
+      saved++;
     }
 
-    // Reset form
-    document.getElementById('new-cliente').value = '';
-    document.getElementById('new-channel').value = 'Manual';
-    document.getElementById('new-status').value = 'No Pagado';
-    document.getElementById('gift-checkbox').checked = false;
-    document.getElementById('gift-recipient').value = '';
-    document.getElementById('gift-recipient-section').style.display = 'none';
-    bulkItems = [{ producto: '', precio: '', notas: '' }];
-    renderBulkItems();
     renderAll();
     showToast(isGift ? '✓ Regalo registrado (2 entradas)' : `✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
-  } catch (e) { showToast('Error: ' + e.message); }
+  } catch (e) {
+    renderAll();
+    // Put back only the items that did NOT save, and only if the user
+    // hasn't already started typing a new order.
+    const formEmpty = !document.getElementById('new-cliente').value.trim();
+    const unsaved = items.slice(saved);
+    if (formEmpty && unsaved.length) {
+      document.getElementById('new-cliente').value = snapshot.cliente;
+      document.getElementById('new-channel').value = snapshot.channel;
+      document.getElementById('new-status').value = snapshot.status;
+      document.getElementById('gift-checkbox').checked = snapshot.isGift;
+      document.getElementById('gift-recipient').value = snapshot.recipient;
+      document.getElementById('gift-recipient-section').style.display = snapshot.isGift ? '' : 'none';
+      bulkItems = unsaved.map(i => ({ ...i }));
+      renderBulkItems();
+    }
+    showToast('Error: ' + e.message + (saved ? ` (${saved} guardado${saved > 1 ? 's' : ''})` : ''));
+  }
 }
 
 // ── SORTING ──────────────────────────────────────────────────
