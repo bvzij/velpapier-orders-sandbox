@@ -500,7 +500,8 @@ function renderPendingList() {
   if (query) {
     filteredEntries = filteredEntries.filter(([tid, orders]) => {
       const username = (orders[0]['Username'] || orders[0]['Primary Username'] || '').toLowerCase();
-      return username.includes(query) || tid.toLowerCase().includes(query);
+      const ttIds = orders.map(o => String(o['Order ID'] || '')).join(' ').toLowerCase();
+      return username.includes(query) || tid.toLowerCase().includes(query) || ttIds.includes(query);
     });
   }
 
@@ -552,7 +553,7 @@ function renderPendingList() {
       }).replace(/'/g, "&apos;")})'>
         <div class="pending-card-top">
           <span class="pending-username">${escapeHtml(username)}${ttIdHtml}</span>
-          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${(anotadoByTid[tid] || []).length ? ` · +${anotadoByTid[tid].length} anotado${anotadoByTid[tid].length !== 1 ? 's' : ''}` : ''}</span>
+          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${(anotadoByTid[tid] || []).length ? ' · ' + ['Shopify','Manual'].map(ch => { const n = anotadoByTid[tid].filter(o => (o['Channel'] || 'Manual') === ch).length; return n ? '+' + n + ' ' + ch : ''; }).filter(Boolean).join(', ') : ''}</span>
         </div>
         ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
         ${progressBadge}
