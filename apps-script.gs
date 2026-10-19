@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-19.2';
+const SCRIPT_VERSION = '2026-10-19.3';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1870,6 +1870,8 @@ function loginAction(body) {
     if (!exp || exp < now) store.deleteProperty(k);
   });
 
+  capSessionsFor(user.name, 2);
+
   const token = 'sess_' + Utilities.getUuid().replace(/-/g, '');
   const expires = now + SESSION_DAYS * 86400000;
   store.setProperty('SESS_' + token, user.name + '|' + user.role + '|' + expires);
@@ -1895,6 +1897,18 @@ function revokeSessionsFor(personName) {
     if (k.indexOf('SESS_') === 0 && String(props[k]).split('|')[0] === personName) { store.deleteProperty(k); n++; }
   });
   return n;
+}
+
+// Keeps at most `keep` existing sessions for this person (oldest dropped
+// first), making room for the new one about to be created. Expiry time
+// (the 3rd field) is used as a proxy for login recency.
+function capSessionsFor(personName, keep) {
+  const store = PropertiesService.getScriptProperties();
+  const props = store.getProperties();
+  const mine = Object.keys(props)
+    .filter(k => k.indexOf('SESS_') === 0 && String(props[k]).split('|')[0] === personName)
+    .sort((a, b) => Number(String(props[a]).split('|')[2]) - Number(String(props[b]).split('|')[2]));
+  while (mine.length > keep) store.deleteProperty(mine.shift());
 }
 
 // Old role-only shape, kept so every existing doGet/doPost action check
