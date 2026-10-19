@@ -292,7 +292,7 @@ function handleSearchInput() {
   clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
-    item.innerHTML = `<span>${c.name}</span>`;
+    item.innerHTML = clienteLabelHtml(c);
     item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name, c.customerId); });
     list.appendChild(item);
   });
@@ -381,10 +381,12 @@ async function runSearch(name) {
     groupByCliente(records).forEach(grp => {
       const cliente = grp.name;
       const group = document.createElement('div'); group.className = 'customer-group' + (greyedOut ? ' customer-group--faded' : '');
-      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}</div><div class="customer-bulk-actions"></div></div>`;
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}${searchTikTokBadgeHtml(grp.items, greyedOut)}</div><div class="customer-bulk-actions"></div></div>`;
       const searchCustId = (grp.items[0] && grp.items[0].CustomerId) || '';
       const searchNameEl = group.querySelector('.customer-name');
       if (searchNameEl && searchCustId) searchNameEl.addEventListener('click', () => openCustomerHistory(searchCustId, cliente));
+      const searchTtBadge = group.querySelector('.tiktok-pending-badge');
+      if (searchTtBadge) searchTtBadge.addEventListener('click', e => { e.stopPropagation(); showPendingTikTokModal(searchCustId, cliente); });
 
       // Bulk "Cambiar estado" only for the active tier -- never shown
       // alongside greyed-out Enviado/Archivado groups, so there's no way
@@ -407,6 +409,16 @@ async function runSearch(name) {
   appendGroup(shipped, '', true);
   if (archived.length && searchFilter === 'Todos') { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivado'; results.appendChild(d); }
   appendGroup(archived, '', true);
+}
+
+// Same green badge as the main lists, for the search view
+function searchTikTokBadgeHtml(items, greyedOut) {
+  const cid = (items[0] && items[0].CustomerId) || '';
+  if (greyedOut || !cid) return '';
+  const pending = allRecords.some(r => r.CustomerId === cid && r.Channel === 'TikTok' && r.Status === 'Pagado');
+  return pending
+    ? `<span class="tiktok-pending-badge" title="Ver pedido de TikTok pendiente" style="display:inline-flex;align-items:center;background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-border);border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px;cursor:pointer;text-decoration:underline dotted">Tiene Pedido de TikTok</span>`
+    : '';
 }
 
 function renderSearchFilterBar(totalCount) {
@@ -438,7 +450,7 @@ function handleClienteInput() {
   clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
-    item.innerHTML = `<span>${c.name}</span>`;
+    item.innerHTML = clienteLabelHtml(c);
     item.addEventListener('mousedown', e => { e.preventDefault(); selectCliente(c.name); });
     list.appendChild(item);
   });
@@ -467,7 +479,7 @@ function handleGiftRecipientInput() {
   clientes.forEach(c => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
-    item.innerHTML = `<span>${c.name}</span>`;
+    item.innerHTML = clienteLabelHtml(c);
     item.addEventListener('mousedown', e => {
       e.preventDefault();
       document.getElementById('gift-recipient').value = c.name;
@@ -478,7 +490,17 @@ function handleGiftRecipientInput() {
   list.style.display = 'block';
 }
 
-function getUniqueClientes() {
+function getUniqueClient// "primary (alias / alias)" label, used by every username autocomplete
+function clienteLabelHtml(c) {
+  const primary = String(c.name || '');
+  const aliases = (c.aliases || []).filter(a => a && a.toLowerCase() !== primary.toLowerCase());
+  const sub = aliases.length
+    ? ` <span class="ac-aliases">(${aliases.map(a => escapeHtml(a)).join(' / ')})</span>`
+    : '';
+  return `<span>${escapeHtml(primary)}${sub}</span>`;
+}
+
+function getUniqueClientes() {es() {
   const seen = {};
   Object.entries(allCustomers).forEach(([key, c]) => {
     const primary = (c.name || '').trim();
@@ -1113,7 +1135,8 @@ function openStatusChangeModal(cliente, orders, single) {
 
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal scm-modal">
-    <div class="modal-title">Cambiar estado · ${escapeHtml(cliente)}</div>
+<button type="button" class="scm-x" id="scm-x" aria-label="Cerrar">×</button>
+    <div class="modal-title scm-title">Cambiar estado · ${escapeHtml(cliente)}</div>
 
     <div class="scm-half scm-bulk${scmSingle ? ' is-disabled' : ''}">
       <div class="scm-half-label">Todos los pedidos</div>
@@ -1138,6 +1161,7 @@ function openStatusChangeModal(cliente, orders, single) {
   </div></div>`;
 
   document.getElementById('scm-close').addEventListener('click', closeModal);
+  document.getElementById('scm-x').addEventListener('click', closeModal);
   document.getElementById('scm-apply').addEventListener('click', scmApply);
   c.querySelectorAll('.scm-bulk-btn').forEach(b => b.addEventListener('click', () => scmFill(b.dataset.bulk)));
   document.getElementById('scm-bulk-ship').addEventListener('change', () => { if (scmBulk === 'Anotado') scmFill('Anotado'); });
@@ -1487,13 +1511,13 @@ function requestRenameCliente(group) {
   input.addEventListener('input', () => {
     const val = input.value.trim().toLowerCase();
     if (!val) { list.style.display = 'none'; return; }
-    const clientes = getUniqueClientes().filter(cl => cl.name.toLowerCase().startsWith(val) && cl.name !== oldName).slice(0, 8);
+    const clientes = getUniqueClientes().filter(cl => (cl.name.toLowerCase().startsWith(val) || (cl.aliases || []).some(a => a.toLowerCase().startsWith(val))) && cl.name !== oldName).slice(0, 8);
     if (!clientes.length) { list.style.display = 'none'; return; }
     list.innerHTML = '';
     clientes.forEach(cl => {
       const item = document.createElement('div');
       item.className = 'autocomplete-item';
-      item.innerHTML = `<span>${cl.name}</span>`;
+      item.innerHTML = clienteLabelHtml(cl);
       item.addEventListener('mousedown', e => { e.preventDefault(); input.value = cl.name; list.style.display = 'none'; });
       list.appendChild(item);
     });
