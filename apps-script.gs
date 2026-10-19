@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-18.10';
+const SCRIPT_VERSION = '2026-10-18.11';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -525,6 +525,103 @@ function logAuditEvent(action, recordType, recordId, details, redoOf) {
   });
 }
 
+// Pushes this request's buffered entries into the script cache instead of
+// writing them to the sheet inline -- the sheet write is what cost
+// flush_audit_ms (800ms+) on the critical path of every save (found
+// 2026-10-18 chasing the 6s Guardar Pedido delay). A 1-minute trigger
+// (flushAuditQueueFromCache, installed once via installAuditQueueTrigger)
+// drains the cache in one batch. Entries carry an identity snapshot since
+// the cache outlives this execution -- _currentIdentity won't exist when
+// the trigger runs later.
+function queueAuditEntries() {
+  if (!_auditBuffer.length) return;
+  const entries = _auditBuffer;
+  _auditBuffer = [];
+  const identity = _currentIdentity;
+  const stamped = entries.map(en => Object.assign({}, en, {
+    _person: identity ? identity.name : 'Desconocido',
+    _role: identity ? identity.role : '',
+    _ts: nowISO(),
+  }));
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = 'audit_pending_' + Utilities.getUuid();
+    cache.put(key, JSON.stringify(stamped), 300); // 5 min TTL, safety net
+    const idxRaw = cache.get('audit_pending_index');
+    const idx = idxRaw ? JSON.parse(idxRaw) : [];
+    idx.push(key);
+    cache.put('audit_pending_index', JSON.stringify(idx), 300);
+  } catch (e) {
+    // Cache full or unavailable -- fall back to writing inline so the
+    // entries are never silently lost.
+    Logger.log('queueAuditEntries failed, falling back to inline flush: ' + e.message);
+    _auditBuffer = entries;
+    flushAudit();
+  }
+}
+
+// Runs every 1 minute via trigger (see installAuditQueueTrigger). Drains
+// everything queueAuditEntries() has stashed in the cache and writes it
+// to the Log sheet in one batch, same as flushAudit() does inline.
+function flushAuditQueueFromCache() {
+  const cache = CacheService.getScriptCache();
+  const idxRaw = cache.get('audit_pending_index');
+  if (!idxRaw) return;
+  const keys = JSON.parse(idxRaw);
+  if (!keys.length) return;
+  cache.remove('audit_pending_index');
+
+  const all = [];
+  keys.forEach(k => {
+    const raw = cache.get(k);
+    if (!raw) return; // expired before we got to it -- acceptable, audit log is forensic
+    cache.remove(k);
+    JSON.parse(raw).forEach(en => all.push(en));
+  });
+  if (!all.length) return;
+
+  try {
+    const sheet = getAuditLogSheet();
+    if (!sheet) {
+      Logger.log('flushAuditQueueFromCache: no "Log <year>" tab found, ' + all.length + ' entries dropped');
+      return;
+    }
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const rows = all.map(en => {
+      const byHeader = {
+        'Audit ID': 'LOG-' + Utilities.getUuid().slice(0, 8),
+        'Timestamp': en._ts,
+        'Person': en._person,
+        'Role': en._role,
+        'Action': en.action,
+        'Record Type': en.recordType,
+        'Record ID': en.recordId,
+        'Field': en.field,
+        'Before': en.before === undefined || en.before === null ? '' : String(en.before),
+        'After': en.after === undefined || en.after === null ? '' : String(en.after),
+        'Details': en.details ? JSON.stringify(en.details) : '',
+        'Undone': '',
+        'Redo Of': en.redoOf || '',
+      };
+      return headers.map(h => (byHeader[h] !== undefined ? byHeader[h] : ''));
+    });
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  } catch (err) {
+    Logger.log('flushAuditQueueFromCache failed: ' + err.message + ' -- ' + all.length + ' entries lost');
+  }
+}
+
+// One-time setup: run this once manually from the Apps Script editor
+// (select installAuditQueueTrigger in the function dropdown, click Run).
+// Creates the single standing 1-minute trigger. Safe to re-run -- clears
+// any existing trigger of the same name first so it never duplicates.
+function installAuditQueueTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'flushAuditQueueFromCache') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('flushAuditQueueFromCache').timeBased().everyMinutes(1).create();
+}
+
 // Writes every buffered entry in ONE setValues() call, so an action that
 // changes several fields (or an import logging per-order) costs the
 // audit log exactly one extra write, not one per field. Wrapped so a
@@ -809,7 +906,7 @@ function doPost(e) {
       const result = dispatchPostAction(action, body, role);
       const dispatchMs = Date.now() - _tDispatch;
       const _tFlush = Date.now();
-      flushAudit(); // after the real write already succeeded -- never blocks it
+      queueAuditEntries(); // cache write only -- real sheet write happens on the 1-min trigger
       const flushMs = Date.now() - _tFlush;
       // Merged onto the response itself -- Apps Script's own log viewer is
       // no longer available, so timing has to travel back to the browser
