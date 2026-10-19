@@ -49,6 +49,15 @@
       -webkit-tap-highlight-color: transparent;
     }
     .pending-card:active { transform: scale(0.98); background: var(--surface2); }
+    .pending-card--urgent { background: #fdecec; border: 1px solid #b42318; }
+    .pending-card--urgent:active { background: #fbd9d9; }
+    .pending-card--urgent .pending-tracking { color: #b42318; }
+    .urgent-toggle {
+      display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700;
+      color: #b42318; background: #fdecec; border: 1px solid #b42318;
+      border-radius: var(--radius-lg); padding: 10px 12px; margin-bottom: 12px; cursor: pointer;
+    }
+    .urgent-toggle input { width: 18px; height: 18px; accent-color: #b42318; }
     .pending-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
     .pending-username { font-weight: 700; font-size: 15px; }
     .pending-count {
@@ -251,7 +260,12 @@
         </label>
       </div>
 
-      <div class="ship-summary" id="ship-summary"></div>
+       <div class="ship-summary" id="ship-summary"></div>
+
+      <label class="urgent-toggle">
+        <input type="checkbox" id="urgent-checkbox" onchange="toggleUrgent()">
+        Marcar Urgente
+      </label>
 
       <div class="addon-section" id="addon-section" style="display:none">
         <div class="addon-title">¿Incluir también?</div>
