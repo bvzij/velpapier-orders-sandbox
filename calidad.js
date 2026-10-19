@@ -9,7 +9,7 @@ const BOX_COLS     = ['Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
 
 let QC = [], ORDERS_BY_ID = {};
 let currentPage = 1;
-const PER_PAGE = 100;
+let PER_PAGE = Number(localStorage.getItem('vp_cal_perpage')) || 100;
 let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
@@ -245,6 +245,15 @@ function wire() {
   });
 
   wireCustomerCombo();
+
+  const perPageSel = document.getElementById('cal-per-page');
+  perPageSel.value = String(PER_PAGE);
+  perPageSel.addEventListener('change', () => {
+    PER_PAGE = Number(perPageSel.value) || 100;
+    localStorage.setItem('vp_cal_perpage', String(PER_PAGE));
+    currentPage = 1;
+    render();
+  });
 
   document.getElementById('cal-clear').addEventListener('click', () => {
     document.getElementById('cal-search-order').value = '';
