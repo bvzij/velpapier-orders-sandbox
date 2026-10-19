@@ -524,7 +524,11 @@ function renderPendingList() {
     return;
   }
 
-  list.innerHTML = entries.map(([tid, orders]) => {
+  const urgentOf = tid => { const q = allQcRows.find(r => r['Tracking ID'] === tid); return !!(q && q['Urgent']); };
+  const userOf = ([, o]) => (o[0]['Username'] || o[0]['Primary Username'] || '').toLowerCase();
+  const urgentEntries = entries.filter(([tid]) => urgentOf(tid)).sort((a, b) => userOf(a).localeCompare(userOf(b)));
+  const normalEntries = entries.filter(([tid]) => !urgentOf(tid));
+  list.innerHTML = [...urgentEntries, ...normalEntries].map(([tid, orders]) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
     const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
@@ -545,7 +549,7 @@ function renderPendingList() {
       ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(orderIds[0].id)}${orderIds.length > 1 ? ' +' + (orderIds.length - 1) : ''}</span>`
       : '';
     return `
-      <div class="pending-card" onclick='openCapture(${JSON.stringify({
+      <div class="pending-card${urgentOf(tid) ? ' pending-card--urgent' : ''}" onclick='openCapture(${JSON.stringify({
         tracking_id: first['Tracking ID'] || '',
         order_ids: orderIds,
         customer_id: first['Customer ID'] || '',
@@ -598,6 +602,31 @@ function toggleEditShipped() {
   applyShippedLock(true);
 }
 
+async function toggleUrgent() {
+  if (!selected) return;
+  const box = document.getElementById('urgent-checkbox');
+  const wanted = box.checked;
+  try {
+    const res = await apiPost({
+      action:      'save_qc',
+      qc_id:       currentQcId || undefined,
+      tracking_id: selected.tracking_id || manualTrackingId,
+      order_ids:   [...selected.order_ids, ...selectedAddons],
+      customer_id: selected.customer_id,
+      username:    selected.username,
+      packer:      currentPacker(),
+      urgent:      wanted,
+    });
+    if (res.error) throw new Error(res.error);
+    if (res.qc_id) currentQcId = res.qc_id;
+    const row = allQcRows.find(r => r['QC ID'] === res.qc_id);
+    if (row) row['Urgent'] = wanted ? 'Sí' : '';
+  } catch (e) {
+    box.checked = !wanted;
+    showToast('No se pudo guardar la urgencia: ' + e.message, true);
+  }
+}
+
 function openCapture(shipment) {
   cameFromTab = currentTab;
   pendingScrollY = window.scrollY;
@@ -611,6 +640,7 @@ function openCapture(shipment) {
   gallery.content = [];
   gallery.box = [];
   document.getElementById('qc-notes').value = '';
+  document.getElementById('urgent-checkbox').checked = false;
 
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">${escapeHtml(shipment.username)}</div>
@@ -631,6 +661,7 @@ function openCapture(shipment) {
       gallery.box = ['Box1','Box2','Box3','Box4','Box5']
         .map(c => row[c]).filter(Boolean).map(url => ({ url }));
       document.getElementById('qc-notes').value = row['Notes'] || '';
+      document.getElementById('urgent-checkbox').checked = !!row['Urgent'];
 
       const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
       const manualIds  = String(row['Manual Order IDs']  || '').split(' + ').filter(Boolean);
