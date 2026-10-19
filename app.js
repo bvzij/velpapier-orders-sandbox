@@ -551,12 +551,18 @@ async function submitNewOrder() {
   if (cancelBtn) cancelBtn.disabled = true;
 
   try {
+  try {
+    const _t0 = performance.now();
     const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
+    const _tTotal = performance.now() - _t0;
     if (result.result !== 'created') throw new Error(result.error || 'Error');
     allRecords.push({ ID: result.order_id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
     closeModal();
     renderAll();
     showToast('✓ Orden agregada');
+    console.group(`⏱ create_order: ${Math.round(_tTotal)} ms total`);
+    console.table(result._timings || {});
+    console.groupEnd();
   } catch (e) {
     // Re-enable so the person can retry -- but the flag and the disabled
     // button together mean this only ever happens after a real failure,
