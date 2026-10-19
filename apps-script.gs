@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-19.4';
+const SCRIPT_VERSION = '2026-10-19.5';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -2413,6 +2413,7 @@ function saveQC(body) {
   }
 
   if (body.session_id) set('Session ID', body.session_id);
+  if (body.urgent !== undefined) set('Urgent', body.urgent ? 'Sí' : '');
 
   // Split incoming order_ids ([{id, channel}]) into the three channel columns
   if (body.order_ids) {
