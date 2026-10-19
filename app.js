@@ -174,8 +174,13 @@ function isUnnamedCliente(cliente) { return !cliente || !cliente.trim() || clien
 function previousStatus(status) { if (status === 'Pagado') return 'No Pagado'; if (status === 'Enviado') return 'Pagado'; return null; }
 function escapeHtml(s) { return VP.esc(s); }   // one shared helper (FIX_LOG 4.2)
 function summarizeProductCount(productsStr) {
-  if (!productsStr) return '—';
-  const parts = productsStr.split(';').map(s => s.trim()).filter(Boolean);
+  // Coerce first: Sheets can hand back a non-string (e.g. a cell that
+  // looks purely numeric gets auto-converted to a number), and a bare
+  // falsy check doesn't catch that -- it let a number straight through to
+  // .split(), which crashed the WHOLE order list, not just that one row.
+  const s = String(productsStr || '').trim();
+  if (!s) return '—';
+  const parts = s.split(';').map(x => x.trim()).filter(Boolean);
   if (parts.length === 0) return '—';
   let total = 0;
   parts.forEach(p => {
