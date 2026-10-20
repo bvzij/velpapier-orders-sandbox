@@ -18,7 +18,9 @@ const UPLOAD_ATTEMPTS = 3;
 async function decodeToCanvas(file, maxDim) {
   let source = null, w = 0, h = 0, cleanup = () => {};
   try {
-    const bmp = await createImageBitmap(file);
+    let bmp;
+    try { bmp = await createImageBitmap(file, { resizeWidth: maxDim, resizeQuality: 'high' }); }
+    catch (e2) { bmp = await createImageBitmap(file); }
     source = bmp; w = bmp.width; h = bmp.height;
     cleanup = () => { try { bmp.close(); } catch (e) {} };
   } catch (e) {
