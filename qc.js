@@ -602,28 +602,53 @@ function toggleEditShipped() {
   applyShippedLock(true);
 }
 
-async function toggleUrgent() {
+let urgentSaved = false;   // what the server currently has for this order
+
+function onUrgentChange() {
+  const box = document.getElementById('urgent-checkbox');
+  document.getElementById('urgent-confirm').style.display = (box.checked !== urgentSaved) ? 'block' : 'none';
+}
+
+async function saveUrgentOnce(wanted) {
+  const res = await apiPost({
+    action:      'save_qc',
+    qc_id:       currentQcId || undefined,
+    tracking_id: selected.tracking_id || manualTrackingId,
+    order_ids:   [...selected.order_ids, ...selectedAddons],
+    customer_id: selected.customer_id,
+    username:    selected.username,
+    packer:      currentPacker(),
+    urgent:      wanted,
+  });
+  if (res.error) throw new Error(res.error);
+  if (res.qc_id) currentQcId = res.qc_id;
+}
+
+async function confirmUrgent() {
   if (!selected) return;
   const box = document.getElementById('urgent-checkbox');
+  const btn = document.getElementById('urgent-confirm');
   const wanted = box.checked;
+  const hadRow = !!currentQcId;
+  box.disabled = true; btn.disabled = true; btn.classList.add('busy'); btn.textContent = 'Guardando…';
   try {
-    const res = await apiPost({
-      action:      'save_qc',
-      qc_id:       currentQcId || undefined,
-      tracking_id: selected.tracking_id || manualTrackingId,
-      order_ids:   [...selected.order_ids, ...selectedAddons],
-      customer_id: selected.customer_id,
-      username:    selected.username,
-      packer:      currentPacker(),
-      urgent:      wanted,
-    });
-    if (res.error) throw new Error(res.error);
-    if (res.qc_id) currentQcId = res.qc_id;
-    const row = allQcRows.find(r => r['QC ID'] === res.qc_id);
-    if (row) row['Urgent'] = wanted ? 'Sí' : '';
+    await saveUrgentOnce(wanted);
+    // A brand-new QC row has been seen to miss the flag on its first save,
+    // so write it again onto the row that now exists.
+    if (!hadRow) await saveUrgentOnce(wanted);
+    // Read it back: only report success if the server really has it.
+    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(selected.tracking_id || manualTrackingId)}`);
+    const row = (data.records || [])[0];
+    if (!row || !!row['Urgent'] !== wanted) throw new Error('el servidor no confirmó el cambio');
+    urgentSaved = wanted;
+    const local = allQcRows.find(r => r['QC ID'] === row['QC ID']);
+    if (local) local['Urgent'] = row['Urgent']; else allQcRows.push(row);
+    btn.style.display = 'none';
+    showToast(wanted ? 'Marcado como urgente' : 'Urgente quitado');
   } catch (e) {
-    box.checked = !wanted;
     showToast('No se pudo guardar la urgencia: ' + e.message, true);
+  } finally {
+    box.disabled = false; btn.disabled = false; btn.classList.remove('busy'); btn.textContent = 'Confirmar';
   }
 }
 
@@ -641,6 +666,8 @@ function openCapture(shipment) {
   gallery.box = [];
   document.getElementById('qc-notes').value = '';
   document.getElementById('urgent-checkbox').checked = false;
+  urgentSaved = false;
+  document.getElementById('urgent-confirm').style.display = 'none';
 
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">${escapeHtml(shipment.username)}</div>
@@ -662,6 +689,7 @@ function openCapture(shipment) {
         .map(c => row[c]).filter(Boolean).map(url => ({ url }));
       document.getElementById('qc-notes').value = row['Notes'] || '';
       document.getElementById('urgent-checkbox').checked = !!row['Urgent'];
+      urgentSaved = !!row['Urgent'];
 
       const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
       const manualIds  = String(row['Manual Order IDs']  || '').split(' + ').filter(Boolean);
