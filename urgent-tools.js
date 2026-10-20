@@ -143,19 +143,21 @@ window.vpLocalUrgent = window.vpLocalUrgent || new Set();
   // the Pendientes list (Pagado, not finalized). Orders without a tracking
   // ID can't hold an urgent flag (it lives on the shipment), so they're
   // reported separately.
-  function buildIndex() {
     const finalized = new Set((allQcRows || []).filter(r => r['Status'] === 'Enviado').map(r => r['Tracking ID']));
     const packedIds = new Set();
     (allQcRows || []).filter(r => r['Status'] === 'Enviado').forEach(r => {
-      String(r['TikTok Order IDs'] || '').split('+').map(cleanId).filter(Boolean).forEach(id => packedIds.add(id));
+      const raw = r['TikTok Order IDs'] !== undefined ? r['TikTok Order IDs'] : r['TikTok Order IDs '];
+      String(raw || '').split('+').map(cleanId).filter(Boolean).forEach(id => packedIds.add(id));
     });
     const shipments = {}, byOrderId = {}, noTracking = new Set();
     (allActiveOrders || []).filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado').forEach(r => {
-      const oid = cleanId(r['Order ID']);
+      // A combined order is ONE row holding "A + B + C" -- split it so every
+      // individual Order ID can be found.
+      const oids = String(r['Order ID'] == null ? '' : r['Order ID']).split('+').map(cleanId).filter(Boolean);
       const tid = String(r['Tracking ID'] || '').trim();
-      if (!oid) return;
-      if (!tid) { noTracking.add(oid); return; }
-      if (finalized.has(tid)) { packedIds.add(oid); return; }
+      if (!oids.length) return;
+      if (!tid) { oids.forEach(o => noTracking.add(o)); return; }
+      if (finalized.has(tid)) { oids.forEach(o => packedIds.add(o)); return; }
       if (!shipments[tid]) {
         shipments[tid] = {
           tracking_id: tid,
@@ -166,10 +168,12 @@ window.vpLocalUrgent = window.vpLocalUrgent || new Set();
         };
       }
       const s = shipments[tid];
-      if (s.ids.indexOf(oid) < 0) s.ids.push(oid);
+      oids.forEach(oid => {
+        if (s.ids.indexOf(oid) < 0) s.ids.push(oid);
+        byOrderId[oid] = s;
+      });
       const d = new Date(r['Created Date'] || r['Created Time'] || 0).getTime() || 0;
       if (d && (!s.date || d < s.date)) s.date = d;
-      byOrderId[oid] = s;
     });
     return { shipments, byOrderId, packedIds, noTracking };
   }
