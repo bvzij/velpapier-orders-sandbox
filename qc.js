@@ -722,6 +722,7 @@ async function backToPending() {
 async function refreshQcBadges() {
   try {
     const qcData = await apiGet('action=qc');
+    try { sessionStorage.setItem('vp_cache_action=qc', JSON.stringify({ ts: Date.now(), data: qcData })); } catch (e) { /* cache is best-effort */ }
     allQcRows = qcData.records || [];
     renderCurrentTab();
   } catch (e) {
