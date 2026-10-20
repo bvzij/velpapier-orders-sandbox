@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-19.5';
+const SCRIPT_VERSION = '2026-10-20.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1026,6 +1026,24 @@ function createOrder(body) {
 
     let status = body.status || 'No Pagado';
   if (body.channel === 'TikTok') status = 'Pagado';
+
+  // Brand-new person (no exact, alias, or fuzzy hit at all): create a bare
+  // stub customer (username only) so the order links right away. The TikTok
+  // import later finds it by username and fills the blank address fields.
+  // Fuzzy hits are NOT stubbed -- that would duplicate the near-match.
+  if (!resolution && !customerID && String(body.username || '').trim()) {
+    const stubHeaders = customersSheet.getRange(1, 1, 1, customersSheet.getLastColumn()).getValues()[0];
+    customerID = generateCustomerID(customersSheet);
+    const stubValues = {
+      'Customer ID': customerID,
+      'Primary Username': String(body.username).trim(),
+      'First Order Date': nowISO(),
+      'Shipment Count': 0,
+      'Merge Flag': false,
+    };
+    customersSheet.appendRow(stubHeaders.map(h => (stubValues[h] !== undefined ? stubValues[h] : '')));
+    logAuditEvent('create_customer', 'Customer', customerID, { primary_username: String(body.username).trim(), source: 'manual_order' });
+  }
 
   const orderID = body.order_id || generateUUID();
 
