@@ -30,6 +30,14 @@ let photoSyncsInFlight = 0;
 // person's thumbnail" bug, and the cause of a photo being saved onto the
 // wrong QC row and then vanishing).
 let captureGen = 0;
+// Bumped on every local photo add/remove. A poll that started before the
+// last local change carries an outdated picture of the server and must not
+// be merged -- that is what made a deleted photo pop back up.
+let localEditSeq = 0;
+// url -> promise of the background save for a just-uploaded photo. Deleting
+// that photo waits for it, otherwise the delete arrives before the add and
+// the add then puts the photo back on the sheet.
+const pendingAdds = new Map();
 const OPEN_ORDER_KEY = 'vp_qc_open_order'; // pending pushAddPhoto/pushRemovePhoto calls -- the poll must not merge server state while one of these hasn't landed yet, or it overwrites a photo that uploaded fine but isn't in the sheet yet
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
@@ -106,7 +114,8 @@ async function pushAddPhoto(group, url, ctx) {
 }
 
 async function pushRemovePhoto(group, url) {
-  if (!selected || !currentQcId) return null;
+  if (!selected) return null;
+  if (!currentQcId) return { skipped: true };  // no QC row yet -> nothing on the sheet to remove
   try {
     const res = await apiPost({
       action:      'save_qc',
@@ -198,6 +207,7 @@ async function pollCaptureUpdates() {
   pollingCapture = true;
   const gen = captureGen;
   const tid = selected.tracking_id;
+  const editSeqAtStart = localEditSeq;
   try {
     const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(tid)}`);
     // The user may have left this order (or opened another) while the
@@ -221,7 +231,7 @@ async function pollCaptureUpdates() {
     // row can still reflect the pre-save state for several seconds after
     // submitQC() was called, and overwriting the local gallery with that
     // stale snapshot is exactly what made photos flash away mid-save.
-    if (!isEditingShipped && !savingInProgress && photoSyncsInFlight === 0) {
+    if (!isEditingShipped && !savingInProgress && photoSyncsInFlight === 0 && localEditSeq === editSeqAtStart) {
       ['content', 'box'].forEach(group => {
         const cols = group === 'content'
           ? ['Content1','Content2','Content3','Content4','Content5']
@@ -891,11 +901,28 @@ async function deletePhoto(group, index) {
   }
 
   gallery[group].splice(index, 1);
+  localEditSeq++;
   renderGallery(group);
   document.getElementById('qc-submit').disabled = gallery.content.length === 0;
-  const res = await pushRemovePhoto(group, removedUrl);
+  photoSyncsInFlight++;
+  let res = null;
+  try {
+    const pending = pendingAdds.get(removedUrl);
+    if (pending) await pending;
+    res = await pushRemovePhoto(group, removedUrl);
+  } finally {
+    photoSyncsInFlight--;
+    localEditSeq++;
+  }
   if (gen !== captureGen) return;
-  if (res && res.blocked) {
+  if (!res) {
+    // Server didn't confirm -- put the thumbnail back so the screen matches the sheet.
+    gallery[group].splice(Math.min(index, gallery[group].length), 0, { url: removedUrl });
+    renderGallery(group);
+    document.getElementById('qc-submit').disabled = gallery.content.length === 0;
+    return;
+  }
+  if (res.blocked) {
     showToast('Este pedido ya fue enviado — no se puede modificar', true);
     gallery[group].splice(index, 0, { url: removedUrl });  // restore — server refused
     renderGallery(group);
@@ -948,6 +975,7 @@ function bindAddButton(group, btnId) {
       return;
     }
 
+    localEditSeq++;
     if (stillHere) {
       const i = gallery[group].indexOf(placeholder);
       if (i >= 0) gallery[group][i] = { url: uploaded.url };
@@ -960,7 +988,9 @@ function bindAddButton(group, btnId) {
     // photo was taken for (ctx). The 4 s poll must know this is in flight
     // (photoSyncsInFlight), or it would wipe the thumbnail before it lands.
     photoSyncsInFlight++;
-    pushAddPhoto(group, uploaded.url, ctx).then(res => {
+    const addPromise = pushAddPhoto(group, uploaded.url, ctx);
+    pendingAdds.set(uploaded.url, addPromise);
+    addPromise.then(res => {
       if (!stillHere || ctx.gen !== captureGen) {
         if (res && !res.blocked) showToast(`Foto guardada en el pedido de ${ctx.sel.username}`);
         return;
@@ -971,7 +1001,7 @@ function bindAddButton(group, btnId) {
         document.getElementById('edit-shipped-checkbox').checked = true;
         toggleEditShipped();
       }
-    }).finally(() => { photoSyncsInFlight--; });
+    }).finally(() => { photoSyncsInFlight--; localEditSeq++; pendingAdds.delete(uploaded.url); });
   };
 }
 bindAddButton('content', 'add-btn-content');
