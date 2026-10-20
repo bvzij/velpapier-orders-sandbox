@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-20.1';
+const SCRIPT_VERSION = '2026-10-20.2';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -2381,7 +2381,16 @@ function saveQC(body) {
   if (qcId) {
     row = findRowByColumn(qcSheet, 'A', qcId);
     if (!row) return jsonResponse({ error: 'Registro QC no encontrado' });
-  } else {
+    // Safety net: a QC ID that belongs to a DIFFERENT shipment is ignored
+    // and the row is looked up by Tracking ID instead. A stale client once
+    // sent order A's QC ID with order B's photo, writing B's photo into A.
+    const tCol = h.indexOf('Tracking ID');
+    if (tCol >= 0 && String(qcSheet.getRange(row, tCol + 1).getValue()).trim() !== String(body.tracking_id).trim()) {
+      row = null;
+      qcId = null;
+    }
+  }
+  if (!row) {
     const existingRow = findRowByColumn(qcSheet, h.indexOf('Tracking ID') >= 0
       ? colLetter(h.indexOf('Tracking ID')) : 'B', body.tracking_id);
     if (existingRow) {
