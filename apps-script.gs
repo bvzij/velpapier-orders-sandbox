@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-20.2';
+const SCRIPT_VERSION = '2026-10-20.3';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -941,6 +941,7 @@ function dispatchPostAction(action, body, role) {
     if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
     if (action === 'save_qc') return saveQC(body);
+    if (action === 'bulk_set_urgent') return bulkSetUrgent(body);
     if (action === 'logout') return logoutAction(body);
     if (action === 'import_qc_history') return requireAdmin(role) ? importQcHistoryAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'run_health_checks') return requireAdmin(role) ? runHealthChecksAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -2357,6 +2358,81 @@ function getUploadSignature(e) {
     folder:    folder,
     signature: sig
   });
+}
+
+// ─── Bulk urgent marking (Empacar toolbar) ─────────────────────────────
+// POST { action:'bulk_set_urgent', shipments:[{ tracking_id, username,
+//        customer_id, tiktok_order_ids:[...] }] }
+// Marks every shipment Urgent = 'Sí' in ONE pass: reads the QC sheet once,
+// flips the Urgent column in memory and writes it back in one setValues,
+// then appends all missing rows in one setValues. Shipments without a QC
+// row get a placeholder row (no photos, no Packer, no Timestamp) — saveQC
+// later finds it by Tracking ID and fills it in, so photos land in that row.
+// Rows already Enviado are never touched (returned as skipped_shipped).
+function bulkSetUrgent(body) {
+  const list = Array.isArray(body.shipments) ? body.shipments : [];
+  if (!list.length) return jsonResponse({ error: 'No hay envíos para marcar' });
+
+  const qcSheet = getQCSheet();
+  const lastCol = qcSheet.getLastColumn();
+  const h = qcSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const cTid = h.indexOf('Tracking ID');
+  const cUrg = h.indexOf('Urgent');
+  const cSt  = h.indexOf('Status');
+  if (cTid < 0 || cUrg < 0) return jsonResponse({ error: 'Columna Tracking ID o Urgent no encontrada en QC' });
+
+  const lastRow = qcSheet.getLastRow();
+  const data = lastRow >= 2 ? qcSheet.getRange(2, 1, lastRow - 1, lastCol).getValues() : [];
+  const rowByTid = {};
+  data.forEach((r, i) => {
+    const t = String(r[cTid]).trim();
+    if (t && rowByTid[t] === undefined) rowByTid[t] = i;
+  });
+
+  const marked = [], already = [], skippedShipped = [], newRows = [];
+  const urgentCol = data.map(r => [r[cUrg]]);
+  let urgentChanged = false;
+  const seen = {};
+
+  list.forEach(s => {
+    const tid = String((s && s.tracking_id) || '').trim();
+    if (!tid || seen[tid]) return;
+    seen[tid] = true;
+    const idx = rowByTid[tid];
+    if (idx !== undefined) {
+      if (cSt >= 0 && data[idx][cSt] === 'Enviado') { skippedShipped.push(tid); return; }
+      if (urgentCol[idx][0]) { already.push(tid); return; }
+      urgentCol[idx][0] = 'Sí';
+      urgentChanged = true;
+      logAudit('bulk_set_urgent', 'QC', String(data[idx][h.indexOf('QC ID')] || tid), 'Urgent', '', 'Sí');
+      marked.push(tid);
+    } else {
+      const blank = new Array(h.length).fill('');
+      const qcId = 'QC-' + String(lastRow + newRows.length).padStart(4, '0') + '-' + Utilities.getUuid().slice(0, 4);
+      const put = (col, val) => { const i = h.indexOf(col); if (i >= 0) blank[i] = val; };
+      put('QC ID', qcId);
+      put('Tracking ID', tid);
+      put('Customer ID', s.customer_id || '');
+      put('Primary Username', s.username || '');
+      put('TikTok Order IDs', (Array.isArray(s.tiktok_order_ids) ? s.tiktok_order_ids : []).map(String).join(' + '));
+      put('Status', 'Activo');
+      put('Urgent', 'Sí');
+      newRows.push(blank);
+      logAuditEvent('bulk_set_urgent', 'QC', qcId, { tracking_id: tid, created: true });
+      marked.push(tid);
+    }
+  });
+
+  if (urgentChanged) {
+    qcSheet.getRange(2, cUrg + 1, urgentCol.length, 1).setValues(urgentCol);
+  }
+  if (newRows.length) {
+    const start = lastRow + 1;
+    forceTextFormat(qcSheet, h, QC_ID_COLUMNS, start, newRows.length);
+    qcSheet.getRange(start, 1, newRows.length, h.length).setValues(newRows);
+  }
+
+  return jsonResponse({ ok: true, marked: marked, already: already, skipped_shipped: skippedShipped });
 }
 
 // Create or update a QC row. First call (no qc_id) creates the row and
