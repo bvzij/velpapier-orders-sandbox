@@ -23,7 +23,14 @@ let savingInProgress = false; // true for the whole duration of a submitQC() cal
 // two quick saves could create two separate QC rows (FIX_LOG 0.5).
 let manualTrackingId = '';
 let wakeLock = null;
-let photoSyncsInFlight = 0; // pending pushAddPhoto/pushRemovePhoto calls -- the poll must not merge server state while one of these hasn't landed yet, or it overwrites a photo that uploaded fine but isn't in the sheet yet
+let photoSyncsInFlight = 0;
+// Bumped every time an order is opened or closed. Every slow network call
+// remembers the value it started with and drops its result if it changed --
+// otherwise a reply meant for order A lands inside order B (the "previous
+// person's thumbnail" bug, and the cause of a photo being saved onto the
+// wrong QC row and then vanishing).
+let captureGen = 0;
+const OPEN_ORDER_KEY = 'vp_qc_open_order'; // pending pushAddPhoto/pushRemovePhoto calls -- the poll must not merge server state while one of these hasn't landed yet, or it overwrites a photo that uploaded fine but isn't in the sheet yet
 
 // Photo galleries: array of {url} objects, up to MAX_PHOTOS each
 const gallery = { content: [], box: [] };
@@ -57,26 +64,39 @@ async function apiPost(data) {
 
 let syncSeq = 0;
 
-async function pushAddPhoto(group, url) {
-  if (!selected) return null;
+// Snapshot of the order a photo belongs to, taken when the photo is picked.
+// The save always goes to THIS order, even if the user has since moved on.
+function captureContext() {
+  return {
+    gen:         captureGen,
+    sel:         selected,
+    tracking_id: selected.tracking_id || manualTrackingId,
+    order_ids:   [...selected.order_ids, ...selectedAddons],
+    qc_id:       currentQcId,
+  };
+}
+
+async function pushAddPhoto(group, url, ctx) {
+  if (!ctx || !ctx.sel) return null;
   const mySeq = ++syncSeq;
+  const stillHere = () => ctx.gen === captureGen;
   try {
     const res = await apiPost({
       action:        'save_qc',
-      qc_id:         currentQcId || undefined,
+      // Only reuse a QC ID while still in the same order -- and never one
+      // from another order (the backend now double-checks this too).
+      qc_id:         (stillHere() ? currentQcId : ctx.qc_id) || undefined,
       // Session ID is intentionally NOT set here — only at finalize (Enviar).
-      // Otherwise a row that's touched but never shipped would still count
-      // as "packed in this session," polluting counts and history.
-      tracking_id:   selected.tracking_id || manualTrackingId,
-      order_ids:     [...selected.order_ids, ...selectedAddons],
-      customer_id:   selected.customer_id,
-      username:      selected.username,
+      tracking_id:   ctx.tracking_id,
+      order_ids:     ctx.order_ids,
+      customer_id:   ctx.sel.customer_id,
+      username:      ctx.sel.username,
       packer:        currentPacker(),
       [group === 'content' ? 'add_content' : 'add_box']: url,
     });
     if (res.error === 'already_shipped') return { blocked: true };
     if (res.error) throw new Error(res.error);
-    if (mySeq === syncSeq && res.qc_id) currentQcId = res.qc_id;
+    if (stillHere() && mySeq === syncSeq && res.qc_id) currentQcId = res.qc_id;
     return res;
   } catch (e) {
     console.error('[pushAddPhoto] failed:', e);
@@ -107,6 +127,7 @@ async function pushRemovePhoto(group, url) {
 async function pushNotesAndOrders() {
   if (!selected) return;
   if (!currentQcId && gallery.content.length === 0 && gallery.box.length === 0) return;
+  const gen = captureGen;
   try {
     const res = await apiPost({
       action:        'save_qc',
@@ -122,7 +143,7 @@ async function pushNotesAndOrders() {
       showToast('Este pedido ya fue enviado — no se pueden guardar más cambios', true);
       return;
     }
-    if (res.qc_id) currentQcId = res.qc_id;
+    if (res.qc_id && gen === captureGen) currentQcId = res.qc_id;
   } catch (e) {
     console.error('[pushNotesAndOrders] failed:', e);
     showToast('No se guardaron las notas: ' + e.message, true);
@@ -158,6 +179,7 @@ function updatePackersBtnLabel() { /* no-op: packer button removed from the UI *
   await ensureAuth();
   switchTab('pending');
   await loadPending();
+  restoreOpenOrder();
   setInterval(() => {
     if (document.getElementById('view-pending').style.display !== 'none') {
       refreshQcBadges();
@@ -174,10 +196,16 @@ let pollingCapture = false;
 async function pollCaptureUpdates() {
   if (!selected || !selected.tracking_id || pollingCapture) return;
   pollingCapture = true;
+  const gen = captureGen;
+  const tid = selected.tracking_id;
   try {
-    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(selected.tracking_id)}`);
-    const row = (data.records || [])[0];
-    if (!row) { pollingCapture = false; return; }
+    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(tid)}`);
+    // The user may have left this order (or opened another) while the
+    // request was out. Applying it now would paint order A's photos and
+    // QC ID onto order B -- drop it.
+    if (gen !== captureGen || !selected || selected.tracking_id !== tid) return;
+    const row = (data.records || []).find(r => r['Tracking ID'] === tid);
+    if (!row) return;
     if (!currentQcId && row['QC ID']) currentQcId = row['QC ID'];
 
     const nowShipped = row['Status'] === 'Enviado';
@@ -217,8 +245,22 @@ async function pollCaptureUpdates() {
     }
   } catch (e) {
     console.warn('[pollCaptureUpdates] failed:', e);
+  } finally {
+    pollingCapture = false;
   }
-  pollingCapture = false;
+}
+
+// If the phone killed this tab while the camera was open (low memory --
+// the browser gets reloaded from scratch when you come back), reopen the
+// order the packer was working on instead of dumping them on the list.
+function restoreOpenOrder() {
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(OPEN_ORDER_KEY) || 'null'); } catch (e) {}
+  if (!saved || !saved.shipment) return;
+  if (Date.now() - (saved.ts || 0) > 30 * 60 * 1000) { sessionStorage.removeItem(OPEN_ORDER_KEY); return; }
+  cameFromTab = saved.fromTab || 'pending';
+  openCapture(saved.shipment, { keepTab: true });
+  showToast('La página se recargó — volviste al pedido. Revisa que estén todas las fotos.', true);
 }
 let shippedLockShown = false;
 let localFinalizeInProgress = false;
@@ -602,79 +644,16 @@ function toggleEditShipped() {
   applyShippedLock(true);
 }
 
-let urgentSaved = false;   // what the server currently has for this order
-
-function onUrgentChange() {
-  const box = document.getElementById('urgent-checkbox');
-  document.getElementById('urgent-confirm').style.display = (box.checked !== urgentSaved) ? 'block' : 'none';
-}
-
-async function confirmUrgent() {
-  if (!selected) return;
-  const sel = selected;
-  const box = document.getElementById('urgent-checkbox');
-  const btn = document.getElementById('urgent-confirm');
-  const wanted = box.checked;
-  const prev = urgentSaved;
-  const tid = sel.tracking_id || manualTrackingId;
-  const orderIds = [...sel.order_ids, ...selectedAddons];
-  let qcId = currentQcId;
-  const hadRow = !!qcId;
-
-  // Optimistic: show the new state right away, confirm with the server in the background.
-  urgentSaved = wanted;
-  box.disabled = true; btn.disabled = true; btn.classList.add('busy'); btn.textContent = 'Guardando…';
-  const localRow = allQcRows.find(r => r['Tracking ID'] === tid);
-  if (localRow) localRow['Urgent'] = wanted ? 'Sí' : '';
-
-  const save = async () => {
-    const res = await apiPost({
-      action:      'save_qc',
-      qc_id:       qcId || undefined,
-      tracking_id: tid,
-      order_ids:   orderIds,
-      customer_id: sel.customer_id,
-      username:    sel.username,
-      packer:      currentPacker(),
-      urgent:      wanted,
-    });
-    if (res.error) throw new Error(res.error);
-    if (res.qc_id) {
-      qcId = res.qc_id;
-      if (selected === sel && !currentQcId) currentQcId = qcId;
-    }
-  };
-
-  try {
-    await save();
-    if (!hadRow) {
-      // A brand-new QC row has been seen to miss the flag on its first save:
-      // write it again onto the row that now exists, then verify it stuck.
-      await save();
-      const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(tid)}`);
-      const row = (data.records || [])[0];
-      if (!row || !!row['Urgent'] !== wanted) throw new Error('el servidor no confirmó el cambio');
-    }
-    btn.classList.remove('busy'); btn.textContent = '✓ Guardado';
-    setTimeout(() => {
-      btn.style.display = 'none'; btn.disabled = false; btn.textContent = 'Confirmar';
-    }, 1200);
-  } catch (e) {
-    urgentSaved = prev;
-    if (localRow) localRow['Urgent'] = prev ? 'Sí' : '';
-    box.checked = prev;
-    btn.style.display = 'none'; btn.disabled = false; btn.classList.remove('busy'); btn.textContent = 'Confirmar';
-    showToast('No se pudo guardar la urgencia: ' + e.message, true);
-  } finally {
-    box.disabled = false;
-  }
-}
-
-function openCapture(shipment) {
-  cameFromTab = currentTab;
+function openCapture(shipment, opts) {
+  opts = opts || {};
+  if (!opts.keepTab) cameFromTab = currentTab;
   pendingScrollY = window.scrollY;
+  captureGen++;
   selected = shipment;
   manualTrackingId = shipment.tracking_id ? '' : 'MAN-' + Date.now();
+  try {
+    sessionStorage.setItem(OPEN_ORDER_KEY, JSON.stringify({ shipment, fromTab: cameFromTab, ts: Date.now() }));
+  } catch (e) { /* best-effort */ }
   requestWakeLock();
   currentQcId = null;
   shippedLockShown = false;
@@ -683,16 +662,15 @@ function openCapture(shipment) {
   gallery.content = [];
   gallery.box = [];
   document.getElementById('qc-notes').value = '';
-  document.getElementById('urgent-checkbox').checked = false;
-  urgentSaved = false;
-  document.getElementById('urgent-confirm').style.display = 'none';
 
+  const idsHtml = (shipment.order_ids || []).map(o =>
+    `<div style="font-size:13px;margin-top:4px">${escapeHtml(o.channel || '')} · <strong>${escapeHtml(o.id)}</strong></div>`
+  ).join('');
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">${escapeHtml(shipment.username)}</div>
+    ${idsHtml}
     ${shipment.tracking_id ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
   `;
-
-  renderAddonOrders(shipment.customer_id);
 
   let restored = false;
   let rowIsShipped = false;
@@ -706,8 +684,6 @@ function openCapture(shipment) {
       gallery.box = ['Box1','Box2','Box3','Box4','Box5']
         .map(c => row[c]).filter(Boolean).map(url => ({ url }));
       document.getElementById('qc-notes').value = row['Notes'] || '';
-      document.getElementById('urgent-checkbox').checked = !!row['Urgent'];
-      urgentSaved = !!row['Urgent'];
 
       const shopifyIds = String(row['Shopify Order IDs'] || '').split(' + ').filter(Boolean);
       const manualIds  = String(row['Manual Order IDs']  || '').split(' + ').filter(Boolean);
@@ -729,14 +705,11 @@ function openCapture(shipment) {
     });
   }
 
-  if (restored && !rowIsShipped) showToast('Progreso anterior restaurado');
+  if (restored && !rowIsShipped && !opts.keepTab) showToast('Progreso anterior restaurado');
 
+  renderAddonOrders();
   renderGallery('content');
   renderGallery('box');
-  selectedAddons.forEach(a => {
-    const el = document.getElementById(`addon-${cssEscape(a.id)}`);
-    if (el) el.classList.add('selected');
-  });
 
   document.getElementById('view-pending').style.display = 'none';
   document.getElementById('view-capture').style.display = 'block';
@@ -745,6 +718,10 @@ function openCapture(shipment) {
   submitBtn.textContent = 'Enviar';  // reset — otherwise a previous "Guardando…" sticks forever
   applyShippedLock(rowIsShipped);
   window.scrollTo(0, 0);
+
+  // The list's QC data can be up to 20 s old -- check the server right
+  // away instead of waiting for the first 4 s poll tick.
+  pollCaptureUpdates();
 }
 
 // Always returns to the pending list -- previously this branched on a
@@ -757,7 +734,14 @@ let cameFromTab = 'pending';
 async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
   releaseWakeLock();
+  captureGen++;
+  try { sessionStorage.removeItem(OPEN_ORDER_KEY); } catch (e) {}
   selected = null;
+  selectedAddons = [];
+  gallery.content = [];
+  gallery.box = [];
+  renderGallery('content');
+  renderGallery('box');
   currentQcId = null;
   localFinalizeInProgress = false;
   switchTab(cameFromTab);
@@ -811,32 +795,35 @@ function openAddonModal(orderId) {
   );
 }
 
-function renderAddonOrders(customerId) {
+// Only Shopify/Manual orders the office has marked Anotado on THIS
+// shipment's label are offered. Orders that are merely open for the same
+// customer are NOT shown -- the office decides what goes in the box, by
+// setting Anotado in Pedidos. Anything already saved on this QC row stays
+// visible too, so it can still be un-ticked.
+function renderAddonOrders() {
   const section = document.getElementById('addon-section');
   const list = document.getElementById('addon-list');
 
   const tid = selected ? selected.tracking_id : '';
-  const linkedHere = r => r['Status'] === 'Anotado' && tid && String(r['Linked Shipment'] || '') === tid;
-  // Customer's open Shopify/Manual orders, plus anything Anotado on THIS
-  // shipment (even under another customer ID). Orders Anotado on a
-  // DIFFERENT shipment are left out -- they belong to that package.
+  const savedIds = new Set(selectedAddons.map(a => String(a.id)));
   const addons = allActiveOrders.filter(r =>
-    r['Channel'] !== 'TikTok' &&
-    !['Enviado', 'Archivado'].includes(r['Status']) &&
-    (linkedHere(r) || (customerId && r['Customer ID'] === customerId && r['Status'] !== 'Anotado'))
+    r['Channel'] !== 'TikTok' && (
+      savedIds.has(String(r['Order ID'])) ||
+      (tid && r['Status'] === 'Anotado' && String(r['Linked Shipment'] || '').trim() === tid)
+    )
   );
 
-  if (addons.length === 0) { section.style.display = 'none'; return; }
+  if (addons.length === 0) { section.style.display = 'none'; list.innerHTML = ''; return; }
 
   section.style.display = 'block';
   list.innerHTML = addons.map(o => `
-    <div class="addon-item" id="addon-${escapeAttr(o['Order ID'])}" onclick="openAddonModal('${escapeAttr(o['Order ID'])}')">
+    <div class="addon-item${savedIds.has(String(o['Order ID'])) ? ' selected' : ''}" id="addon-${cssEscape(o['Order ID'])}" onclick="openAddonModal('${escapeAttr(o['Order ID'])}')">
       <div class="addon-checkbox" onclick="event.stopPropagation(); toggleAddon('${escapeAttr(o['Order ID'])}', '${escapeAttr(o['Channel'])}')">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
       <div class="addon-text">
         <div class="addon-channel">${o['Shopify Order ID'] ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeAttr(o['Shopify Order ID'])}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline" onclick="event.stopPropagation()">${escapeHtml(addonLabel(o))}</a>` : escapeHtml(addonLabel(o))}</div>
-        <div class="addon-products">${escapeHtml(addonQtyText(o))}</div>
+        <div class="addon-products">${escapeHtml(o['Order ID'])} · ${escapeHtml(addonQtyText(o))}</div>
       </div>
     </div>
   `).join('');
@@ -844,7 +831,7 @@ function renderAddonOrders(customerId) {
 
 function toggleAddon(orderId, channel) {
   const el = document.getElementById(`addon-${cssEscape(orderId)}`);
-  const idx = selectedAddons.findIndex(a => a.id === orderId);
+  const idx = selectedAddons.findIndex(a => String(a.id) === String(orderId));
   if (idx >= 0) {
     selectedAddons.splice(idx, 1);
     el.classList.remove('selected');
@@ -858,12 +845,21 @@ function toggleAddon(orderId, channel) {
 
 // ── Photo galleries ──────────────────────────────────────────────────────
 
+// Small Cloudinary preview instead of the full 1280px photo -- ten full
+// photos decoded at once is real memory on a low-end phone. Falls back to
+// the original if Cloudinary refuses the resize.
+function smallThumb(url) {
+  return /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_240,c_limit,q_auto/') : url;
+}
+
 function renderGallery(group) {
   const galEl = document.getElementById(`gallery-${group}`);
 
-  galEl.innerHTML = gallery[group].map((p, i) => `
+  galEl.innerHTML = gallery[group].map((p, i) => p.uploading
+    ? '<div class="photo-thumb uploading"><div class="spinner"></div></div>'
+    : `
     <div class="photo-thumb">
-      <img src="${p.url}" loading="lazy" onclick="openLightbox('${p.url.replace(/'/g, "\\'")}')">
+      <img src="${smallThumb(p.url)}" loading="lazy" onerror="if(this.src!=='${p.url.replace(/'/g, "\\'")}')this.src='${p.url.replace(/'/g, "\\'")}'" onclick="openLightbox('${p.url.replace(/'/g, "\\'")}')">
       <button class="photo-thumb-delete" onclick="deletePhoto('${group}', ${i})">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
@@ -879,8 +875,13 @@ function renderGallery(group) {
 }
 
 async function deletePhoto(group, index) {
+  const item = gallery[group][index];
+  if (!item || item.uploading) return;
   if (!confirm('¿Eliminar esta foto?')) return;
-  const removedUrl = gallery[group][index].url;
+  const gen = captureGen;
+  index = gallery[group].indexOf(item);
+  if (index < 0) return;
+  const removedUrl = item.url;
 
   // If editing a shipped order, deletion is local-only until "Guardar cambios"
   // is pressed (full overwrite) — no per-photo server call in that mode.
@@ -894,11 +895,18 @@ async function deletePhoto(group, index) {
   renderGallery(group);
   document.getElementById('qc-submit').disabled = gallery.content.length === 0;
   const res = await pushRemovePhoto(group, removedUrl);
+  if (gen !== captureGen) return;
   if (res && res.blocked) {
     showToast('Este pedido ya fue enviado — no se puede modificar', true);
     gallery[group].splice(index, 0, { url: removedUrl });  // restore — server refused
     renderGallery(group);
   }
+}
+
+function refreshSubmitState() {
+  if (savingInProgress) return;
+  document.getElementById('qc-submit').disabled =
+    uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
 }
 
 function bindAddButton(group, btnId) {
@@ -907,66 +915,70 @@ function bindAddButton(group, btnId) {
   input.onchange = async () => {
     const f = input.files[0];
     input.value = '';
-    if (!f) return;
+    if (!f || !selected) return;
     if (gallery[group].length >= MAX_PHOTOS) return;
 
-    const previewUrl = URL.createObjectURL(f);
-    const placeholderIdx = gallery[group].length;
-    gallery[group].push({ url: previewUrl, uploading: true });
-    renderUploadingPlaceholder(group, placeholderIdx);
+    // Everything below belongs to the order that was open right now, even
+    // if the packer leaves it before the upload finishes.
+    const ctx = captureContext();
+    // A plain marker object (no blob preview URL -- that held the full
+    // camera photo in memory and was never released).
+    const placeholder = { url: '', uploading: true };
+    gallery[group].push(placeholder);
+    renderGallery(group);
     uploadsInFlight++;
     document.getElementById('qc-submit').disabled = true;
 
+    let uploaded = null;
     try {
-      const uploaded = await uploadPhoto(f, 'velpapier/qc');
-      gallery[group][placeholderIdx] = { url: uploaded.url };
-      renderGallery(group);
-      uploadsInFlight--;
-      if (!savingInProgress) {
-        document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
-      }
-
-      // Sync to the sheet in the background — the thumbnail and the submit
-      // button are already usable at this point, they don't need to wait
-      // for this slower, secondary round-trip to Apps Script. But the 4s
-      // poll must know this is in flight too (photoSyncsInFlight) -- it
-      // reads the server's row, which doesn't have this photo yet until
-      // this call lands, and would otherwise wipe the thumbnail right back
-      // out thinking the server is the source of truth.
-      photoSyncsInFlight++;
-      pushAddPhoto(group, uploaded.url).then(res => {
-        // Ignore 'blocked' when THIS device just finalized: the finalize
-        // call already carried the full photo list, so nothing was lost.
-        if (res && res.blocked && selected && !localFinalizeInProgress) {
-          document.getElementById('edit-shipped-checkbox').checked = true;
-          toggleEditShipped();
-        }
-      }).finally(() => { photoSyncsInFlight--; });
+      uploaded = await uploadPhoto(f, 'velpapier/qc');
     } catch (e) {
       console.error(`[bindAddButton:${group}] upload failed:`, e);
-      gallery[group].splice(placeholderIdx, 1);
-      renderGallery(group);
-      showToast('Error al subir foto, intenta de nuevo', true);
-      uploadsInFlight--;
-      if (!savingInProgress) {
-        document.getElementById('qc-submit').disabled = uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
-      }
     }
+    uploadsInFlight--;
+    const stillHere = ctx.gen === captureGen;
+
+    if (!uploaded) {
+      if (stillHere) {
+        const i = gallery[group].indexOf(placeholder);
+        if (i >= 0) gallery[group].splice(i, 1);
+        renderGallery(group);
+        refreshSubmitState();
+      }
+      showToast('Error al subir foto, intenta de nuevo', true);
+      return;
+    }
+
+    if (stillHere) {
+      const i = gallery[group].indexOf(placeholder);
+      if (i >= 0) gallery[group][i] = { url: uploaded.url };
+      else gallery[group].push({ url: uploaded.url });
+      renderGallery(group);
+      refreshSubmitState();
+    }
+
+    // Save to the sheet in the background, always against the order the
+    // photo was taken for (ctx). The 4 s poll must know this is in flight
+    // (photoSyncsInFlight), or it would wipe the thumbnail before it lands.
+    photoSyncsInFlight++;
+    pushAddPhoto(group, uploaded.url, ctx).then(res => {
+      if (!stillHere || ctx.gen !== captureGen) {
+        if (res && !res.blocked) showToast(`Foto guardada en el pedido de ${ctx.sel.username}`);
+        return;
+      }
+      // Ignore 'blocked' when THIS device just finalized: the finalize
+      // call already carried the full photo list, so nothing was lost.
+      if (res && res.blocked && selected && !localFinalizeInProgress) {
+        document.getElementById('edit-shipped-checkbox').checked = true;
+        toggleEditShipped();
+      }
+    }).finally(() => { photoSyncsInFlight--; });
   };
 }
 bindAddButton('content', 'add-btn-content');
 bindAddButton('content', 'add-btn-content-gallery');
 bindAddButton('box', 'add-btn-box');
 bindAddButton('box', 'add-btn-box-gallery');
-
-function renderUploadingPlaceholder(group, idx) {
-  const galEl = document.getElementById(`gallery-${group}`);
-  const div = document.createElement('div');
-  div.className = 'photo-thumb uploading';
-  div.id = `uploading-${group}-${idx}`;
-  div.innerHTML = '<div class="spinner"></div>';
-  galEl.appendChild(div);
-}
 
 document.getElementById('qc-notes').addEventListener('change', pushNotesAndOrders);
 
@@ -1026,6 +1038,7 @@ async function submitQC() {
   btn.textContent = 'Guardando…';
 
   const allOrders = [...selected.order_ids, ...selectedAddons];
+  const gen = captureGen;
 
   try {
     const res = await apiPost({
@@ -1060,7 +1073,7 @@ async function submitQC() {
     }
 
     showToast('✓ Empacado y enviado');
-    backToPending();
+    if (gen === captureGen) backToPending();
 
   } catch (e) {
     showToast('Error: ' + e.message, true);
