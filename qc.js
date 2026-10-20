@@ -575,7 +575,10 @@ function renderPendingList() {
     return;
   }
 
-  const urgentOf = tid => { const q = allQcRows.find(r => r['Tracking ID'] === tid); return !!(q && q['Urgent']); };
+  const urgentOf = tid => {
+    if (window.vpLocalUrgent && window.vpLocalUrgent.has(tid)) return true;
+    const q = allQcRows.find(r => r['Tracking ID'] === tid); return !!(q && q['Urgent']);
+  };
   const userOf = ([, o]) => (o[0]['Username'] || o[0]['Primary Username'] || '').toLowerCase();
   const urgentEntries = entries.filter(([tid]) => urgentOf(tid)).sort((a, b) => userOf(a).localeCompare(userOf(b)));
   const normalEntries = entries.filter(([tid]) => !urgentOf(tid));
