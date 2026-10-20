@@ -143,6 +143,7 @@ window.vpLocalUrgent = window.vpLocalUrgent || new Set();
   // the Pendientes list (Pagado, not finalized). Orders without a tracking
   // ID can't hold an urgent flag (it lives on the shipment), so they're
   // reported separately.
+  function buildIndex() {
     const finalized = new Set((allQcRows || []).filter(r => r['Status'] === 'Enviado').map(r => r['Tracking ID']));
     const packedIds = new Set();
     (allQcRows || []).filter(r => r['Status'] === 'Enviado').forEach(r => {
