@@ -1461,7 +1461,18 @@ function applyCustomers(customersData) {
   });
 }
 
+// Fingerprints of the last server data applied, so a poll that brings
+// nothing new can skip the redraw. lastRenderStamp/Day make sure the
+// age labels ("hace 3d", ⚠) still refresh when the day changes or after
+// an hour, even if no data changed.
+let lastActiveSig = '';
+let lastEnviadoSig = '';
+let lastRenderStamp = Date.now();
+function dayKey() { return new Date().toDateString(); }
+let lastRenderDay = dayKey();
+
 function applyActiveData(activeData, customersData, matchesData) {
+  lastActiveSig = JSON.stringify([activeData, customersData, matchesData]);
   activeRecords = (activeData.records || []).map(mapFromApi);
   applyCustomers(customersData);
   pendingMatchesByShopifyOrderId = {};
@@ -1510,9 +1521,13 @@ async function fetchActive() {
 
 async function fetchEnviado() {
   const data = await apiGet('action=orders&status=Enviado');
+  const sig = JSON.stringify(data);
+  if (tabDataLoaded.enviado && sig === lastEnviadoSig) return false;   // nothing new
+  lastEnviadoSig = sig;
   enviadoRecords = (data.records || []).map(mapFromApi);
   tabDataLoaded.enviado = true;
   rebuildAllRecords();
+  return true;
 }
 
 async function fetchArchivo() {
@@ -1585,6 +1600,7 @@ async function fetchActiveFresh(epoch) {
     apiGet(qsActive), apiGet('action=customers'), apiGet('action=shopify_matches')
   ]);
   if (epoch !== dataEpoch) return false; // a write happened mid-fetch -- discard
+  if (JSON.stringify([activeData, customersData, matchesData]) === lastActiveSig) return 'same'; // nothing new
   try {
     sessionStorage.setItem(CACHE_PREFIX + qsActive, JSON.stringify(activeData));
     sessionStorage.setItem(CACHE_PREFIX + 'action=customers', JSON.stringify(customersData));
@@ -1600,10 +1616,19 @@ async function autoRefresh() {
   try {
     // The archive is never re-downloaded on a poll: it only grows through
     // changes made here (applied locally) and it is by far the biggest list.
-    if (currentTab === 'enviado' && tabDataLoaded.enviado && !searchSelectedCliente) await fetchEnviado();
-    else if (!(await fetchActiveFresh(epoch))) return;
+    let changed;
+    if (currentTab === 'enviado' && tabDataLoaded.enviado && !searchSelectedCliente) {
+      changed = await fetchEnviado();
+    } else {
+      const res = await fetchActiveFresh(epoch);
+      if (!res) return;            // stale -- discarded
+      changed = res === true;      // 'same' = identical to what is on screen
+    }
     if (epoch !== dataEpoch) return;
-    renderAll();
+    // Redraw only when data changed -- or the clock moved far enough that
+    // the age labels need refreshing.
+    const clockStale = dayKey() !== lastRenderDay || Date.now() - lastRenderStamp > 3600000;
+    if (changed || clockStale) renderAll();
   } catch (e) { /* silent */ }
 }
 
@@ -2178,6 +2203,8 @@ function renderClientList() {
 }
 
 function renderAll() {
+  lastRenderStamp = Date.now();
+  lastRenderDay = dayKey();
   const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
   const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
