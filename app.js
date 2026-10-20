@@ -1136,13 +1136,24 @@ function scmOptionsHtml(r, target) {
   // available for the rare case it left without going through Empacar.
   if (r.Channel === 'TikTok') return html + opt('Enviado', 'Enviado');
   html += opt('Enviado', 'Enviado aparte');
-  html += '<optgroup label="Anotado en envío TikTok">';
-  if (!scmShipments.length) html += opt('__none', 'Sin envío TikTok pendiente', true);
-  scmShipments.forEach(s => {
+  const pend = scmShipments.filter(s => !s.shipped);
+  const done = scmShipments.filter(s => s.shipped);
+  html += '<optgroup label="Anotado en envío TikTok · pendiente">';
+  if (!pend.length) html += opt('__none', 'Sin envío TikTok pendiente', true);
+  pend.forEach(s => {
     const current = r.Status === 'Anotado' && r.LinkedShipment === s.tid;
     html += opt('Anotado|' + s.tid, shipmentLabel(s) + (current ? ' (actual)' : ''));
   });
   html += '</optgroup>';
+  // Retrospective option, deliberately separate and greyed: these shipments
+  // already left, so the order is saved as Enviado (server rule).
+  if (done.length) {
+    html += '<optgroup label="Ya salieron · se guarda como Enviado">';
+    done.forEach(s => {
+      html += `<option value="${escapeHtml('Anotado|' + s.tid)}"${('Anotado|' + s.tid) === target ? ' selected' : ''} style="color:#999">↩ ${escapeHtml(shipmentLabel(s))}</option>`;
+    });
+    html += '</optgroup>';
+  }
   return html;
 }
 
@@ -1242,9 +1253,18 @@ function openStatusChangeModal(cliente, orders, single) {
   const pendingShipments = scmShipments.filter(s => !s.shipped && !s.unknown);
   const disabledAttr = scmSingle ? ' disabled' : '';
 
-  const shipOptions = scmShipments.length
-    ? scmShipments.map(s => `<option value="${escapeHtml(s.tid)}">${escapeHtml(shipmentLabel(s))}</option>`).join('')
-    : '<option value="">Sin envío TikTok pendiente</option>';
+  // Pending shipments first (default = newest pending); already-shipped
+  // ones sit in their own greyed group so they can't be mistaken for live ones.
+  const pendList = scmShipments.filter(s => !s.shipped);
+  const doneList = scmShipments.filter(s => s.shipped);
+  const shipOptions =
+    (pendList.length
+      ? pendList.map(s => `<option value="${escapeHtml(s.tid)}">${escapeHtml(shipmentLabel(s))}</option>`).join('')
+      : '<option value="">Sin envío TikTok pendiente</option>') +
+    (doneList.length
+      ? `<optgroup label="Ya salieron · se guarda como Enviado">${doneList.map(s => `<option value="${escapeHtml(s.tid)}" style="color:#999">↩ ${escapeHtml(shipmentLabel(s))}</option>`).join('')}</optgroup>`
+      : '');
+  const hasPendingShip = pendList.length > 0;
 
   const c = document.getElementById('modal-container');
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal scm-modal">
@@ -1257,7 +1277,7 @@ function openStatusChangeModal(cliente, orders, single) {
       <div class="scm-bulk-actions">
         <button class="scm-bulk-btn" data-bulk="Pagado"${disabledAttr}>Pagado</button>
         <div class="scm-bulk-anotado">
-          <button class="scm-bulk-btn" data-bulk="Anotado"${disabledAttr || (scmShipments.length ? '' : ' disabled')}>Anotado en envío</button>
+          <button class="scm-bulk-btn" data-bulk="Anotado"${disabledAttr || (hasPendingShip ? '' : ' disabled')}>Anotado en envío</button>
           <select id="scm-bulk-ship" class="scm-bulk-ship"${disabledAttr || (scmShipments.length ? '' : ' disabled')}>${shipOptions}</select>
         </div>
         <button class="scm-bulk-btn" data-bulk="Enviado"${disabledAttr}>Enviado aparte</button>
