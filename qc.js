@@ -493,7 +493,7 @@ function renderPendingList() {
   // card here and pre-selected as add-ons when the shipment is opened.
   const anotadoByTid = anotadoOrdersByTracking();
 
-  // Search filter — by username or tracking ID
+  // Search filter — by username, tracking ID or TikTok Order ID
   const searchInput = document.getElementById('search-input');
   const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
   let filteredEntries = Object.entries(groups);
@@ -609,46 +609,64 @@ function onUrgentChange() {
   document.getElementById('urgent-confirm').style.display = (box.checked !== urgentSaved) ? 'block' : 'none';
 }
 
-async function saveUrgentOnce(wanted) {
-  const res = await apiPost({
-    action:      'save_qc',
-    qc_id:       currentQcId || undefined,
-    tracking_id: selected.tracking_id || manualTrackingId,
-    order_ids:   [...selected.order_ids, ...selectedAddons],
-    customer_id: selected.customer_id,
-    username:    selected.username,
-    packer:      currentPacker(),
-    urgent:      wanted,
-  });
-  if (res.error) throw new Error(res.error);
-  if (res.qc_id) currentQcId = res.qc_id;
-}
-
 async function confirmUrgent() {
   if (!selected) return;
+  const sel = selected;
   const box = document.getElementById('urgent-checkbox');
   const btn = document.getElementById('urgent-confirm');
   const wanted = box.checked;
-  const hadRow = !!currentQcId;
+  const prev = urgentSaved;
+  const tid = sel.tracking_id || manualTrackingId;
+  const orderIds = [...sel.order_ids, ...selectedAddons];
+  let qcId = currentQcId;
+  const hadRow = !!qcId;
+
+  // Optimistic: show the new state right away, confirm with the server in the background.
+  urgentSaved = wanted;
   box.disabled = true; btn.disabled = true; btn.classList.add('busy'); btn.textContent = 'Guardando…';
+  const localRow = allQcRows.find(r => r['Tracking ID'] === tid);
+  if (localRow) localRow['Urgent'] = wanted ? 'Sí' : '';
+
+  const save = async () => {
+    const res = await apiPost({
+      action:      'save_qc',
+      qc_id:       qcId || undefined,
+      tracking_id: tid,
+      order_ids:   orderIds,
+      customer_id: sel.customer_id,
+      username:    sel.username,
+      packer:      currentPacker(),
+      urgent:      wanted,
+    });
+    if (res.error) throw new Error(res.error);
+    if (res.qc_id) {
+      qcId = res.qc_id;
+      if (selected === sel && !currentQcId) currentQcId = qcId;
+    }
+  };
+
   try {
-    await saveUrgentOnce(wanted);
-    // A brand-new QC row has been seen to miss the flag on its first save,
-    // so write it again onto the row that now exists.
-    if (!hadRow) await saveUrgentOnce(wanted);
-    // Read it back: only report success if the server really has it.
-    const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(selected.tracking_id || manualTrackingId)}`);
-    const row = (data.records || [])[0];
-    if (!row || !!row['Urgent'] !== wanted) throw new Error('el servidor no confirmó el cambio');
-    urgentSaved = wanted;
-    const local = allQcRows.find(r => r['QC ID'] === row['QC ID']);
-    if (local) local['Urgent'] = row['Urgent']; else allQcRows.push(row);
-    btn.style.display = 'none';
-    showToast(wanted ? 'Marcado como urgente' : 'Urgente quitado');
+    await save();
+    if (!hadRow) {
+      // A brand-new QC row has been seen to miss the flag on its first save:
+      // write it again onto the row that now exists, then verify it stuck.
+      await save();
+      const data = await apiGet(`action=qc&tracking_ids=${encodeURIComponent(tid)}`);
+      const row = (data.records || [])[0];
+      if (!row || !!row['Urgent'] !== wanted) throw new Error('el servidor no confirmó el cambio');
+    }
+    btn.classList.remove('busy'); btn.textContent = '✓ Guardado';
+    setTimeout(() => {
+      btn.style.display = 'none'; btn.disabled = false; btn.textContent = 'Confirmar';
+    }, 1200);
   } catch (e) {
+    urgentSaved = prev;
+    if (localRow) localRow['Urgent'] = prev ? 'Sí' : '';
+    box.checked = prev;
+    btn.style.display = 'none'; btn.disabled = false; btn.classList.remove('busy'); btn.textContent = 'Confirmar';
     showToast('No se pudo guardar la urgencia: ' + e.message, true);
   } finally {
-    box.disabled = false; btn.disabled = false; btn.classList.remove('busy'); btn.textContent = 'Confirmar';
+    box.disabled = false;
   }
 }
 
@@ -817,7 +835,7 @@ function renderAddonOrders(customerId) {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
       </div>
       <div class="addon-text">
-<div class="addon-channel">${o['Shopify Order ID'] ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeAttr(o['Shopify Order ID'])}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline" onclick="event.stopPropagation()">${escapeHtml(addonLabel(o))}</a>` : escapeHtml(addonLabel(o))}</div>
+        <div class="addon-channel">${o['Shopify Order ID'] ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeAttr(o['Shopify Order ID'])}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline" onclick="event.stopPropagation()">${escapeHtml(addonLabel(o))}</a>` : escapeHtml(addonLabel(o))}</div>
         <div class="addon-products">${escapeHtml(addonQtyText(o))}</div>
       </div>
     </div>
