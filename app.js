@@ -78,7 +78,6 @@ async function performUndo() {
     }
     updateUndoRedoButtons();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast(`↩ Deshecho: ${result.field} → ${result.restored_value}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
@@ -93,7 +92,6 @@ async function performRedo() {
     }
     updateUndoRedoButtons();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast(`↪ Rehecho: ${result.field} → ${result.restored_value}`);
   } catch (e) { showToast('Error: ' + e.message); }
 }
@@ -275,23 +273,63 @@ function renderGiftToggle() {
 }
 
 // ── SEARCH ───────────────────────────────────────────────────
+// How search works now (rewritten 20-10-2026):
+//  * Results render INSTANTLY from whatever is already in memory (active
+//    orders). Enviado/Archivado history is fetched ONCE in the background
+//    and the results fill in when it lands -- the search never waits on it.
+//  * Matching is by Customer ID whenever the name resolves to a known
+//    customer (from the dropdown, the client list, or typed + Enter), plus
+//    any not-yet-linked orders whose raw username matches the customer's
+//    name or one of its aliases.
+//  * Enter picks the highlighted suggestion (first one by default); with no
+//    suggestion it searches the typed text as a free-text username match.
+//  * Emptying the box by any means (X button, backspace, select-all+delete)
+//    brings the full list straight back.
+//  * renderAll() re-renders the search view itself when a search is open,
+//    so every other part of the page just calls renderAll().
 let searchSelectedCliente = null;
+let searchSelectedCustomerId = null;
+let searchAcIndex = -1;          // highlighted autocomplete row (keyboard)
+let searchAcItems = [];          // current autocomplete suggestions
+let historyPromise = null;       // single shared Enviado+Archivado load
+
+function normUser(s) { return String(s || '').trim().replace(/^@/, '').toLowerCase(); }
+
+function searchSuggestions(val) {
+  const v = normUser(val);
+  if (!v) return [];
+  const all = getUniqueClientes();
+  const starts = [], contains = [];
+  all.forEach(c => {
+    const names = [c.name, ...(c.aliases || [])].map(normUser);
+    if (names.some(n => n.startsWith(v))) starts.push(c);
+    else if (names.some(n => n.includes(v))) contains.push(c);
+  });
+  return [...starts, ...contains].slice(0, 8);
+}
 
 function handleSearchInput() {
-  const val = document.getElementById('global-search').value.trim().toLowerCase();
+  const input = document.getElementById('global-search');
   const list = document.getElementById('search-autocomplete-list');
   updateClearBtn();
-  if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => {
-    const val_lower = val.toLowerCase();
-    return c.name.toLowerCase().startsWith(val_lower) ||
-      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
-  }).slice(0, 8);
-  if (!clientes.length) { list.style.display = 'none'; return; }
+  if (!input.value.trim()) {                 // box emptied -> full list back
+    list.style.display = 'none';
+    if (searchSelectedCliente) clearSearch(); 
+    return;
+  }
+  searchAcItems = searchSuggestions(input.value);
+  searchAcIndex = searchAcItems.length ? 0 : -1;
+  renderSearchAutocomplete();
+}
+
+function renderSearchAutocomplete() {
+  const list = document.getElementById('search-autocomplete-list');
+  if (!searchAcItems.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
-  clientes.forEach(c => {
+  searchAcItems.forEach((c, i) => {
     const item = document.createElement('div');
     item.className = 'autocomplete-item';
+    if (i === searchAcIndex) item.style.background = 'var(--surface2)';
     item.innerHTML = clienteLabelHtml(c);
     item.addEventListener('mousedown', e => { e.preventDefault(); selectSearchCliente(c.name, c.customerId); });
     list.appendChild(item);
@@ -299,59 +337,121 @@ function handleSearchInput() {
   list.style.display = 'block';
 }
 
-let searchSelectedCustomerId = null;
+function handleSearchKeydown(e) {
+  const list = document.getElementById('search-autocomplete-list');
+  const open = list.style.display !== 'none' && searchAcItems.length;
+  if (e.key === 'ArrowDown' && open) {
+    e.preventDefault();
+    searchAcIndex = (searchAcIndex + 1) % searchAcItems.length;
+    renderSearchAutocomplete();
+  } else if (e.key === 'ArrowUp' && open) {
+    e.preventDefault();
+    searchAcIndex = (searchAcIndex - 1 + searchAcItems.length) % searchAcItems.length;
+    renderSearchAutocomplete();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const typed = e.target.value.trim();
+    if (!typed) { clearSearch(); return; }
+    if (open && searchAcIndex >= 0) {
+      const c = searchAcItems[searchAcIndex];
+      selectSearchCliente(c.name, c.customerId);
+    } else {
+      selectSearchCliente(typed);            // free text; resolves to a customer if the name is known
+    }
+  } else if (e.key === 'Escape') {
+    list.style.display = 'none';
+  }
+}
 
 function selectSearchCliente(name, customerId) {
-  searchSelectedCliente = name;
-  searchSelectedCustomerId = customerId || null;
-  document.getElementById('global-search').value = name;
+  // Client list / free text pass no ID -- resolve it from the name or alias,
+  // otherwise the search silently falls back to exact-username matching and
+  // misses this customer's orders stored under other usernames.
+  const known = allCustomers[normUser(name)] || allCustomers[String(name || '').trim().toLowerCase()];
+  searchSelectedCustomerId = customerId || (known && known.customerId) || null;
+  searchSelectedCliente = (known && known.name) || String(name || '').trim();
+  searchFilter = 'Todos';
+  document.getElementById('global-search').value = searchSelectedCliente;
   document.getElementById('search-autocomplete-list').style.display = 'none';
+  searchAcItems = []; searchAcIndex = -1;
   updateClearBtn();
-  runSearch(name);
+  runSearch();
 }
 
 function hideSearchAutocomplete() { setTimeout(() => { const l = document.getElementById('search-autocomplete-list'); if (l) l.style.display = 'none'; }, 150); }
 
 function clearSearch() {
   searchSelectedCliente = null;
+  searchSelectedCustomerId = null;           // was never reset -> next search reused the OLD customer
+  searchFilter = 'Todos';
+  searchAcItems = []; searchAcIndex = -1;
   document.getElementById('global-search').value = '';
   document.getElementById('search-autocomplete-list').style.display = 'none';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('search-filter-bar').innerHTML = '';
   updateClearBtn();
   document.getElementById('search-panel').style.display = 'none';
   document.getElementById('main-panel').style.display = 'block';
+  renderAll();                               // main list is only drawn while visible -- draw it now
 }
 
 function updateClearBtn() { document.getElementById('search-clear-btn').style.display = document.getElementById('global-search').value ? 'flex' : 'none'; }
 
-// Known limitation, unchanged by this edit: matching is still by the raw
-// Cliente text, not Customer ID, so an order stored under a slightly
-// different username string for the same customer won't appear here.
 let searchFilter = 'Todos';
 
-// Matches by Customer ID when we have one (the correct, reliable way --
-// different channels often store a different raw username string for the
-// same real person). Falls back to the typed text only for orders with no
-// Customer ID at all (genuinely unresolved orders).
-async function runSearch(name) {
-  // Enviado/Archivado are only fetched lazily when their tab is opened --
-  // search needs the full history regardless of which tabs have been
-  // visited this session, so make sure both are in before filtering.
-  const loads = [];
-  if (!tabDataLoaded.enviado) loads.push(fetchEnviado());
-  if (!tabDataLoaded.archivo) loads.push(fetchArchivo());
-  if (loads.length) await Promise.all(loads);
+// Loads Enviado + Archivado once per page (or after a manual refresh).
+// Shared promise, so ten quick searches never fire ten archive downloads.
+function ensureHistoryLoaded() {
+  if (tabDataLoaded.enviado && tabDataLoaded.archivo) return Promise.resolve();
+  if (!historyPromise) {
+    const loads = [];
+    if (!tabDataLoaded.enviado) loads.push(fetchEnviado());
+    if (!tabDataLoaded.archivo) loads.push(fetchArchivo());
+    historyPromise = Promise.all(loads).finally(() => { historyPromise = null; });
+  }
+  return historyPromise;
+}
 
-  const val = name.toLowerCase();
-  const custId = searchSelectedCustomerId;
+function runSearch() {
+  if (!searchSelectedCliente) return;
   document.getElementById('search-panel').style.display = 'block';
   document.getElementById('main-panel').style.display = 'none';
+  renderSearchResults();                     // instant, from memory
+  if (!(tabDataLoaded.enviado && tabDataLoaded.archivo)) {
+    ensureHistoryLoaded()
+      .then(() => { if (searchSelectedCliente) renderSearchResults(); })
+      .catch(() => { if (searchSelectedCliente) { renderSearchResults(); showToast('No se pudo cargar el historial (enviados/archivo)'); } });
+  }
+}
+
+function searchMatcher() {
+  const custId = searchSelectedCustomerId;
+  const names = new Set([normUser(searchSelectedCliente)]);
+  if (custId) {
+    const c = Object.values(allCustomers).find(x => x.customerId === custId);
+    if (c) [c.name, ...(c.aliases || [])].forEach(n => names.add(normUser(n)));
+  }
+  return r => {
+    if (custId && r.CustomerId === custId) return true;
+    // Orders without a Customer ID can only be matched by their username text
+    if (!r.CustomerId || !custId) return names.has(normUser(r.Cliente));
+    return false;
+  };
+}
+
+function renderSearchResults() {
+  if (!searchSelectedCliente) return;
+  const name = searchSelectedCliente;
+  const historyLoading = !(tabDataLoaded.enviado && tabDataLoaded.archivo);
   const byDateDesc = (a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0);
-  const matches = r => custId ? r.CustomerId === custId : (r.Cliente || '').toLowerCase() === val;
+  const matches = searchMatcher();
+  const results = document.getElementById('search-results');
 
   let all = allRecords.filter(matches).sort(byDateDesc);
+  const loadingNote = historyLoading ? '<div class="empty-state" style="padding:8px 0">Cargando historial (enviados y archivo)…</div>' : '';
   if (!all.length) {
-    document.getElementById('search-results').innerHTML = `<div class="empty-state">Sin resultados para "${name}"</div>`;
     renderSearchFilterBar(0);
+    results.innerHTML = historyLoading ? loadingNote : `<div class="empty-state">Sin resultados para "${escapeHtml(name)}"</div>`;
     return;
   }
 
@@ -362,14 +462,13 @@ async function runSearch(name) {
   else if (searchFilter === 'Anotado') all = all.filter(r => r.Status === 'Anotado');
   else if (searchFilter === 'Enviado') all = all.filter(r => r.Status === 'Enviado');
   else if (searchFilter === 'Archivo') all = all.filter(r => r.Status === 'Archivado');
-else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado');
+  else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado');
   else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
   else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
   // 'Todos' -- no filter
 
-  const results = document.getElementById('search-results');
   results.innerHTML = '';
-  if (!all.length) { results.innerHTML = `<div class="empty-state">Sin resultados en este filtro</div>`; return; }
+  if (!all.length) { results.innerHTML = (historyLoading ? loadingNote : '<div class="empty-state">Sin resultados en este filtro</div>'); return; }
 
   const active   = all.filter(r => ACTIVE_STATUSES.includes(r.Status));
   const shipped  = all.filter(r => r.Status === 'Enviado');
@@ -381,7 +480,7 @@ else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.inclu
     groupByCliente(records).forEach(grp => {
       const cliente = grp.name;
       const group = document.createElement('div'); group.className = 'customer-group' + (greyedOut ? ' customer-group--faded' : '');
-      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${cliente}${searchTikTokBadgeHtml(grp.items, greyedOut)}</div><div class="customer-bulk-actions"></div></div>`;
+      group.innerHTML = `<div class="customer-header${isUnnamedCliente(cliente) ? ' customer-header--unnamed' : ''}"><div class="customer-avatar">${getInitials(cliente)}</div><div class="customer-name customer-name--clickable">${escapeHtml(cliente)}${searchTikTokBadgeHtml(grp.items, greyedOut)}</div><div class="customer-bulk-actions"></div></div>`;
       const searchCustId = (grp.items[0] && grp.items[0].CustomerId) || '';
       const searchNameEl = group.querySelector('.customer-name');
       if (searchNameEl && searchCustId) searchNameEl.addEventListener('click', () => openCustomerHistory(searchCustId, cliente));
@@ -389,8 +488,7 @@ else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.inclu
       if (searchTtBadge) searchTtBadge.addEventListener('click', e => { e.stopPropagation(); showPendingTikTokModal(searchCustId, cliente); });
 
       // Bulk "Cambiar estado" only for the active tier -- never shown
-      // alongside greyed-out Enviado/Archivado groups, so there's no way
-      // to bulk-change an order that's already shipped or archived.
+      // alongside greyed-out Enviado/Archivado groups.
       if (!greyedOut) {
         const bulk = group.querySelector('.customer-bulk-actions');
         const btn = document.createElement('button');
@@ -409,14 +507,14 @@ else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.inclu
   appendGroup(shipped, '', true);
   if (archived.length && searchFilter === 'Todos') { const d = document.createElement('div'); d.className = 'search-divider'; d.textContent = 'Archivado'; results.appendChild(d); }
   appendGroup(archived, '', true);
+  if (historyLoading) results.insertAdjacentHTML('beforeend', loadingNote);
 }
 
 // Same green badge as the main lists, for the search view
 function searchTikTokBadgeHtml(items, greyedOut) {
   const cid = (items[0] && items[0].CustomerId) || '';
   if (greyedOut || !cid) return '';
-  const pending = allRecords.some(r => r.CustomerId === cid && r.Channel === 'TikTok' && r.Status === 'Pagado');
-  return pending
+  return tiktokPendingCustIds.has(cid)
     ? `<span class="tiktok-pending-badge" title="Ver pedido de TikTok pendiente" style="display:inline-flex;align-items:center;background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-border);border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px;cursor:pointer;text-decoration:underline dotted">Tiene Pedido de TikTok</span>`
     : '';
 }
@@ -431,7 +529,7 @@ function renderSearchFilterBar(totalCount) {
   ).join('');
   bar.querySelectorAll('.search-filter-btn').forEach(btn => btn.addEventListener('click', () => {
     searchFilter = btn.dataset.filter;
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
+    renderSearchResults();
   }));
 }
 
@@ -892,7 +990,6 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
   pendingStatusOrderIds.add(id);
   dataEpoch++; // invalidate every fetch already in flight
   renderAll(); // row now visible but greyed out + disabled
-  if (searchSelectedCliente) runSearch(searchSelectedCliente);
   try {
     const rec = allRecords.find(r => r.ID === id);
     const fields = { Status: status };
@@ -908,7 +1005,6 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
     pendingStatusOrderIds.delete(id);
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll(); // instant feedback from the local mutation above
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     logStatusTiming(id, status, _tNet, performance.now() - _t0, result._timings);
     showToast(linkTrackingId ? `✓ ${status} · vinculado` : `✓ Estado actualizado a ${status}`);
     // Confirm against the server once, right away, instead of waiting up
@@ -919,7 +1015,6 @@ async function updateOrderStatusNew(id, status, linkTrackingId) {
   } catch (e) {
     pendingStatusOrderIds.delete(id);
     renderAll(); // bring the row back exactly as it was, fully interactive
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast('Error: ' + e.message + ' — el pedido sigue aquí, nada se perdió');
   }
 }
@@ -1224,7 +1319,6 @@ async function scmApply() {
   closeModal();
   updateUndoRedoButtons();
   renderAll();
-  if (searchSelectedCliente) runSearch(searchSelectedCliente);
   showToast(failed
     ? `${done} actualizado${done !== 1 ? 's' : ''}, ${failed} con error: ${lastError}`
     : `✓ ${done} pedido${done !== 1 ? 's' : ''} actualizado${done !== 1 ? 's' : ''}`);
@@ -1308,12 +1402,32 @@ function getCached(qs, onFresh) {
   return cached;
 }
 
+// Customer IDs that have a paid-but-unpacked TikTok order. Rebuilt once per
+// data change instead of scanning every record for every customer group on
+// every render (that scan was quadratic and froze the page once the
+// archive was loaded).
+let tiktokPendingCustIds = new Set();
+
+// Manual orders created on THIS screen. They show instantly (greyed while
+// saving) and are merged over every server snapshot until the server's own
+// data contains them -- so a poll that lands mid-save can never make them
+// vanish and come back. Key = local temp id.
+const localCreates = new Map();
+let localCreateCounter = 0;
+
 function rebuildAllRecords() {
-  allRecords = [...activeRecords, ...enviadoRecords, ...archivedRecords];
+  const serverIds = new Set(activeRecords.map(r => r.ID));
+  const locals = [];
+  localCreates.forEach((rec, key) => {
+    if (!rec._pending && serverIds.has(rec.ID)) { localCreates.delete(key); return; } // server has it now
+    locals.push(rec);
+  });
+  allRecords = [...activeRecords, ...locals, ...enviadoRecords, ...archivedRecords];
+  tiktokPendingCustIds = new Set();
+  allRecords.forEach(r => { if (r.CustomerId && r.Channel === 'TikTok' && r.Status === 'Pagado') tiktokPendingCustIds.add(r.CustomerId); });
 }
 
-function applyActiveData(activeData, customersData, matchesData) {
-  activeRecords = (activeData.records || []).map(mapFromApi);
+function applyCustomers(customersData) {
   allCustomers = {};
   customersById = {};
   (customersData.records || []).forEach(c => {
@@ -1325,6 +1439,11 @@ function applyActiveData(activeData, customersData, matchesData) {
     const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases, customerId: custId };
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
+}
+
+function applyActiveData(activeData, customersData, matchesData) {
+  activeRecords = (activeData.records || []).map(mapFromApi);
+  applyCustomers(customersData);
   pendingMatchesByShopifyOrderId = {};
   (matchesData.records || []).forEach(m => {
     pendingMatchesByShopifyOrderId[String(m['Shopify Order ID'])] = m;
@@ -1408,7 +1527,6 @@ async function loadRecords() {
   try {
     await fetchActive();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
     console.error('loadRecords failed:', e);
     showToast('Error al cargar datos: ' + e.message);
@@ -1423,14 +1541,14 @@ async function manualRefresh() {
   try {
     tabDataLoaded.enviado = false;
     tabDataLoaded.archivo = false;
+    historyPromise = null;
     enviadoRecords = [];
     archivedRecords = [];
-    const fetches = [fetchActive()];
-    if (currentTab === 'enviado') fetches.push(fetchEnviado());
-    else if (currentTab === 'archivo') fetches.push(fetchArchivo());
+    const fetches = [fetchActiveFresh(dataEpoch)];   // a manual refresh must hit the server, not the cache
+    if (currentTab === 'enviado' || searchSelectedCliente) fetches.push(fetchEnviado());
+    if (currentTab === 'archivo' || searchSelectedCliente) fetches.push(fetchArchivo());
     await Promise.all(fetches);
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
     showToast('Error al cargar datos');
   } finally {
@@ -1460,14 +1578,12 @@ async function autoRefresh() {
   if (pendingStatusOrderIds.size > 0) return; // a write is mid-flight
   const epoch = dataEpoch;
   try {
-    if (currentTab === 'enviado' && tabDataLoaded.enviado) await fetchEnviado();
-    else if (currentTab === 'archivo' && tabDataLoaded.archivo) await fetchArchivo();
-    else if (currentTab !== 'enviado' && currentTab !== 'archivo') {
-      if (!(await fetchActiveFresh(epoch))) return;
-    }
+    // The archive is never re-downloaded on a poll: it only grows through
+    // changes made here (applied locally) and it is by far the biggest list.
+    if (currentTab === 'enviado' && tabDataLoaded.enviado && !searchSelectedCliente) await fetchEnviado();
+    else if (!(await fetchActiveFresh(epoch))) return;
     if (epoch !== dataEpoch) return;
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) { /* silent */ }
 }
 
@@ -1477,7 +1593,6 @@ async function loadEnviadoTab() {
   try {
     await fetchEnviado();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
     if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadEnviadoTab();return false">Reintentar</a></div>';
     showToast('Error al cargar pedidos enviados');
@@ -1490,7 +1605,6 @@ async function loadArchivoTab() {
   try {
     await fetchArchivo();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
   } catch (e) {
     if (el) el.innerHTML = '<div class="empty-state">Error al cargar. <a href="#" onclick="loadArchivoTab();return false">Reintentar</a></div>';
     showToast('Error al cargar archivo');
@@ -1511,7 +1625,6 @@ async function updateStatus(id, status) {
     }
     updateUndoRedoButtons(); // this change is now undoable -- refresh the button state
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     const msgs = { 'Pagado': '✓ Marcado como pagado', 'Enviado': '✓ Marcado como enviado', 'No Pagado': '↩ Revertido a No Pagado' };
     showToast(msgs[status] || '✓ Actualizado');
   } catch (e) { showToast('Error: ' + e.message); }
@@ -1555,7 +1668,6 @@ function requestRenameCliente(group) {
         r.Cliente = newName;
       }
       renderAll();
-      if (searchSelectedCliente) runSearch(searchSelectedCliente);
       showToast(`✓ ${targets.length} pedidos actualizados a "${newName}"`);
     } catch (e) { showToast('Error: ' + e.message); }
   });
@@ -1571,7 +1683,6 @@ function requestDelete(id, producto) {
     pendingStatusOrderIds.add(id);
     dataEpoch++;
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     try {
       const result = await apiPost({ action: 'delete_order', order_id: id });
       if (result.result !== 'deleted') throw new Error(result.error || 'Error');
@@ -1582,12 +1693,10 @@ function requestDelete(id, producto) {
       rebuildAllRecords();
       dataEpoch++;
       renderAll();
-      if (searchSelectedCliente) runSearch(searchSelectedCliente);
       showToast('✓ Pedido eliminado');
     } catch (e) {
       pendingStatusOrderIds.delete(id);
       renderAll(); // bring the row back exactly as it was, fully interactive
-      if (searchSelectedCliente) runSearch(searchSelectedCliente);
       showToast('Error: ' + e.message + ' — el pedido sigue aquí, nada se perdió');
     }
   });
@@ -1610,7 +1719,6 @@ async function saveEdit(id) {
     if (rec) { rec.Cliente = cliente; rec.Producto = producto; if (precioInput) rec.Precio = precio; rec.Status = status; rec.Notas = notas; }
     closeModal();
     renderAll();
-    if (searchSelectedCliente) runSearch(searchSelectedCliente);
     showToast('✓ Pedido actualizado');
   } catch (e) { showToast('Error: ' + e.message); }
 }
@@ -1630,8 +1738,6 @@ async function createRecord() {
   if (!items.length) { showToast('Falta al menos un producto'); return; }
 
   // Snapshot + clear the form IMMEDIATELY, before any network call.
-  // A second tap now finds an empty form (no duplicates), and the next
-  // order can be typed while this one saves in the background.
   const snapshot = { cliente, channel, status, isGift, recipient };
   document.getElementById('new-cliente').value = '';
   document.getElementById('new-channel').value = 'Manual';
@@ -1641,116 +1747,80 @@ async function createRecord() {
   document.getElementById('gift-recipient-section').style.display = 'none';
   bulkItems = [{ producto: '', precio: '', notas: '' }];
   renderBulkItems();
-  showToast('Guardando…');
 
-  let saved = 0;
-  try {
-    for (const item of items) {
-      if (isGift) {
-        // Order for the buyer — NO MANDAR prefix, price 0, status Pagado
-        const buyerProduct = 'NO MANDAR - ' + item.producto;
-        const buyerResult = await apiPost({
-          action: 'create_order',
-          username: cliente,
-          channel: 'Manual',
-          products: buyerProduct,
-          price: 0,
-          notes: item.notas || '',
-          shopify_order_id: '',
-          status: 'Pagado'
-        });
-        if (buyerResult.result === 'created') {
-          activeRecords.push({
-            ID: buyerResult.order_id,
-            Cliente: cliente,
-            Channel: 'Manual',
-            Producto: buyerProduct,
-            Precio: 0,
-            Notas: item.notas || '',
-            Status: 'Pagado',
-            CustomerId: buyerResult.customer_id || '',
-            'Fecha Creación': new Date().toISOString()
-          });
-          rebuildAllRecords();
-        }
-
-        // Order for the recipient — REGALO DE prefix, price 0, status Pagado
-        const recipientProduct = 'REGALO DE ' + cliente + ' - ' + item.producto;
-        const recipientResult = await apiPost({
-          action: 'create_order',
-          username: recipient,
-          channel: 'Manual',
-          products: recipientProduct,
-          price: 0,
-          notes: item.notas || '',
-          shopify_order_id: '',
-          status: 'Pagado'
-        });
-        if (recipientResult.result === 'created') {
-          activeRecords.push({
-            ID: recipientResult.order_id,
-            Cliente: recipient,
-            Channel: 'Manual',
-            Producto: recipientProduct,
-            Precio: 0,
-            Notas: item.notas || '',
-            Status: 'Pagado',
-            CustomerId: recipientResult.customer_id || '',
-            'Fecha Creación': new Date().toISOString()
-          });
-          rebuildAllRecords();
-        }
-
-      } else {
-        // Normal order
-        const result = await apiPost({
-          action: 'create_order',
-          username: cliente,
-          channel,
-          products: item.producto,
-          price: parseFloat(item.precio) || 0,
-          notes: item.notas || '',
-          shopify_order_id: '',
-          status
-        });
-        if (result.result === 'created') {
-          activeRecords.push({
-            ID: result.order_id,
-            Cliente: cliente,
-            Channel: channel,
-            Producto: item.producto,
-            Precio: parseFloat(item.precio) || 0,
-            Notas: item.notas || '',
-            Status: result.status || 'No Pagado',
-            CustomerId: result.customer_id || '',
-            'Fecha Creación': new Date().toISOString()
-          });
-          rebuildAllRecords();
-        }
-            }
-      saved++;
+  // Build every order that will be created and show them ALL right now
+  // (greyed while saving). Same idea as Urgent on Empacar: the screen
+  // reflects the user's own action instantly; the server catches up.
+  const knownId = name => { const c = allCustomers[normUser(name)] || allCustomers[String(name).trim().toLowerCase()]; return c ? c.customerId : ''; };
+  const now = new Date().toISOString();
+  const jobs = [];                // { key, payload, item }
+  const addJob = (payload, item) => {
+    const key = 'local-' + (++localCreateCounter);
+    const rec = {
+      ID: key, Cliente: payload.username, Channel: payload.channel, Producto: payload.products,
+      Precio: payload.price, Notas: payload.notes, Status: payload.status, CustomerId: knownId(payload.username),
+      'Fecha Creación': now, _local: true, _pending: true
+    };
+    localCreates.set(key, rec);
+    jobs.push({ key, payload, item });
+  };
+  items.forEach(item => {
+    if (isGift) {
+      addJob({ action: 'create_order', username: cliente, channel: 'Manual', products: 'NO MANDAR - ' + item.producto, price: 0, notes: item.notas || '', shopify_order_id: '', status: 'Pagado' }, item);
+      addJob({ action: 'create_order', username: recipient, channel: 'Manual', products: 'REGALO DE ' + cliente + ' - ' + item.producto, price: 0, notes: item.notas || '', shopify_order_id: '', status: 'Pagado' }, item);
+    } else {
+      addJob({ action: 'create_order', username: cliente, channel, products: item.producto, price: parseFloat(item.precio) || 0, notes: item.notas || '', shopify_order_id: '', status }, item);
     }
+  });
+  rebuildAllRecords();
+  renderAll();
 
-    renderAll();
-    showToast(isGift ? '✓ Regalo registrado (2 entradas)' : `✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
-  } catch (e) {
-    renderAll();
-    // Put back only the items that did NOT save, and only if the user
-    // hasn't already started typing a new order.
-    const formEmpty = !document.getElementById('new-cliente').value.trim();
-    const unsaved = items.slice(saved);
-    if (formEmpty && unsaved.length) {
-      document.getElementById('new-cliente').value = snapshot.cliente;
-      document.getElementById('new-channel').value = snapshot.channel;
-      document.getElementById('new-status').value = snapshot.status;
-      document.getElementById('gift-checkbox').checked = snapshot.isGift;
-      document.getElementById('gift-recipient').value = snapshot.recipient;
-      document.getElementById('gift-recipient-section').style.display = snapshot.isGift ? '' : 'none';
-      bulkItems = unsaved.map(i => ({ ...i }));
-      renderBulkItems();
+  // Save one at a time (keeps a brand-new customer from being created
+  // twice by two parallel requests). Each row turns normal as it lands.
+  let failedAt = -1, errMsg = '';
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+    const rec = localCreates.get(job.key);
+    try {
+      const result = await apiPost(job.payload);
+      if (result.result !== 'created') throw new Error(result.error || 'Error');
+      rec.ID = result.order_id;
+      rec.CustomerId = result.customer_id || rec.CustomerId;
+      rec.Status = result.status || rec.Status;
+      rec._pending = false;          // stays merged in until a fetch returns it
+      rebuildAllRecords();
+      renderAll();
+    } catch (e) {
+      failedAt = i; errMsg = e.message;
+      break;
     }
-    showToast('Error: ' + e.message + (saved ? ` (${saved} guardado${saved > 1 ? 's' : ''})` : ''));
   }
+
+  if (failedAt === -1) {
+    showToast(isGift ? '✓ Regalo registrado (2 entradas)' : `✓ ${items.length} pedido${items.length > 1 ? 's' : ''} agregado${items.length > 1 ? 's' : ''}`);
+    return;
+  }
+
+  // Remove every order that did not save, and give the unsaved products
+  // back to the form (only if the user hasn't started a new order).
+  const unsavedJobs = jobs.slice(failedAt);
+  unsavedJobs.forEach(j => localCreates.delete(j.key));
+  rebuildAllRecords();
+  renderAll();
+  const unsavedItems = [...new Set(unsavedJobs.map(j => j.item))];
+  const savedCount = failedAt;
+  const formEmpty = !document.getElementById('new-cliente').value.trim();
+  if (formEmpty && unsavedItems.length) {
+    document.getElementById('new-cliente').value = snapshot.cliente;
+    document.getElementById('new-channel').value = snapshot.channel;
+    document.getElementById('new-status').value = snapshot.status;
+    document.getElementById('gift-checkbox').checked = snapshot.isGift;
+    document.getElementById('gift-recipient').value = snapshot.recipient;
+    document.getElementById('gift-recipient-section').style.display = snapshot.isGift ? '' : 'none';
+    bulkItems = unsavedItems.map(i => ({ ...i }));
+    renderBulkItems();
+  }
+  showToast('Error: ' + errMsg + (savedCount ? ` (${savedCount} guardado${savedCount > 1 ? 's' : ''})` : '') + ' — lo no guardado volvió al formulario');
 }
 
 // ── SORTING ──────────────────────────────────────────────────
@@ -1765,7 +1835,7 @@ function sortRecords(records) {
   if (currentSort === 'newest') return [...records].sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0));
   if (currentSort === 'oldest') return [...records].sort((a, b) => new Date(a['Fecha Creación'] || 0) - new Date(b['Fecha Creación'] || 0));
   if (currentSort === 'tiktok-ready') {
-    const hasTikTok = r => r.CustomerId && allRecords.some(x => x.CustomerId === r.CustomerId && x.Channel === 'TikTok' && x.Status === 'Pagado');
+    const hasTikTok = r => !!r.CustomerId && tiktokPendingCustIds.has(r.CustomerId);
     return [...records].sort((a, b) => {
       const ta = hasTikTok(a) ? 0 : 1;
       const tb = hasTikTok(b) ? 0 : 1;
@@ -1776,7 +1846,7 @@ function sortRecords(records) {
   return records;
 }
 
-function setSort(val) { currentSort = val; renderAll(); if (searchSelectedCliente) runSearch(searchSelectedCliente); }
+function setSort(val) { currentSort = val; renderAll(); }
 
 // ── RENDERING ────────────────────────────────────────────────
 function renderOrderRow(r, showActions) {
@@ -1851,12 +1921,12 @@ function renderOrderRow(r, showActions) {
     btn.addEventListener('click', () => showStatusModal(id, status));
     actionCell.appendChild(btn);
   }
-  if (pendingStatusOrderIds.has(id)) {
+  row.appendChild(info); row.appendChild(hoverZone); row.appendChild(precio); row.appendChild(pill); row.appendChild(actionCell);
+  // Must run after the buttons are in the row -- before, it found nothing.
+  if (pendingStatusOrderIds.has(id) || r._pending) {
     row.classList.add('row-pending-save');
     row.querySelectorAll('button').forEach(b => b.disabled = true);
   }
-
-  row.appendChild(info); row.appendChild(hoverZone); row.appendChild(precio); row.appendChild(pill); row.appendChild(actionCell);
   row.addEventListener('mouseenter', () => hoverZone.classList.add('visible'));
   row.addEventListener('mouseleave', () => hoverZone.classList.remove('visible'));
   return row;
@@ -1867,6 +1937,7 @@ function renderOrderRow(r, showActions) {
 function customerGroupKey(r) {
   const cid = (r.CustomerId || '').trim();
   if (cid) return 'cid:' + cid.toLowerCase();
+  if (r._local) return 'local:' + normUser(r.Cliente);   // just typed, new customer, not saved yet
   // No Customer ID at all -- this order is genuinely unresolved. Give it its
   // OWN unique group (keyed by Order ID), instead of collapsing every
   // unresolved order into one shared "Sin nombre" bucket. This is what lets
@@ -1888,6 +1959,8 @@ function groupByCliente(records) {
       let name;
       if (r.CustomerId) {
         name = (customersById[r.CustomerId] || r.Cliente || 'Sin nombre').replace(/^@/, '');
+      } else if (r._local) {
+        name = (r.Cliente || 'Sin nombre').replace(/^@/, '');
       } else {
         pendingMergeCounter++;
         name = pendingMergeCounter === 1 ? 'Pendiente de fusión' : `Pendiente de fusión ${pendingMergeCounter}`;
@@ -1933,11 +2006,18 @@ function showPendingTikTokModal(custId, cliente) {
     b.addEventListener('click', () => showQCViewModal(orders[Number(b.dataset.idx)])));
 }
 
+// Big lists (Enviado/Archivo) draw this many customers first, with a
+// "Mostrar más" button -- keeps the page responsive with a large archive.
+const GROUP_PAGE = 60;
+const groupLimits = {};
+
 function renderGrouped(records, containerId, showActions) {
   const el = document.getElementById(containerId);
   el.innerHTML = '';
   if (!records.length) { el.innerHTML = '<div class="empty-state">Sin pedidos aquí</div>'; return; }
-  groupByCliente(records).forEach(grp => {
+  const allGroups = groupByCliente(records);
+  const limit = groupLimits[containerId] || GROUP_PAGE;
+  allGroups.slice(0, limit).forEach(grp => {
     const cliente = grp.name;
     const items = grp.items;
     const unpaid = items.filter(r => r.Status === 'No Pagado').reduce((s, r) => s + (r.Precio || 0), 0);
@@ -1947,11 +2027,7 @@ function renderGrouped(records, containerId, showActions) {
     const custData = allCustomers[(cliente || '').toLowerCase()];
     const shipBadge = custData && custData.shipmentCount > 0 ? ` <span class="shipment-count">(${custData.shipmentCount})</span>` : '';
     const custId = (items[0] && items[0].CustomerId) || '';
-    const hasPendingTikTok = allRecords.some(r =>
-      r.CustomerId && r.CustomerId === custId &&
-      r.Channel === 'TikTok' &&
-      r.Status === 'Pagado'
-    );
+    const hasPendingTikTok = !!custId && tiktokPendingCustIds.has(custId);
     const tikTokIndicator = hasPendingTikTok
     ? `<span class="tiktok-pending-badge" title="Ver pedido de TikTok pendiente" style="display:inline-flex;align-items:center;background:var(--green-bg);color:var(--green-text);border:1px solid var(--green-border);border-radius:99px;padding:1px 8px;font-size:10px;font-weight:600;margin-left:6px;letter-spacing:0.2px;cursor:pointer;text-decoration:underline dotted">Tiene Pedido de TikTok</span>`
     : '';
@@ -2005,6 +2081,13 @@ function renderGrouped(records, containerId, showActions) {
     items.forEach(r => group.appendChild(renderOrderRow(r, showActions)));
     el.appendChild(group);
   });
+  if (allGroups.length > limit) {
+    const more = document.createElement('button');
+    more.className = 'btn'; more.style.margin = '8px 0 16px';
+    more.textContent = `Mostrar más (${allGroups.length - limit} clientes restantes)`;
+    more.addEventListener('click', () => { groupLimits[containerId] = limit + GROUP_PAGE * 3; renderAll(); });
+    el.appendChild(more);
+  }
 }
 
 function renderAnalytics() {
@@ -2107,15 +2190,20 @@ function renderAll() {
     document.getElementById(`badge-${tab}`).classList.toggle('has-items', parseInt(document.getElementById(`badge-${tab}`).textContent) > 0);
   });
 
-  renderGrouped(activos, 'activos-list', true);
-  renderGrouped(cobrar, 'cobrar-list', true);
-  renderGrouped(enviar, 'enviar-list', true);
-  if (document.getElementById('anotado-list')) renderGrouped(anotado, 'anotado-list', true);
-  renderGrouped(enviado, 'enviado-list', true);
-  renderGrouped(archivo, 'archivo-list', false);
-  renderAnalytics();
   renderClientList();
   renderTikTokTab();
+
+  // Only ONE list is ever drawn: the search results when a search is open,
+  // otherwise the visible tab. Drawing all six hidden tabs on every change
+  // (archive = thousands of rows) is what froze clicks after a search.
+  if (searchSelectedCliente) { renderSearchResults(); return; }
+  const lists = { activos: [activos, 'activos-list', true], cobrar: [cobrar, 'cobrar-list', true], enviar: [enviar, 'enviar-list', true],
+                  anotado: [anotado, 'anotado-list', true], enviado: [enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false] };
+  const cfg = lists[currentTab];
+  if (!cfg || !document.getElementById(cfg[1])) return;
+  if (currentTab === 'enviado' && !tabDataLoaded.enviado) return;   // its loader shows "Cargando…"
+  if (currentTab === 'archivo' && !tabDataLoaded.archivo) return;
+  renderGrouped(cfg[0], cfg[1], cfg[2]);
 }
 
 function renderTikTokTab() {
@@ -2303,6 +2391,7 @@ function switchTab(tab) {
   });
   if (tab === 'enviado' && !tabDataLoaded.enviado) loadEnviadoTab();
   else if (tab === 'archivo' && !tabDataLoaded.archivo) loadArchivoTab();
+  else renderAll();   // lists are drawn lazily -- draw the one just opened
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
@@ -2316,23 +2405,11 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
   fetchShopifyPending();
   setInterval(autoRefresh, 10000);
   setInterval(fetchShopifyPending, 60000);
-  setInterval(async () => {
-    try {
-      const data = await apiGet('action=customers');
-      allCustomers = {};
-      customersById = {};
-      (data.records || []).forEach(c => {
-        const primary = String(c['Primary Username'] || '').trim();
-        const custId = String(c['Customer ID'] || '').trim();
-        if (custId) customersById[custId] = primary;
-        if (!primary) return;
-        const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
-        const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases, customerId: custId };
-        [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
-      });
-    } catch (e) { /* silent */ }
-  }, 60000);
+  // (The separate 60s customers poll was removed: autoRefresh already
+  // refreshes customers every 10s.)
 })();
+
+document.getElementById('global-search').addEventListener('keydown', handleSearchKeydown);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MERGE REVIEW MODAL
