@@ -260,7 +260,6 @@ function restoreOpenOrder() {
   if (Date.now() - (saved.ts || 0) > 30 * 60 * 1000) { sessionStorage.removeItem(OPEN_ORDER_KEY); return; }
   cameFromTab = saved.fromTab || 'pending';
   openCapture(saved.shipment, { keepTab: true });
-  showToast('La página se recargó — volviste al pedido. Revisa que estén todas las fotos.', true);
 }
 let shippedLockShown = false;
 let localFinalizeInProgress = false;
