@@ -2431,6 +2431,53 @@ function renderTikTokTab() {
   container.innerHTML = summary + `<div style="${cardStyle}">${sorted.map(rowHtml).join('')}</div>`;
 }
 
+// ---- per-order lines: background prefetch + timeout (overrides the earlier versions above) ----
+var tiktokLinesPrefetching = false;
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
+async function fetchTikTokLines(orderKeys) {
+  const need = [];
+  orderKeys.forEach(k => String(k).split('+').map(s => s.trim()).filter(Boolean).forEach(id => {
+    if (!tiktokLinesCache[id] && need.indexOf(id) < 0) need.push(id);
+  }));
+  if (!need.length) return;
+  orderKeys.forEach(k => { tiktokLinesLoading[k] = true; });
+  renderTikTokTab();
+  for (let i = 0; i < need.length; i += 30) {
+    const chunk = need.slice(i, i + 30);
+    try {
+      const data = await withTimeout(apiGet('action=tiktok_order_lines&ids=' + encodeURIComponent(chunk.join(','))), 25000);
+      chunk.forEach(id => { tiktokLinesCache[id] = (data && data.lines && data.lines[id]) || []; });
+    } catch (e) {
+      // keep the combined list; reload the page to retry
+      chunk.forEach(id => { if (!tiktokLinesCache[id]) tiktokLinesCache[id] = []; });
+    }
+  }
+  orderKeys.forEach(k => { delete tiktokLinesLoading[k]; });
+  renderTikTokTab();
+}
+
+function prefetchTikTokLines() {
+  if (tiktokLinesPrefetching) return;
+  const keys = allRecords
+    .filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado' && String(r.ID).indexOf('+') >= 0)
+    .map(r => String(r.ID))
+    .filter(k => !tiktokLinesLoading[k] && k.split('+').map(s => s.trim()).filter(Boolean).some(id => !tiktokLinesCache[id]));
+  if (!keys.length) return;
+  tiktokLinesPrefetching = true;
+  fetchTikTokLines(keys).then(() => { tiktokLinesPrefetching = false; }, () => { tiktokLinesPrefetching = false; });
+}
+
+function ensureTikTokLines(orderKey) {
+  if (!tiktokLinesPrefetching) fetchTikTokLines([String(orderKey)]);
+}
+
+var _renderTikTokTabBase = renderTikTokTab;
+renderTikTokTab = function () { _renderTikTokTabBase(); prefetchTikTokLines(); };
+
 function renderTikTokTabPrev2() {
   const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
   document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
