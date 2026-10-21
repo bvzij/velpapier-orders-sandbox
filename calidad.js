@@ -582,6 +582,11 @@ function linkedOrderNotesCount(ids) {
   return allIds.map(id => ORDERS_BY_ID[id]).filter(o => o && o['Notes']).length;
 }
 
+// Small Cloudinary previews (full photo only in the lightbox) -- saves bandwidth credits.
+function calThumb(url, w) {
+  return /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_' + (w || 300) + ',c_limit,q_auto,f_auto/') : url;
+}
+
 function cardHtml(r) {
   const photos = photosOf(r);
   const ids    = orderIdsOf(r);
@@ -591,7 +596,7 @@ function cardHtml(r) {
   // tile — otherwise the counter wraps onto its own row and the card breaks.
   const visible = photos.length > 3 ? photos.slice(0, 2) : photos.slice(0, 3);
   const cells = visible.map(u =>
-    `<img src="${VP.esc(u)}" loading="lazy" alt="" data-lightbox="1" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('');
+    `<img src="${VP.esc(calThumb(u))}" loading="lazy" alt="" data-lightbox="1" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('');
   const extra = photos.length > 3
     ? `<div class="vp-qc-photos-more" data-lightbox="1" onclick="VP.lightbox('${photos[2].replace(/'/g, "\\'")}')">+${photos.length - 2}</div>`
     : '';
@@ -625,7 +630,7 @@ function listRowHtml(r) {
   const ids    = orderIdsOf(r);
   const prods  = productSummary(r);
   const thumb  = photos.length
-    ? `<img class="cal-list-thumb" src="${VP.esc(photos[0])}" loading="lazy" alt=""
+    ? `<img class="cal-list-thumb" src="${VP.esc(calThumb(photos[0], 160))}" loading="lazy" alt=""
             data-lightbox="1" onclick="VP.lightbox('${photos[0].replace(/'/g, "\\'")}')">`
     : `<div class="cal-list-thumb cal-list-thumb--empty">—</div>`;
 
@@ -797,7 +802,7 @@ function showOrderDetailModal(r) {
     ? `<div class="cal-detail-photo-group">
         <div class="cal-detail-photo-group-label">${label}</div>
         <div class="cal-detail-photos">${urls.map(u =>
-          `<img src="${VP.esc(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
+          `<img src="${VP.esc(calThumb(u, 600))}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
       </div>`
     : '';
   const photoGrid = (contentPhotos.length || boxPhotos.length)
