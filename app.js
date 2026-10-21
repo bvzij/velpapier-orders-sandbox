@@ -2176,7 +2176,7 @@ function renderAnalytics() {
 function renderClientList() {
   const el = document.getElementById('client-list-scroll');
   if (!el) return;
-  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status));
+  const active = allRecords.filter(r => ['No Pagado', 'Pagado'].includes(r.Status) && r.Channel !== 'TikTok');
   const seen = {};
   active.forEach(r => {
     const c = r.Cliente || 'Sin nombre';
