@@ -636,14 +636,20 @@ function showEditModal(id) {
 
 function closeModal() { document.getElementById('modal-container').innerHTML = ''; pendingAction = null; }
 
-function showNewOrderModal(prefillUsername) {
+function showNewOrderModal(prefillUsername, opts) {
+  opts = opts || {};
+  window._noLinkedShipment = opts.linkedShipment || '';
+  const statusOptions = opts.linkedShipment ? ['Anotado', 'Pagado', 'No Pagado'] : ['No Pagado', 'Pagado'];
+  const defaultStatus = opts.status || 'No Pagado';
   const c = document.getElementById('modal-container');
-  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div><div class="edit-form">
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div>${opts.linkedShipment ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Se vincula a la orden de TikTok de este envío</div>' : ''}<div class="edit-form">
     <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" value="${escapeHtml(prefillUsername || '')}" />
     <select id="no-channel">
       <option value="Manual" selected>Manual</option>
       <option value="TikTok">TikTok</option>
       <option value="Shopify">Shopify</option>
+    </select>
+    <select id="no-status">${statusOptions.map(s => `<option value="${s}"${s === defaultStatus ? ' selected' : ''}>${s}</option>`).join('')}
     </select>
     <textarea id="no-products" rows="3" placeholder="2x Libreta A5 - Cobre&#10;1x Libreta A5 - Cafe"></textarea>
     <input type="number" id="no-price" placeholder="Precio" min="0" step="1" />
@@ -669,6 +675,10 @@ async function submitNewOrder() {
   const price = parseFloat(document.getElementById('no-price').value) || 0;
   const notes = document.getElementById('no-notes').value.trim();
   const shopifyId = document.getElementById('no-shopify-id').value.trim();
+  const statusSel = document.getElementById('no-status');
+  const status = statusSel ? statusSel.value : 'No Pagado';
+  const linked = (status === 'Anotado' && channel !== 'TikTok') ? (window._noLinkedShipment || '') : '';
+  if (status === 'Anotado' && !linked && channel !== 'TikTok') { showToast('Anotado necesita una orden de TikTok vinculada'); return; }
   if (!username || !products) { showToast('Faltan datos'); return; }
 
   isSubmittingNewOrder = true;
@@ -680,10 +690,10 @@ async function submitNewOrder() {
 
   try {
     const _t0 = performance.now();
-    const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId });
+const result = await apiPost({ action: 'create_order', username, channel, products, price, notes, shopify_order_id: shopifyId, status, linked_shipment: linked });
     const _tTotal = performance.now() - _t0;
     if (result.result !== 'created') throw new Error(result.error || 'Error');
-    allRecords.push({ ID: result.order_id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', ShopifyOrderId: shopifyId, 'Fecha Creación': new Date().toISOString() });
+    allRecords.push({ ID: result.order_id, Cliente: username, Channel: channel, Producto: products, Precio: price, Notas: notes, Status: result.status || 'No Pagado', CustomerId: result.customer_id || '', ShopifyOrderId: shopifyId, LinkedShipment: linked, 'Fecha Creación': new Date().toISOString() });
     closeModal();
     renderAll();
     showToast('✓ Orden agregada');
@@ -2271,7 +2281,159 @@ function setTikTokAll(collapsed) {
   renderTikTokTab();
 }
 
+var tiktokOpen = {};
+function toggleTikTokOrder(id) { tiktokOpen[id] = !tiktokOpen[id]; renderTikTokTab(); }
+
+function showTikTokAddModal(id) {
+  const r = allRecords.find(x => String(x.ID) === String(id) && x.Channel === 'TikTok');
+  if (!r) return;
+  if (!r.TrackingId) { showToast('Esta orden aún no tiene guía para vincular'); return; }
+  showNewOrderModal(r.Cliente, { linkedShipment: r.TrackingId, status: 'Anotado' });
+}
+
 function renderTikTokTab() {
+  const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
+  document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
+
+  const container = document.getElementById('tiktok-list');
+  if (!container) return;
+
+  if (tikTokOrders.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:1rem 0">Sin órdenes TikTok pendientes</div>';
+    return;
+  }
+
+  const sortMode = tiktokSort;
+  const dayOf = r => (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha';
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const yestStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const dayLabel = day => {
+    if (day === 'Sin fecha') return day;
+    const d = new Date(day + 'T12:00:00');
+    const txt = d.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'short' });
+    return (day === todayStr ? 'Hoy · ' : day === yestStr ? 'Ayer · ' : '') + txt;
+  };
+  const byLetters = (a, b) => String(a).localeCompare(String(b), 'es');
+
+  // Products of one order, alphabetical by product name
+  const prodList = producto => {
+    const items = VP.parseProducts(producto || '').slice().sort((a, b) => byLetters(a.name, b.name));
+    if (!items.length) return '<div style="font-size:12px;color:var(--text-faint);padding:2px 0">Sin detalle de productos</div>';
+    return items.map(p => `<div style="display:flex;gap:10px;padding:2px 0;font-size:12px"><span style="font-weight:700;min-width:30px">${escapeHtml(p.qty)}×</span><span>${escapeHtml(p.name)}</span></div>`).join('');
+  };
+  const sectionHtml = (titleHtml, producto, statusTxt) => `
+    <div style="margin-top:10px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:var(--text-muted);margin-bottom:2px">${titleHtml}${statusTxt ? ` <span style="font-weight:400;text-transform:none">· ${escapeHtml(statusTxt)}</span>` : ''}</div>
+      ${prodList(producto)}
+    </div>`;
+
+  // Shopify / Manual orders written onto this TikTok shipment (Linked Shipment = tracking ID)
+  const linkedFor = r => {
+    const tid = String(r.TrackingId || '').trim();
+    if (!tid) return [];
+    return allRecords
+      .filter(x => x.Channel !== 'TikTok' && String(x.LinkedShipment || '').trim() === tid)
+      .sort((a, b) => (a.Channel === b.Channel ? 0 : a.Channel === 'Shopify' ? -1 : 1));
+  };
+  const linkedTitle = x => {
+    if (x.Channel === 'Shopify') {
+      const n = String(x.ShopifyOrderNumber || '').replace(/^#/, '');
+      const label = n ? 'Shopify #' + n : 'Shopify';
+      return x.ShopifyOrderId
+        ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeHtml(x.ShopifyOrderId)}" target="_blank" rel="noopener noreferrer" class="notas-link">${escapeHtml(label)}</a>`
+        : escapeHtml(label);
+    }
+    return 'Manual';
+  };
+
+  const rowHtml = (r, showDay) => {
+    const key = String(r.ID);
+    const open = !!tiktokOpen[key];
+    const username = escapeHtml((r.Cliente || '—').replace(/^@/, ''));
+    const price = r.Precio ? formatMXN(r.Precio) : '—';
+    const tracking = escapeHtml(r.TrackingId || '');
+    const linked = linkedFor(r);
+    const dayTxt = showDay
+      ? ` <span style="font-weight:400;font-size:11px;color:var(--text-faint)">· ${escapeHtml(showDay === 'paid' ? formatDateTime(r.OrderDate || r['Fecha Creación']) : dayOf(r))}</span>`
+      : '';
+    const linkedTxt = linked.length
+      ? ` <span style="font-weight:400;font-size:11px;color:var(--green-text)">· +${linked.length} vinculado${linked.length !== 1 ? 's' : ''}</span>`
+      : '';
+    let body = '';
+    if (open) {
+      body = `<div style="padding:4px 12px 12px 30px;background:var(--surface2);border-top:0.5px solid var(--border)">`
+        + sectionHtml('TikTok', r.Producto, '')
+        + linked.map(x => sectionHtml(linkedTitle(x), x.Producto, x.Status)).join('')
+        + `</div>`;
+    }
+    return `
+      <div style="border-bottom:0.5px solid var(--border)">
+        <div data-id="${escapeHtml(key)}" onclick="if(!event.target.closest('a,button'))toggleTikTokOrder(this.dataset.id)" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:10px 12px;gap:12px">
+          <div style="min-width:0">
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">${open ? '▾' : '▸'} ${username}${dayTxt}${linkedTxt}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${shopifyOrderLine(r)}</div>
+            ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">Guía ${tracking}</div>` : ''}
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;white-space:nowrap">
+            <button class="btn btn-xs" data-id="${escapeHtml(key)}" onclick="showTikTokAddModal(this.dataset.id)">+ Agregar</button>
+            <span style="font-size:13px;font-weight:600">${price}</span>
+          </div>
+        </div>
+        ${body}
+      </div>`;
+  };
+
+  const cardStyle = 'background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);margin-bottom:1rem;overflow:hidden';
+  const byName = (a, b) => byLetters(a.Cliente || '', b.Cliente || '');
+  const groups = {};
+  tikTokOrders.forEach(r => { const d = dayOf(r); (groups[d] = groups[d] || []).push(r); });
+  const daysDesc = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+  const isFlat = ['az', 'za', 'paid', 'paidold'].includes(sortMode);
+  const opt = (v, t) => `<option value="${v}"${sortMode === v ? ' selected' : ''}>${t}</option>`;
+
+  const summary = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:12px;color:var(--text-muted)">
+      <span><strong>${tikTokOrders.length}</strong> órdenes pendientes · ${daysDesc.length} día${daysDesc.length !== 1 ? 's' : ''}</span>
+      ${isFlat ? '' : `<span style="order:2;display:flex;gap:6px;white-space:nowrap">
+        <button class="refresh-btn" onclick="setTikTokAll(false)">Expandir todo</button>
+        <button class="refresh-btn" onclick="setTikTokAll(true)">Colapsar todo</button>
+      </span>`}
+      <select class="sort-select" style="margin-left:auto;order:3" onchange="setTikTokSort(this.value)">
+        ${opt('newest', 'Importación: más reciente')}
+        ${opt('oldest', 'Importación: más antigua')}
+        ${opt('paid', 'Fecha de pago: más reciente')}
+        ${opt('paidold', 'Fecha de pago: más antigua')}
+        ${opt('az', 'Nombre: A → Z')}
+        ${opt('za', 'Nombre: Z → A')}
+      </select>
+    </div>`;
+
+  if (isFlat) {
+    const ts = r => new Date(r.OrderDate || r['Fecha Creación'] || 0).getTime();
+    let sorted;
+    if (sortMode === 'paid') sorted = [...tikTokOrders].sort((a, b) => ts(b) - ts(a));
+    else if (sortMode === 'paidold') sorted = [...tikTokOrders].sort((a, b) => ts(a) - ts(b));
+    else { sorted = [...tikTokOrders].sort(byName); if (sortMode === 'za') sorted.reverse(); }
+    container.innerHTML = summary + `<div style="${cardStyle}">${sorted.map(r => rowHtml(r, sortMode.startsWith('paid') ? 'paid' : true)).join('')}</div>`;
+    return;
+  }
+
+  const days = sortMode === 'oldest' ? [...daysDesc].reverse() : daysDesc;
+  container.innerHTML = summary + days.map(day => {
+    const orders = [...groups[day]].sort(byName);
+    const collapsed = tiktokCollapsed[day] !== undefined ? tiktokCollapsed[day] : day !== daysDesc[0];
+    return `
+      <div style="${cardStyle}">
+        <div onclick="toggleTikTokDay('${day}')" style="cursor:pointer;padding:12px;background:var(--surface2);${collapsed ? '' : 'border-bottom:0.5px solid var(--border);'}display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="font-size:12px;font-weight:700;text-transform:capitalize;color:var(--text)">${collapsed ? '▸' : '▾'} Importado · ${escapeHtml(dayLabel(day))}</div>
+          <div style="font-size:11px;color:var(--text-muted);white-space:nowrap">${orders.length} orden${orders.length !== 1 ? 'es' : ''}</div>
+        </div>
+        ${collapsed ? '' : orders.map(r => rowHtml(r, false)).join('')}
+      </div>`;
+  }).join('');
+}
+
+function renderTikTokTabPrev() {
   const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
   document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
 
