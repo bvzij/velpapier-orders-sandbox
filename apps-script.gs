@@ -365,6 +365,7 @@ function doGet(e) {
     if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
+    if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
 
     // Ajustes-only tools -- duplicate finders/mergers, product merge
     // search/history. Staff role is a valid token but not allowed here.
@@ -3591,6 +3592,40 @@ function getShopifyMatches(e) {
 // ═══════════════════════════════════════════════════════════════════════════
 // TIKTOK IMPORT HISTORY — accessor + writer
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Per-order product lines for combined TikTok shipments. The Orders row keeps ONE
+// merged Products string for a combined shipment, so the split per component order
+// comes from TikTok Import History. Read-only.  ?ids=586684395139335992,586684693768800056
+function getTikTokOrderLines(e) {
+  const wanted = {};
+  String(e.parameter.ids || '').split(',').forEach(s => { const id = s.replace(/\D/g, ''); if (id) wanted[id] = true; });
+  if (!Object.keys(wanted).length) return jsonResponse({ lines: {} });
+  const sheet = getTikTokImportHistorySheet();
+  if (!sheet || sheet.getLastRow() < 2) return jsonResponse({ lines: {} });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iId = h.indexOf('Order ID'), iName = h.indexOf('Product Name');
+  const iVar = h.indexOf('Variation'), iQty = h.indexOf('Quantity');
+  if (iId < 0 || iName < 0) return jsonResponse({ lines: {} });
+  const ids = readColumn(sheet, iId), names = readColumn(sheet, iName);
+  const vars = iVar >= 0 ? readColumn(sheet, iVar) : [];
+  const qtys = iQty >= 0 ? readColumn(sheet, iQty) : [];
+  const lines = {}, seen = {};
+  ids.forEach((v, i) => {
+    const id = String(v || '').replace(/\D/g, '');
+    if (!wanted[id]) return;
+    const name = String(names[i] || '').trim();
+    if (!name) return;
+    const variation = String(vars[i] || '').trim();
+    const label = name + (variation ? ' (' + variation + ')' : '');
+    const q = parseInt(qtys[i], 10);
+    const qty = q > 0 ? q : 1;
+    const key = id + '|' + label + '|' + qty;
+    if (seen[key]) return;   // the same import row sent twice
+    seen[key] = true;
+    (lines[id] = lines[id] || []).push({ qty: qty, name: label });
+  });
+  return jsonResponse({ lines: lines });
+}
 
 function getTikTokImportHistorySheet() {
   return openSheetCached(ORDERS_SHEET_ID).getSheetByName('TikTok Import History');
