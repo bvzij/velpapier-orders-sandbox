@@ -7141,3 +7141,90 @@ function mayoreoDeleteOrderAction(body) {
 function logAuditSafe(action, target, details) {
   try { logAuditEvent(action, 'Mayoreo', target, details); } catch (e) {}
 }
+
+// ─── QC photo auto-archive (Cloudinary storage) ─────────────────────────
+// Shipped (Enviado) QC rows packed more than QC_PHOTO_KEEP_DAYS ago: deletes
+// their Content/Box photos from Cloudinary, then points Content1 + Box1 at
+// the shared ARCHIVADO placeholder and clears the other photo slots.
+// The placeholder itself is never deleted. If a run fails halfway, the next
+// run retries: already-deleted photos come back "not_found" and the row is
+// still switched to the placeholder.
+// Run archiveOldQcPhotosDryRun() from the dropdown to see counts only.
+const QC_PHOTO_KEEP_DAYS = 45;
+const QC_ARCHIVE_MAX_ROWS = 800;   // per run; the next run picks up the rest
+const QC_PLACEHOLDER_ID = 'velpapier/qc/airtable/_archivado';
+const QC_PHOTO_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5',
+                       'Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
+
+function archiveOldQcPhotosDryRun() { return archiveOldQcPhotos(true); }
+
+function cloudinaryPublicId(url, cloud) {
+  const marker = 'res.cloudinary.com/' + cloud + '/image/upload/';
+  const i = url.indexOf(marker);
+  if (i < 0) return '';
+  let rest = url.slice(i + marker.length).split('?')[0];
+  rest = rest.replace(/^v\d+\//, '');
+  return decodeURIComponent(rest.replace(/\.[a-z0-9]+$/i, ''));
+}
+
+function archiveOldQcPhotos(dryRun) {
+  dryRun = dryRun === true;   // a trigger passes an event object -> real run
+  const p = PropertiesService.getScriptProperties();
+  const cloud = p.getProperty('CLOUDINARY_CLOUD');
+  const auth = 'Basic ' + Utilities.base64Encode(
+    p.getProperty('CLOUDINARY_API_KEY') + ':' + p.getProperty('CLOUDINARY_API_SECRET'));
+  const placeholderUrl = 'https://res.cloudinary.com/' + cloud + '/image/upload/' + QC_PLACEHOLDER_ID + '.jpg';
+
+  const sheet = getQCSheet();
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iTs = h.indexOf('Timestamp'), iStatus = h.indexOf('Status');
+  if (iTs < 0 || iStatus < 0) throw new Error('QC sheet: Timestamp or Status column missing');
+  const colIdx = QC_PHOTO_COLS.map(c => h.indexOf(c));
+  const ts = readColumn(sheet, iTs), st = readColumn(sheet, iStatus);
+  const vals = colIdx.map(c => (c >= 0 ? readColumn(sheet, c) : null));
+  const cutoff = Date.now() - QC_PHOTO_KEEP_DAYS * 86400000;
+
+  const rows = [], ids = [];
+  let pending = 0;
+  for (let r = 0; r < ts.length; r++) {
+    if (String(st[r]) !== 'Enviado') continue;
+    const t = ts[r] instanceof Date ? ts[r].getTime() : Date.parse(String(ts[r] || ''));
+    if (!t || t >= cutoff) continue;
+    const urls = vals.map(v => (v ? String(v[r] || '').trim() : ''));
+    const real = urls.filter(u => u && u.indexOf(QC_PLACEHOLDER_ID) < 0);
+    if (!real.length) continue;                       // already archived
+    if (rows.length >= QC_ARCHIVE_MAX_ROWS) { pending++; continue; }
+    real.forEach(u => { const id = cloudinaryPublicId(u, cloud); if (id) ids.push(id); });
+    rows.push(r);
+  }
+
+  const summary = { dry_run: dryRun, keep_days: QC_PHOTO_KEEP_DAYS, rows: rows.length,
+                    photos: ids.length, rows_left_for_next_run: pending, deleted: 0, not_found: 0 };
+  if (dryRun || !rows.length) {
+    Logger.log(JSON.stringify(summary) + '  sample: ' + ids.slice(0, 3).join(' | '));
+    return summary;
+  }
+
+  for (let i = 0; i < ids.length; i += 100) {
+    const q = ids.slice(i, i + 100).map(id => 'public_ids[]=' + encodeURIComponent(id)).join('&');
+    const res = UrlFetchApp.fetch('https://api.cloudinary.com/v1_1/' + cloud + '/resources/image/upload?' + q,
+      { method: 'delete', headers: { Authorization: auth }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) {
+      throw new Error('Cloudinary delete failed: ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 300));
+    }
+    const d = JSON.parse(res.getContentText()).deleted || {};
+    Object.keys(d).forEach(k => (d[k] === 'deleted' ? summary.deleted++ : summary.not_found++));
+  }
+
+  vals.forEach((v, k) => {
+    if (!v) return;
+    const isFirst = QC_PHOTO_COLS[k] === 'Content1' || QC_PHOTO_COLS[k] === 'Box1';
+    rows.forEach(r => { v[r] = isFirst ? placeholderUrl : ''; });
+    writeColumnChanges(sheet, colIdx[k], v, rows);
+  });
+
+  logAuditEvent('qc_photos_archived', 'QC', '', summary);
+  flushAudit();
+  Logger.log(JSON.stringify(summary));
+  return summary;
+}
