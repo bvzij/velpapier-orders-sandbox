@@ -265,9 +265,9 @@ async function pollCaptureUpdates() {
 // order the packer was working on instead of dumping them on the list.
 function restoreOpenOrder() {
   let saved = null;
-  try { saved = JSON.parse(sessionStorage.getItem(OPEN_ORDER_KEY) || 'null'); } catch (e) {}
+  try { saved = JSON.parse(localStorage.getItem(OPEN_ORDER_KEY) || 'null'); } catch (e) {}
   if (!saved || !saved.shipment) return;
-  if (Date.now() - (saved.ts || 0) > 30 * 60 * 1000) { sessionStorage.removeItem(OPEN_ORDER_KEY); return; }
+  if (Date.now() - (saved.ts || 0) > 10 * 60 * 1000) { try { localStorage.removeItem(OPEN_ORDER_KEY); } catch (e) {} return; }
   cameFromTab = saved.fromTab || 'pending';
   openCapture(saved.shipment, { keepTab: true });
 }
@@ -664,7 +664,7 @@ function openCapture(shipment, opts) {
   selected = shipment;
   manualTrackingId = shipment.tracking_id ? '' : 'MAN-' + Date.now();
   try {
-    sessionStorage.setItem(OPEN_ORDER_KEY, JSON.stringify({ shipment, fromTab: cameFromTab, ts: Date.now() }));
+    localStorage.setItem(OPEN_ORDER_KEY, JSON.stringify({ shipment, fromTab: cameFromTab, ts: Date.now() }));
   } catch (e) { /* best-effort */ }
   requestWakeLock();
   currentQcId = null;
@@ -747,7 +747,7 @@ async function backToPending() {
   document.getElementById('view-capture').style.display = 'none';
   releaseWakeLock();
   captureGen++;
-  try { sessionStorage.removeItem(OPEN_ORDER_KEY); } catch (e) {}
+  try { localStorage.removeItem(OPEN_ORDER_KEY); } catch (e) {}
   selected = null;
   selectedAddons = [];
   gallery.content = [];
