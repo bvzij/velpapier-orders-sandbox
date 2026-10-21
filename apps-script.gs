@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-20.3';
+const SCRIPT_VERSION = '2026-10-20.4';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -6132,6 +6132,22 @@ function deleteMergedCustomerAction(body) {
   const deletedSnapshot = {};
   cHeaders.forEach((h, i) => { deletedSnapshot[h] = cData[loseRow][i]; });
 
+  // Orders linked to the loser AFTER the merge (e.g. a Shopify order matched
+  // on the loser's Shopify Customer ID) would be orphaned by the delete.
+  // Move them to the keeper first.
+  const keepIdForOrphans = String(record[hHeaders.indexOf('Kept Customer ID')] || '').trim();
+  const oSheetDel = getOrdersSheet();
+  const ohDel = oSheetDel.getRange(1, 1, 1, oSheetDel.getLastColumn()).getValues()[0];
+  const oCustColDel = ohDel.indexOf('Customer ID');
+  const custValsDel = readColumn(oSheetDel, oCustColDel);
+  const changedDel = [];
+  custValsDel.forEach((v, i) => { if (String(v).trim() === String(loseId).trim()) { custValsDel[i] = keepIdForOrphans; changedDel.push(i); } });
+  if (changedDel.length) {
+    if (!keepIdForOrphans) return jsonResponse({ error: 'Orders still point at this customer and the keeper is unknown — not deleted' });
+    writeColumnChanges(oSheetDel, oCustColDel, custValsDel, changedDel);
+    SpreadsheetApp.flush();
+    recalculateShipmentCountsFor([keepIdForOrphans]);
+  }
   custSheet.deleteRow(loseRow + 1);
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Limpiado');
   logAuditEvent('delete_merged_customer', 'Customer', loseId, { merge_id: mergeId, deleted_row: deletedSnapshot });
