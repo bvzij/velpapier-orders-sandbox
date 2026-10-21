@@ -406,7 +406,7 @@ function switchTab(tab) {
     btn.style.background = key === tab ? 'var(--text)' : 'var(--surface2)';
     btn.style.color = key === tab ? 'var(--surface)' : 'var(--text-muted)';
   });
-  if (tab === 'history') { historyPage = 0; renderHistoryList(); }
+  if (tab === 'history') { historyPage = 0; renderHistoryList(); loadHistoryCustomers(); }
 }
 
 function setHistorySort(mode) {
@@ -431,13 +431,41 @@ let historyPage = 0;
 // box. Product names are left out here -- unlike Calidad, QC rows don't
 // carry the full Orders data needed to resolve a product name, and
 // fetching the whole Orders sheet just for this search isn't worth it.
+// Customer ID -> "primary alias1 alias2" (lowercase). The username saved on a
+// QC row is a snapshot from the day it was packed, so after a merge or a
+// primary/alias swap it no longer matches the customer's current names. The
+// history search looks the customer up by ID instead.
+let historyCustomerText = {};
+let historyCustomersLoading = false;
+async function loadHistoryCustomers() {
+  if (historyCustomersLoading || Object.keys(historyCustomerText).length) return;
+  historyCustomersLoading = true;
+  try {
+    const data = await apiGet('action=customers');
+    const map = {};
+    (data.records || []).forEach(c => {
+      const id = String(c['Customer ID'] || '').trim();
+      if (!id) return;
+      const aliases = String(c['Aliases'] || '').split(',').map(x => x.trim()).filter(Boolean);
+      map[id] = [String(c['Primary Username'] || '').trim(), ...aliases].join(' ').toLowerCase();
+    });
+    historyCustomerText = map;
+    if (currentTab === 'history') renderHistoryList();
+  } catch (e) {
+    console.warn('[history] customers not loaded, searching by saved username only', e);
+  } finally {
+    historyCustomersLoading = false;
+  }
+}
+
 function historySearchBlob(r) {
   const ids = [
     ...String(r['TikTok Order IDs'] || '').split(' + ').filter(Boolean),
     ...String(r['Shopify Order IDs'] || '').split(' + ').filter(Boolean),
     ...String(r['Manual Order IDs'] || '').split(' + ').filter(Boolean),
   ];
-  return [r['Primary Username'] || '', r['Tracking ID'] || '', ...ids].join(' ').toLowerCase();
+  const custText = historyCustomerText[String(r['Customer ID'] || '').trim()] || '';
+  return [r['Primary Username'] || '', r['Tracking ID'] || '', custText, ...ids].join(' ').toLowerCase();
 }
 
 let historySortMode = 'new-old';
