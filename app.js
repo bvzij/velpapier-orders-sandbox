@@ -117,7 +117,9 @@ function mapFromApi(r) {
     // screen shows '—' and an edit can never write 0 over the real amount.
     Precio: r['Price'] === undefined ? null : (Number(r['Price']) || 0),
     Notas: r['Notes'] || '',
-    Status: r['Status'] || 'No Pagado',
+    // A TikTok order with a Packed Date already went through Empacar. Airtable-imported
+    // history can leave Status as "Pagado" in the sheet, so treat it as sent here.
+    Status: (r['Channel'] === 'TikTok' && r['Packed Date'] && (r['Status'] || 'No Pagado') === 'Pagado') ? 'Enviado' : (r['Status'] || 'No Pagado'),
     Channel: r['Channel'] || 'Manual',
     CustomerId: r['Customer ID'] || '',
     ShopifyOrderId: r['Shopify Order ID'] || '',
