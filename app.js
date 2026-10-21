@@ -130,6 +130,7 @@ function mapFromApi(r) {
     LinkedShipment: r['Linked Shipment'] || '',
     ArchiveDate: r['Archive Date'] || '',
     ShippedDate: r['Shipped Date'] || '',
+    OrderDate: r['Order Date'] || '',
     'Fecha Creación': r['Created Date']
   };
 }
@@ -2101,10 +2102,6 @@ function renderGrouped(records, containerId, showActions) {
     }
 
     const bulk = header.querySelector('.customer-bulk-actions');
-    const renameBtn = document.createElement('button');
-    renameBtn.className = 'btn btn-xs btn-edit'; renameBtn.textContent = '✎'; renameBtn.title = 'Cambiar nombre';
-    renameBtn.addEventListener('click', () => requestRenameCliente(grp));
-    bulk.appendChild(renameBtn);
     const addBtn = document.createElement('button');
     addBtn.className = 'btn btn-xs btn-add-quick';
     addBtn.textContent = '+'; addBtn.title = 'Agregar pedido';
@@ -2254,6 +2251,8 @@ function renderAll() {
 }
 
 var tiktokCollapsed = {};
+var tiktokSort = 'newest';
+function setTikTokSort(v) { tiktokSort = v; renderTikTokTab(); }
 
 function toggleTikTokDay(day) {
   const cur = tiktokCollapsed[day];
@@ -2284,6 +2283,7 @@ function renderTikTokTab() {
   }
 
   const dayOf = r => (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha';
+  const currentSort = tiktokSort;   // this tab has its own sort, separate from the header one
   const todayStr = new Date().toISOString().slice(0, 10);
   const yestStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
   const dayLabel = day => {
@@ -2300,7 +2300,7 @@ function renderTikTokTab() {
     return `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
         <div style="min-width:0">
-          <div style="font-weight:600;font-size:13px;margin-bottom:2px">${username}${showDay ? ` <span style="font-weight:400;font-size:11px;color:var(--text-faint)">· ${escapeHtml(dayOf(r))}</span>` : ''}</div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:2px">${username}${showDay ? ` <span style="font-weight:400;font-size:11px;color:var(--text-faint)">· ${escapeHtml(showDay === 'paid' ? formatDateTime(r.OrderDate || r['Fecha Creación']) : dayOf(r))}</span>` : ''}</div>
           <div style="font-size:12px;color:var(--text-muted)">${shopifyOrderLine(r)}</div>
           ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">Guía ${tracking}</div>` : ''}
         </div>
@@ -2317,11 +2317,27 @@ function renderTikTokTab() {
   const summary = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;font-size:12px;color:var(--text-muted)">
       <span><strong>${tikTokOrders.length}</strong> órdenes pendientes · ${daysDesc.length} día${daysDesc.length !== 1 ? 's' : ''}</span>
-      ${(currentSort === 'az' || currentSort === 'za') ? '' : `<span>
+      <select class="sort-select" onchange="setTikTokSort(this.value)">
+        <option value="newest"${currentSort === 'newest' ? ' selected' : ''}>Importación: más reciente</option>
+        <option value="oldest"${currentSort === 'oldest' ? ' selected' : ''}>Importación: más antigua</option>
+        <option value="paid"${currentSort === 'paid' ? ' selected' : ''}>Fecha de pago: más reciente</option>
+        <option value="paidold"${currentSort === 'paidold' ? ' selected' : ''}>Fecha de pago: más antigua</option>
+        <option value="az"${currentSort === 'az' ? ' selected' : ''}>Nombre: A → Z</option>
+        <option value="za"${currentSort === 'za' ? ' selected' : ''}>Nombre: Z → A</option>
+      </select>
+      ${(currentSort === 'az' || currentSort === 'za' || currentSort === 'paid' || currentSort === 'paidold') ? '' : `<span>
         <button class="refresh-btn" onclick="setTikTokAll(false)">Expandir todo</button>
         <button class="refresh-btn" onclick="setTikTokAll(true)">Colapsar todo</button>
       </span>`}
     </div>`;
+
+  // Date paid: one flat list, each row shows its real order time
+  if (currentSort === 'paid' || currentSort === 'paidold') {
+    const ts = r => new Date(r.OrderDate || r['Fecha Creación'] || 0).getTime();
+    const sortedPaid = [...tikTokOrders].sort((a, b) => currentSort === 'paid' ? ts(b) - ts(a) : ts(a) - ts(b));
+    container.innerHTML = summary + `<div style="${cardStyle}">${sortedPaid.map(r => rowHtml(r, 'paid')).join('')}</div>`;
+    return;
+  }
 
   // A→Z / Z→A: one flat list, day shown on each row
   if (currentSort === 'az' || currentSort === 'za') {
@@ -2341,7 +2357,7 @@ function renderTikTokTab() {
       <div style="${cardStyle}">
         <div onclick="toggleTikTokDay('${day}')" style="cursor:pointer;padding:12px;background:var(--surface2);${collapsed ? '' : 'border-bottom:0.5px solid var(--border);'}display:flex;align-items:center;justify-content:space-between;gap:10px">
           <div style="font-size:12px;font-weight:700;text-transform:capitalize;color:var(--text)">${collapsed ? '▸' : '▾'} Importado · ${escapeHtml(dayLabel(day))}</div>
-          <div style="font-size:11px;color:var(--text-muted);white-space:nowrap">${orders.length} orden${orders.length !== 1 ? 'es' : ''} · ${formatMXN(total)}</div>
+          <div style="font-size:11px;color:var(--text-muted);white-space:nowrap">${orders.length} orden${orders.length !== 1 ? 'es' : ''}</div>
         </div>
         ${collapsed ? '' : orders.map(r => rowHtml(r, false)).join('')}
       </div>`;
