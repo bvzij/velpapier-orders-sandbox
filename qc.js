@@ -788,6 +788,14 @@ function parseAddonProducts(str) {
   });
 }
 
+function addonNamesText(o) {
+  const names = parseAddonProducts(o['Products'])
+    .map(p => String(p.name).replace(/\s*\n\s*/g, ', '))
+    .sort((a, b) => a.localeCompare(b, 'es'));
+  if (!names.length) return '—';
+  return names.length > 2 ? names.slice(0, 2).join(', ') + ' +' + (names.length - 2) : names.join(', ');
+}
+
 function addonQtyText(o) {
   const total = parseAddonProducts(o['Products']).reduce((s, p) => s + p.qty, 0);
   if (!total) return '—';
@@ -835,7 +843,7 @@ function renderAddonOrders() {
       </div>
       <div class="addon-text">
         <div class="addon-channel">${o['Shopify Order ID'] ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeAttr(o['Shopify Order ID'])}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline" onclick="event.stopPropagation()">${escapeHtml(addonLabel(o))}</a>` : escapeHtml(addonLabel(o))}</div>
-        <div class="addon-products">${escapeHtml(o['Order ID'])} · ${escapeHtml(addonQtyText(o))}</div>
+        <div class="addon-products">${escapeHtml(addonNamesText(o))} · ${escapeHtml(addonQtyText(o))}</div>
       </div>
     </div>
   `).join('');
