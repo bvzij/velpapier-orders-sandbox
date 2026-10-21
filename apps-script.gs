@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-20.4';
+const SCRIPT_VERSION = '2026-10-20.5';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -3437,6 +3437,13 @@ function resolveShopifyMatchAction(body) {
     if (idx >= 0) matchesSheet.getRange(match._rowIndex, idx + 1).setValue(val);
   };
 
+  const targetToCheck = body.decision === 'confirm' ? match['Suggested Customer ID'] : (body.decision === 'relink' ? body.customer_id : '');
+  if (targetToCheck) {
+    const tRow = sheetToObjects(getCustomersSheet()).find(c => String(c['Customer ID']) === String(targetToCheck));
+    if (!tRow || String(tRow['Primary Username'] || '').includes('(merged→')) {
+      return jsonResponse({ error: 'El cliente ' + targetToCheck + ' no existe o ya fue fusionado. Elige otro cliente.' });
+    }
+  }
   let linkedCustomerId = '';
 
   if (body.decision === 'confirm') {
@@ -6588,8 +6595,10 @@ function runHealthChecks() {
   const merged = {};
   crows.forEach(r => { if (String(r[chh.indexOf('Primary Username')] || '').indexOf('(merged→') >= 0) merged[String(r[chh.indexOf('Customer ID')])] = true; });
   const mergedRefs = [];
-  orows.forEach((r, i) => { const c = String(r[col('Customer ID')] || ''); if (merged[c]) mergedRefs.push(c + ' (fila ' + (i + 2) + ')'); });
-  add('merged_customer_refs', 'Pedidos apuntando a un cliente fusionado', 'amber', mergedRefs);
+  const knownIds = {};
+  crows.forEach(r => { knownIds[String(r[chh.indexOf('Customer ID')] || '')] = true; });
+  orows.forEach((r, i) => { const c = String(r[col('Customer ID')] || ''); if (merged[c]) mergedRefs.push(c + ' (fila ' + (i + 2) + ')'); else if (c && !knownIds[c]) mergedRefs.push(c + ' inexistente (fila ' + (i + 2) + ')'); });
+  add('merged_customer_refs', 'Pedidos apuntando a un cliente fusionado o inexistente', 'amber', mergedRefs);
 
   // 9. Paid but not packed for more than 48 h (stuck orders, FIX_LOG 7.3)
   const stuck = [];
