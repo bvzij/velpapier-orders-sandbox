@@ -269,6 +269,7 @@ window.VP = (function () {
     { id: 'empacar',   href: 'qc.html',        label: 'Empacar' },
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
+    { id: 'mayoristas', href: 'mayoristas.html', label: 'Mayoristas', adminOnly: true, extraUsers: ['KARIN'] },
     { id: 'analisis',  href: 'analytics.html', label: 'Análisis',  adminOnly: true },
     { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes',   adminOnly: true },
   ];
@@ -279,7 +280,7 @@ window.VP = (function () {
   // on top of the pages themselves redirecting staff away if reached
   // directly (requireAdminPage()).
   function mountNav(active) {
-    const visibleNav = NAV.filter(n => !n.adminOnly || role === 'admin');
+    const visibleNav = NAV.filter(n => !n.adminOnly || role === 'admin' || (n.extraUsers || []).indexOf(userName) >= 0);
     const homeHref = role === 'admin' ? 'index.html' : staffHome();
     const el = document.createElement('nav');
     el.className = 'vp-nav';
@@ -1017,5 +1018,6 @@ window.VP = (function () {
     window_, pctChange, bucketBy, bucketByMonth, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
     get token() { return token; },
     requireAdminPage, getRole,
+    getUserName: () => userName,
   };
 })();
