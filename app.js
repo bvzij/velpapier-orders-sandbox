@@ -2253,7 +2253,102 @@ function renderAll() {
   renderGrouped(cfg[0], cfg[1], cfg[2]);
 }
 
+var tiktokCollapsed = {};
+
+function toggleTikTokDay(day) {
+  const cur = tiktokCollapsed[day];
+  const orders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
+  const days = orders.map(r => (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha').sort((a, b) => b.localeCompare(a));
+  const defaultCollapsed = day !== days[0];
+  tiktokCollapsed[day] = cur === undefined ? !defaultCollapsed : !cur;
+  renderTikTokTab();
+}
+
+function setTikTokAll(collapsed) {
+  allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado').forEach(r => {
+    tiktokCollapsed[(r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha'] = collapsed;
+  });
+  renderTikTokTab();
+}
+
 function renderTikTokTab() {
+  const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
+  document.getElementById('badge-tiktok').textContent = tikTokOrders.length;
+
+  const container = document.getElementById('tiktok-list');
+  if (!container) return;
+
+  if (tikTokOrders.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-faint);font-size:13px;padding:1rem 0">Sin órdenes TikTok pendientes</div>';
+    return;
+  }
+
+  const dayOf = r => (r['Fecha Creación'] || '').slice(0, 10) || 'Sin fecha';
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const yestStr = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const dayLabel = day => {
+    if (day === 'Sin fecha') return day;
+    const d = new Date(day + 'T12:00:00');
+    const txt = d.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'short' });
+    return (day === todayStr ? 'Hoy · ' : day === yestStr ? 'Ayer · ' : '') + txt;
+  };
+
+  const rowHtml = (r, showDay) => {
+    const username = escapeHtml((r.Cliente || '—').replace(/^@/, ''));
+    const price = r.Precio ? formatMXN(r.Precio) : '—';
+    const tracking = escapeHtml(r.TrackingId || '');
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:0.5px solid var(--border);gap:12px">
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:13px;margin-bottom:2px">${username}${showDay ? ` <span style="font-weight:400;font-size:11px;color:var(--text-faint)">· ${escapeHtml(dayOf(r))}</span>` : ''}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${shopifyOrderLine(r)}</div>
+          ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">Guía ${tracking}</div>` : ''}
+        </div>
+        <div style="font-size:13px;font-weight:600;white-space:nowrap">${price}</div>
+      </div>`;
+  };
+
+  const cardStyle = 'background:var(--surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);margin-bottom:1rem;overflow:hidden';
+  const byName = (a, b) => (a.Cliente || '').localeCompare(b.Cliente || '', 'es');
+  const groups = {};
+  tikTokOrders.forEach(r => { const d = dayOf(r); (groups[d] = groups[d] || []).push(r); });
+  const daysDesc = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+
+  const summary = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;font-size:12px;color:var(--text-muted)">
+      <span><strong>${tikTokOrders.length}</strong> órdenes pendientes · ${daysDesc.length} día${daysDesc.length !== 1 ? 's' : ''}</span>
+      ${(currentSort === 'az' || currentSort === 'za') ? '' : `<span>
+        <button class="refresh-btn" onclick="setTikTokAll(false)">Expandir todo</button>
+        <button class="refresh-btn" onclick="setTikTokAll(true)">Colapsar todo</button>
+      </span>`}
+    </div>`;
+
+  // A→Z / Z→A: one flat list, day shown on each row
+  if (currentSort === 'az' || currentSort === 'za') {
+    const sorted = [...tikTokOrders].sort(byName);
+    if (currentSort === 'za') sorted.reverse();
+    container.innerHTML = summary + `<div style="${cardStyle}">${sorted.map(r => rowHtml(r, true)).join('')}</div>`;
+    return;
+  }
+
+  // Otherwise grouped by day (oldest first only when "Más antiguo" is chosen)
+  const days = currentSort === 'oldest' ? [...daysDesc].reverse() : daysDesc;
+  container.innerHTML = summary + days.map(day => {
+    const orders = [...groups[day]].sort(byName);
+    const collapsed = tiktokCollapsed[day] !== undefined ? tiktokCollapsed[day] : day !== daysDesc[0];
+    const total = orders.reduce((s, r) => s + (r.Precio || 0), 0);
+    return `
+      <div style="${cardStyle}">
+        <div onclick="toggleTikTokDay('${day}')" style="cursor:pointer;padding:12px;background:var(--surface2);${collapsed ? '' : 'border-bottom:0.5px solid var(--border);'}display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <div style="font-size:12px;font-weight:700;text-transform:capitalize;color:var(--text)">${collapsed ? '▸' : '▾'} Importado · ${escapeHtml(dayLabel(day))}</div>
+          <div style="font-size:11px;color:var(--text-muted);white-space:nowrap">${orders.length} orden${orders.length !== 1 ? 'es' : ''} · ${formatMXN(total)}</div>
+        </div>
+        ${collapsed ? '' : orders.map(r => rowHtml(r, false)).join('')}
+      </div>`;
+  }).join('');
+}
+
+function renderTikTokTabOld() {
   const tikTokOrders = allRecords.filter(r => r.Channel === 'TikTok' && r.Status === 'Pagado');
 
   // Update badge
