@@ -344,6 +344,10 @@ function openNewClient() {
 
 function blankItem() { return { 'Artículo': '', 'Cantidad': 1, 'Precio Unitario': 0, 'Catálogo': 'Regular', _tienda: '' }; }
 
+function isLowQty(it) {
+  return it['Catálogo'] !== 'Especial' && !!String(it['Artículo'] || '').trim() && (Number(it['Cantidad']) || 0) < (Number(S.min_pieces) || 0);
+}
+
 function openEditor(id, cidForNew) {
   const src = id ? ORDERS.find(o => String(o['Mayoreo ID']) === String(id)) : null;
   const o = src ? JSON.parse(JSON.stringify(src)) : {
@@ -403,22 +407,19 @@ function openEditor(id, cidForNew) {
         <label class="may-field">Estado<select class="vp-input" data-f="Status">${STATUSES.map(s => `<option ${o['Status'] === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
       </div>
 
-      <div class="may-h3">Artículos · ${c.pieces} piezas</div>
-      <div style="overflow-x:auto"><table class="may-items" style="width:100%;min-width:640px;border-collapse:collapse">
-        <thead><tr class="may-sub"><td style="width:40%">Artículo</td><td>Catálogo</td><td class="num">Piezas</td>${pctMode ? '<td class="num">Precio tienda</td>' : ''}<td class="num">Precio unit.</td><td class="num">Importe</td><td></td></tr></thead>
-        <tbody>${o.items.map((it, n) => {
-          const low = it['Catálogo'] !== 'Especial' && it['Artículo'] && (Number(it['Cantidad']) || 0) < (Number(S.min_pieces) || 0);
-          return `<tr data-n="${n}">
-            <td><input class="vp-input" data-i="Artículo" value="${VP.esc(it['Artículo'])}" placeholder="Nombre del producto">
-              ${low ? `<div class="may-warn">Menos de ${S.min_pieces} piezas por modelo</div>` : ''}</td>
-            <td><select class="vp-input" data-i="Catálogo"><option ${it['Catálogo'] !== 'Especial' ? 'selected' : ''}>Regular</option><option ${it['Catálogo'] === 'Especial' ? 'selected' : ''}>Especial</option></select></td>
-            <td><input class="vp-input num" type="number" min="0" data-i="Cantidad" value="${VP.esc(it['Cantidad'])}" style="width:70px"></td>
-            ${pctMode ? `<td>${it['Catálogo'] === 'Especial' ? `<input class="vp-input num" type="number" min="0" data-i="_tienda" value="${VP.esc(it._tienda || '')}" style="width:90px" placeholder="-${S.especial_default_pct}%">` : ''}</td>` : ''}
-            <td><input class="vp-input num" type="number" min="0" step="0.01" data-i="Precio Unitario" value="${VP.esc(it['Precio Unitario'])}" style="width:90px"></td>
+      <div class="may-h3">Artículos · ${c.pieces} piezas${o.items.filter(isLowQty).length ? ` <span class="may-warn">· ${o.items.filter(isLowQty).length} con menos de ${S.min_pieces} piezas</span>` : ''}</div>
+      <div style="overflow-x:auto"><table class="may-items">
+        <colgroup><col><col style="width:84px">${pctMode ? '<col style="width:110px">' : ''}<col style="width:112px"><col style="width:112px"><col style="width:112px"><col style="width:36px"></colgroup>
+        <thead><tr><th>Artículo</th><th class="num">Piezas</th>${pctMode ? '<th class="num">Precio tienda</th>' : ''}<th class="num">Precio unit.</th><th class="num">Importe</th><th>Catálogo</th><th></th></tr></thead>
+        <tbody>${o.items.map((it, n) => `<tr data-n="${n}">
+            <td><input class="vp-input" data-i="Artículo" value="${VP.esc(it['Artículo'])}" placeholder="Nombre del producto"></td>
+            <td><input class="vp-input num${isLowQty(it) ? ' may-low' : ''}" type="number" min="0" data-i="Cantidad" value="${VP.esc(it['Cantidad'])}"${isLowQty(it) ? ` title="Menos de ${S.min_pieces} piezas por modelo"` : ''}></td>
+            ${pctMode ? `<td>${it['Catálogo'] === 'Especial' ? `<input class="vp-input num" type="number" min="0" data-i="_tienda" value="${VP.esc(it._tienda || '')}" placeholder="-${S.especial_default_pct}%">` : ''}</td>` : ''}
+            <td><input class="vp-input num" type="number" min="0" step="0.01" data-i="Precio Unitario" value="${VP.esc(it['Precio Unitario'])}"></td>
             <td class="num">${money((Number(it['Cantidad']) || 0) * (Number(it['Precio Unitario']) || 0))}</td>
-            <td><button class="btn btn-xs" data-del="${n}" title="Quitar">✕</button></td>
-          </tr>`;
-        }).join('')}</tbody></table></div>
+            <td><select class="vp-input" data-i="Catálogo"><option ${it['Catálogo'] !== 'Especial' ? 'selected' : ''}>Regular</option><option ${it['Catálogo'] === 'Especial' ? 'selected' : ''}>Especial</option></select></td>
+            <td><button class="btn btn-xs" data-del="${n}" tabindex="-1" title="Quitar">✕</button></td>
+          </tr>`).join('')}</tbody></table></div>
       <button class="btn btn-sm" id="ed-add" style="margin-top:8px">+ Agregar artículo</button>
 
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:18px">
@@ -437,7 +438,6 @@ function openEditor(id, cidForNew) {
             <label class="may-field">Liquidación<input class="vp-input" type="number" min="0" data-f="Liquidación Monto" value="${VP.esc(o['Liquidación Monto'] || '')}"></label>
             <label class="may-field">Fecha liquidación<input class="vp-input" type="date" data-f="Liquidación Fecha" value="${VP.esc(o['Liquidación Fecha'] || '')}"></label>
           </div>
-          <label class="may-field" style="margin-top:10px">Pedidos TikTok vinculados (IDs separados por coma)<input class="vp-input" data-f="Linked Order IDs" value="${VP.esc(o['Linked Order IDs'] || '')}"></label>
           <label class="may-field" style="margin-top:10px">Notas internas<input class="vp-input" data-f="Notas" value="${VP.esc(o['Notas'] || '')}"></label>
         </div>
         <div class="may-totals">
@@ -467,6 +467,7 @@ function openEditor(id, cidForNew) {
     root.querySelectorAll('[data-f]').forEach(el => el.addEventListener('change', () => { o[el.dataset.f] = el.value; later(); }));
     root.querySelectorAll('tr[data-n]').forEach(tr => {
       const it = o.items[Number(tr.dataset.n)];
+      tr.querySelectorAll('[data-i]').forEach(el => { if (el.tagName === 'INPUT') el.addEventListener('focus', () => el.select()); });
       tr.querySelectorAll('[data-i]').forEach(el => el.addEventListener('change', () => {
         const k = el.dataset.i;
         it[k] = el.type === 'number' ? Number(el.value) : el.value;
@@ -476,6 +477,15 @@ function openEditor(id, cidForNew) {
     });
     root.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { o.items.splice(Number(b.dataset.del), 1); if (!o.items.length) o.items.push(blankItem()); render(); });
     root.querySelector('#ed-add').onclick = () => { o.items.push(blankItem()); render(); const ins = root.querySelectorAll('[data-i="Artículo"]'); ins[ins.length - 1].focus(); };
+    // Excel feel: Tab out of the last row's last cell opens a fresh row.
+    const lastSel = root.querySelector('tr[data-n]:last-child select[data-i="Catálogo"]');
+    if (lastSel) lastSel.addEventListener('keydown', e => {
+      if (e.key === 'Tab' && !e.shiftKey) {
+        e.preventDefault();
+        o.items.push(blankItem()); render();
+        const ins = root.querySelectorAll('[data-i="Artículo"]'); ins[ins.length - 1].focus();
+      }
+    });
     root.querySelector('#ed-pct').addEventListener('change', e => {
       const v = Number(e.target.value);
       manualPct = v === calc().info.pct && manualPct === null ? null : v;
