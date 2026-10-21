@@ -651,6 +651,7 @@ function renderDetailOrderBlock(id, channel, idx) {
     idHref = '';
   }
 
+  if (channel === 'Manual') idLabel = o ? (items.map(p => String(p.name)).sort((a, b) => a.localeCompare(b, 'es')).slice(0, 2).join(', ') || 'Manual') : 'Manual';
   const itemRows = items.length
     ? items.map(p => `<div class="cal-detail-item"><span>${VP.esc(p.qty)}×</span><span>${VP.esc(p.name)}</span>${p.price ? `<span class="cal-detail-item-price">${VP.mxn(p.price)}</span>` : ''}</div>`).join('')
     : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
