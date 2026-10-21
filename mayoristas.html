@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
+  <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Mayoristas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .may-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:1.25rem; }
+    .may-toolbar-right { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .may-search { min-width:220px; }
+    .may-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-md); overflow-x:auto; }
+    .may-tier { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11.5px; font-weight:600; white-space:nowrap; }
+    .may-tier-0 { background:var(--surface2); color:var(--text-muted); }
+    .may-tier-1 { background:var(--blue-bg); color:var(--blue-text); }
+    .may-tier-2 { background:var(--purple-bg); color:var(--purple-text); }
+    .may-tier-3 { background:var(--green-bg); color:var(--green-text); }
+    .may-flag { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:20px; font-size:11px; background:var(--amber-bg); color:var(--amber-text); }
+    .may-progress { height:5px; background:var(--surface2); border-radius:3px; overflow:hidden; min-width:90px; margin-top:4px; }
+    .may-progress > div { height:100%; background:var(--green-text); }
+    .may-sub { font-size:12px; color:var(--text-faint); }
+    .may-status { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11.5px; font-weight:500; }
+    .may-st-Cotización { background:var(--surface2); color:var(--text-muted); }
+    .may-st-Anticipo { background:var(--amber-bg); color:var(--amber-text); }
+    .may-st-Liquidado { background:var(--blue-bg); color:var(--blue-text); }
+    .may-st-Enviado { background:var(--green-bg); color:var(--green-text); }
+    .may-st-Cancelado { background:var(--red-bg); color:var(--red-text); }
+    .may-h2 { font-family:'Fraunces',serif; font-size:22px; font-weight:500; margin:0 0 4px; }
+    .may-h3 { font-size:13px; font-weight:600; margin:18px 0 8px; color:var(--text-muted); }
+    .may-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+    .may-field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-muted); }
+    .may-field .vp-input { width:100%; box-sizing:border-box; }
+    .may-items td { padding:5px 4px; vertical-align:middle; }
+    .may-items .vp-input { width:100%; box-sizing:border-box; padding:6px 8px; }
+    .may-items .num { text-align:right; font-variant-numeric:tabular-nums; }
+    .may-warn { color:var(--amber-text); font-size:11.5px; }
+    .may-totals { margin-left:auto; max-width:380px; font-size:13.5px; }
+    .may-totals div { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
+    .may-totals .big { font-size:17px; font-weight:600; border-top:0.5px solid var(--border-strong); margin-top:4px; padding-top:8px; }
+    .may-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:18px; }
+    .may-combo { position:relative; }
+    .may-combo-list { position:absolute; left:0; right:0; top:100%; z-index:5; background:var(--surface); border:0.5px solid var(--border-strong); border-radius:var(--radius-sm); max-height:240px; overflow-y:auto; display:none; }
+    .may-combo-list.open { display:block; }
+    .may-combo-item { padding:8px 10px; cursor:pointer; font-size:13px; }
+    .may-combo-item:hover { background:var(--surface2); }
+    .may-note { font-size:12px; color:var(--text-faint); margin-top:4px; }
+    .may-pdfs a { color:var(--blue-text); font-size:13px; margin-right:12px; }
+    .may-empty { padding:3rem 1rem; text-align:center; color:var(--text-faint); font-size:13.5px; }
+  </style>
+</head>
+<body>
+
+<main class="vp-shell vp-shell--wide">
+
+  <section class="vp-hero" style="padding-bottom:1.25rem">
+    <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Mayoristas</h1>
+    <div class="vp-hero-date" id="may-count">—</div>
+  </section>
+
+  <div class="may-toolbar">
+    <input class="vp-input may-search" id="may-search" type="text" placeholder="Buscar cliente…" autocomplete="off">
+    <div class="may-toolbar-right">
+      <button class="refresh-btn" id="may-new-client">+ Nuevo mayorista</button>
+      <button class="refresh-btn" id="may-settings">⚙ Ajustes</button>
+      <button class="refresh-btn" id="may-refresh">Actualizar</button>
+    </div>
+  </div>
+
+  <div id="may-content"><div class="vp-loading">Cargando mayoristas</div></div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="common.js"></script>
+<script src="mayoristas.js"></script>
+</body>
+</html>
