@@ -16,8 +16,9 @@ function openSheetCached(id) {
 const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
+const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-20.6';
+const SCRIPT_VERSION = '2026-10-21.2';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -37,7 +38,7 @@ const SESSION_DAYS = 30;
 // 2026-10-18 deploy -- then only session tokens and service tokens work.
 const ALLOW_PASSWORD_AS_TOKEN = false;
 // Only these Cloudinary folders can be signed for upload.
-const UPLOAD_FOLDERS = ['velpapier/qc'];
+const UPLOAD_FOLDERS = ['velpapier/qc', 'velpapier/mayoreo'];
 const MX_TZ = 'America/Mexico_City';
 
 const BACKUP_FOLDER_ID = '1wxkTAqFlGlOc-qMGBv24nQswW7IyYMoL';
@@ -366,6 +367,7 @@ function doGet(e) {
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
+    if (action === 'mayoreo_data') return mayoreoAllowed(identity) ? mayoreoDataAction(e) : jsonResponse({ error: 'unauthorized' });
 
     // Ajustes-only tools -- duplicate finders/mergers, product merge
     // search/history. Staff role is a valid token but not allowed here.
@@ -931,6 +933,10 @@ function doPost(e) {
 }
 
 function dispatchPostAction(action, body, role) {
+    if (action === 'mayoreo_save_settings') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveSettingsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_save_cliente') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveClienteAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_save_order') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveOrderAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_delete_order') return mayoreoAllowed(_currentIdentity) ? mayoreoDeleteOrderAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
     if (action === 'update_order_status') return updateOrderStatus(body);
@@ -6864,4 +6870,274 @@ function oneoffClearAllSessions() {
     if (k.indexOf('SESS_') === 0) { store.deleteProperty(k); n++; }
   });
   Logger.log('Deleted ' + n + ' session properties.');
+}
+
+function clearAllSessions() {
+  const props = PropertiesService.getScriptProperties();
+  let n = 0;
+  props.getKeys().forEach(k => {
+    if (k.indexOf('SESS_') === 0) {
+      props.deleteProperty(k);
+      n++;
+    }
+  });
+  console.log('Cleared ' + n + ' sessions');
+}
+
+function installSessionClearTrigger() {
+  // remove any old copy of this trigger first
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'clearAllSessions') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('clearAllSessions')
+    .timeBased()
+    .everyWeeks(1)            // change to 2 for every second Monday
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(3)
+    .create();
+  console.log('Triggers now: ' + ScriptApp.getProjectTriggers().length);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAYOREO — wholesale channel (Mayoristas tab). Lives in its own spreadsheet.
+// Access: admins + USER_KARIN. Tiers are NOT stored here: the frontend
+// computes them live from history + settings, so changing a setting is
+// retroactive automatically. Saved orders keep the discount they were saved with.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAYOREO_EXTRA_USERS = ['KARIN'];
+
+const MAYOREO_DEFAULT_SETTINGS = {
+  tiers: [
+    { nivel: 1, min: 5000,  pct: 15 },
+    { nivel: 2, min: 20000, pct: 19 },
+    { nivel: 3, min: 50000, pct: 23 }
+  ],
+  count_tiktok: false,          // TikTok spend counts toward history
+  history_basis: 'after',       // 'after' = total after discount, 'before' = subtotal
+  current_counts: false,        // current order counts toward its own tier
+  lapse_rule: 'flag',           // 'flag' | 'drop_one' | 'drop_to_1'
+  lapse_days: 30,
+  especial_mode: 'manual',      // 'manual' unit price | 'percent' off store price
+  especial_default_pct: 25,
+  min_pieces: 3
+};
+
+function mayoreoAllowed(identity) {
+  if (!identity) return false;
+  if (identity.role === 'admin') return true;
+  return MAYOREO_EXTRA_USERS.indexOf(String(identity.name || '').toUpperCase()) >= 0;
+}
+
+function getMayoreoSheet(name) {
+  const sh = openSheetCached(MAYOREO_SHEET_ID).getSheetByName(name);
+  if (!sh) throw new Error('Pestaña no encontrada en Mayoreo: ' + name);
+  return sh;
+}
+
+// Reads a tab into [{header: value}] objects. Dates become yyyy-MM-dd.
+function mayoreoReadTab(name) {
+  const sh = getMayoreoSheet(name);
+  const data = sh.getDataRange().getValues();
+  if (!data.length) return { headers: [], rows: [] };
+  const headers = data[0].map(String);
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i].every(v => v === '' || v === null)) continue;
+    const o = {};
+    headers.forEach((h, j) => {
+      let v = data[i][j];
+      if (v instanceof Date) v = Utilities.formatDate(v, MX_TZ, 'yyyy-MM-dd');
+      o[h] = v;
+    });
+    rows.push(o);
+  }
+  return { headers: headers, rows: rows };
+}
+
+function mayoreoGetSettings() {
+  const tab = mayoreoReadTab('Mayoreo Settings');
+  const s = JSON.parse(JSON.stringify(MAYOREO_DEFAULT_SETTINGS));
+  tab.rows.forEach(r => {
+    const k = String(r['Clave'] || '');
+    if (!k || !(k in s)) return;
+    try { s[k] = JSON.parse(r['Valor']); } catch (e) { s[k] = r['Valor']; }
+  });
+  return s;
+}
+
+// TikTok spend per Customer ID (only for the given IDs). Cancelled rows skipped.
+function mayoreoTikTokSpend(customerIds) {
+  const want = {};
+  customerIds.forEach(id => { want[id] = true; });
+  const out = {};
+  const data = getOrdersSheet().getDataRange().getValues();
+  if (data.length < 2) return out;
+  const h = data[0];
+  const iC = h.indexOf('Customer ID'), iCh = h.indexOf('Channel'), iP = h.indexOf('Price'), iS = h.indexOf('Status');
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const cid = String(r[iC] || '');
+    if (!want[cid] || r[iCh] !== 'TikTok') continue;
+    if (/cancel/i.test(String(r[iS] || ''))) continue;
+    out[cid] = (out[cid] || 0) + (Number(r[iP]) || 0);
+  }
+  return out;
+}
+
+// GET ?action=mayoreo_data — everything the tab needs in one call.
+function mayoreoDataAction(e) {
+  const settings = mayoreoGetSettings();
+  const clientes = mayoreoReadTab('Mayoreo Clientes').rows;
+  const orders = mayoreoReadTab('Mayoreo Orders').rows;
+  const items = mayoreoReadTab('Mayoreo Items').rows;
+  const byId = {};
+  items.forEach(it => {
+    const id = String(it['Mayoreo ID']);
+    (byId[id] = byId[id] || []).push(it);
+  });
+  orders.forEach(o => {
+    o.items = (byId[String(o['Mayoreo ID'])] || []).sort((a, b) => Number(a['Línea']) - Number(b['Línea']));
+    try { o['PDF Historial'] = o['PDF Historial'] ? JSON.parse(o['PDF Historial']) : []; } catch (err) { o['PDF Historial'] = []; }
+  });
+  const ids = clientes.map(c => String(c['Customer ID']));
+  return jsonResponse({
+    settings: settings,
+    clientes: clientes,
+    orders: orders,
+    tiktok_spend: ids.length ? mayoreoTikTokSpend(ids) : {}
+  });
+}
+
+// POST { action:'mayoreo_save_settings', settings:{...} } — full replace.
+function mayoreoSaveSettingsAction(body) {
+  const s = body.settings || {};
+  const rows = Object.keys(MAYOREO_DEFAULT_SETTINGS)
+    .filter(k => k in s)
+    .map(k => [k, JSON.stringify(s[k])]);
+  const sh = getMayoreoSheet('Mayoreo Settings');
+  const last = sh.getLastRow();
+  if (last > 1) sh.getRange(2, 1, last - 1, 2).clearContent();
+  if (rows.length) sh.getRange(2, 1, rows.length, 2).setValues(rows);
+  logAuditSafe('mayoreo_save_settings', '', s);
+  return jsonResponse({ ok: true, settings: mayoreoGetSettings() });
+}
+
+// Upserts one row by key column. obj keys = header names. Returns row number.
+function mayoreoUpsert(sheetName, keyHeader, keyValue, obj, textCols) {
+  const sh = getMayoreoSheet(sheetName);
+  const lastCol = sh.getLastColumn();
+  const h = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  const iKey = h.indexOf(keyHeader);
+  if (iKey < 0) throw new Error('Columna ' + keyHeader + ' no encontrada en ' + sheetName);
+  const last = sh.getLastRow();
+  const keys = last > 1 ? sh.getRange(2, iKey + 1, last - 1, 1).getValues().map(r => String(r[0])) : [];
+  let rowNum = keys.indexOf(String(keyValue));
+  let row;
+  if (rowNum >= 0) {
+    rowNum += 2;
+    row = sh.getRange(rowNum, 1, 1, lastCol).getValues()[0];
+  } else {
+    rowNum = last + 1;
+    row = h.map(() => '');
+  }
+  Object.keys(obj).forEach(k => {
+    const i = h.indexOf(k);
+    if (i >= 0) row[i] = obj[k];
+  });
+  row[iKey] = keyValue;
+  forceTextFormat(sh, h, textCols || [], rowNum, 1);
+  sh.getRange(rowNum, 1, 1, lastCol).setValues([row]);
+  return rowNum;
+}
+
+// POST { action:'mayoreo_save_cliente', cliente:{ 'Customer ID':..., ... } }
+function mayoreoSaveClienteAction(body) {
+  const c = body.cliente || {};
+  const cid = String(c['Customer ID'] || '').trim();
+  if (!cid) return jsonResponse({ error: 'Falta Customer ID' });
+  const existing = mayoreoReadTab('Mayoreo Clientes').rows.some(r => String(r['Customer ID']) === cid);
+  if (!existing && !c['Fecha Alta']) c['Fecha Alta'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd');
+  mayoreoUpsert('Mayoreo Clientes', 'Customer ID', cid, c, ['Customer ID']);
+  logAuditSafe('mayoreo_save_cliente', cid, c);
+  return jsonResponse({ ok: true });
+}
+
+function mayoreoNextId() {
+  const rows = mayoreoReadTab('Mayoreo Orders').rows;
+  let max = 0;
+  rows.forEach(r => {
+    const m = String(r['Mayoreo ID'] || '').match(/^MAY-(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return 'MAY-' + String(max + 1).padStart(3, '0');
+}
+
+// POST { action:'mayoreo_save_order', order:{ header fields }, items:[{...}] }
+// New order when order['Mayoreo ID'] is empty. Items fully replace the old set.
+function mayoreoSaveOrderAction(body) {
+  const o = Object.assign({}, body.order || {});
+  const items = Array.isArray(body.items) ? body.items : null;
+  if (!o['Customer ID']) return jsonResponse({ error: 'Falta Customer ID' });
+  let id = String(o['Mayoreo ID'] || '').trim();
+  const isNew = !id;
+  if (isNew) {
+    id = mayoreoNextId();
+    o['Creado Por'] = _currentIdentity ? _currentIdentity.name : '';
+    if (!o['Fecha']) o['Fecha'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd');
+    if (!o['Status']) o['Status'] = 'Cotización';
+  }
+  o['Mayoreo ID'] = id;
+  o['Actualizado'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH:mm');
+  if (Array.isArray(o['PDF Historial'])) o['PDF Historial'] = JSON.stringify(o['PDF Historial']);
+  delete o.items;
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, o, ['Mayoreo ID', 'Customer ID', 'Linked Order IDs']);
+
+  if (items) {
+    const sh = getMayoreoSheet('Mayoreo Items');
+    const lastCol = sh.getLastColumn();
+    const h = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    const iId = h.indexOf('Mayoreo ID');
+    const last = sh.getLastRow();
+    const all = last > 1 ? sh.getRange(2, 1, last - 1, lastCol).getValues() : [];
+    const keep = all.filter(r => String(r[iId]) !== id && r.some(v => v !== ''));
+    const fresh = items.map((it, n) => h.map(col => {
+      if (col === 'Mayoreo ID') return id;
+      if (col === 'Línea') return n + 1;
+      if (col === 'Importe') return (Number(it['Cantidad']) || 0) * (Number(it['Precio Unitario']) || 0);
+      return it[col] !== undefined ? it[col] : '';
+    }));
+    const out = keep.concat(fresh);
+    if (last > 1) sh.getRange(2, 1, last - 1, lastCol).clearContent();
+    if (out.length) {
+      forceTextFormat(sh, h, ['Mayoreo ID', 'Catalog ID'], 2, out.length);
+      sh.getRange(2, 1, out.length, lastCol).setValues(out);
+    }
+  }
+  logAuditSafe(isNew ? 'mayoreo_create_order' : 'mayoreo_update_order', id, { order: o, items: items ? items.length : null });
+  return jsonResponse({ ok: true, id: id });
+}
+
+// POST { action:'mayoreo_delete_order', id }
+function mayoreoDeleteOrderAction(body) {
+  const id = String(body.id || '');
+  if (!id) return jsonResponse({ error: 'Falta id' });
+  ['Mayoreo Orders', 'Mayoreo Items'].forEach(name => {
+    const sh = getMayoreoSheet(name);
+    const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+    const iId = h.indexOf('Mayoreo ID');
+    const last = sh.getLastRow();
+    if (last < 2) return;
+    const vals = sh.getRange(2, iId + 1, last - 1, 1).getValues();
+    for (let i = vals.length - 1; i >= 0; i--) {
+      if (String(vals[i][0]) === id) sh.deleteRow(i + 2);
+    }
+  });
+  logAuditSafe('mayoreo_delete_order', id, {});
+  return jsonResponse({ ok: true });
+}
+
+// Audit is best-effort here — never fail a save because of logging.
+function logAuditSafe(action, target, details) {
+  try { logAuditEvent(action, 'Mayoreo', target, details); } catch (e) {}
 }
