@@ -17,7 +17,7 @@ const CUSTOMERS_SHEET_ID = '1lM9RjWq4vvcmXTUwJmi0IbS2tQw31CzjnWsFmMON7ak';
 const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 
-const SCRIPT_VERSION = '2026-10-20.5';
+const SCRIPT_VERSION = '2026-10-20.6';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -3603,7 +3603,73 @@ function getShopifyMatches(e) {
 // Per-order product lines for combined TikTok shipments. The Orders row keeps ONE
 // merged Products string for a combined shipment, so the split per component order
 // comes from TikTok Import History. Read-only.  ?ids=586684395139335992,586684693768800056
+// v2: reads the Order ID column once, then ONE block read of the matching rows, and
+// caches each order's lines for 6 h (they never change after import).
 function getTikTokOrderLines(e) {
+  const wanted = [];
+  String(e.parameter.ids || '').split(',').forEach(s => {
+    const id = s.replace(/\D/g, '');
+    if (id && wanted.indexOf(id) < 0) wanted.push(id);
+  });
+  if (!wanted.length) return jsonResponse({ lines: {} });
+
+  const cache = CacheService.getScriptCache();
+  const lines = {};
+  const cached = cache.getAll(wanted.map(id => 'otl_' + id));
+  const missing = [];
+  wanted.forEach(id => {
+    const hit = cached['otl_' + id];
+    if (hit) { try { lines[id] = JSON.parse(hit); return; } catch (err) {} }
+    missing.push(id);
+  });
+  if (!missing.length) return jsonResponse({ lines: lines });
+
+  const sheet = getTikTokImportHistorySheet();
+  if (!sheet || sheet.getLastRow() < 2) return jsonResponse({ lines: lines });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iId = h.indexOf('Order ID'), iName = h.indexOf('Product Name');
+  const iVar = h.indexOf('Variation'), iQty = h.indexOf('Quantity');
+  if (iId < 0 || iName < 0) return jsonResponse({ lines: lines });
+
+  const want = {};
+  missing.forEach(id => { want[id] = true; });
+  const matches = [];   // { row: sheet row number, id }
+  readColumn(sheet, iId).forEach((v, i) => {
+    const id = String(v || '').replace(/\D/g, '');
+    if (want[id]) matches.push({ row: i + 2, id: id });
+  });
+  if (!matches.length) return jsonResponse({ lines: lines });
+
+  const cols = [iName, iVar, iQty].filter(c => c >= 0);
+  const c0 = Math.min.apply(null, cols), c1 = Math.max.apply(null, cols);
+  const r0 = matches[0].row, r1 = matches[matches.length - 1].row;
+  const block = sheet.getRange(r0, c0 + 1, r1 - r0 + 1, c1 - c0 + 1).getValues();
+
+  const found = {}, seen = {};
+  matches.forEach(m => {
+    const rowVals = block[m.row - r0];
+    const name = String(rowVals[iName - c0] || '').trim();
+    if (!name) return;
+    const variation = iVar >= 0 ? String(rowVals[iVar - c0] || '').trim() : '';
+    const label = name + (variation ? ' (' + variation + ')' : '');
+    const q = iQty >= 0 ? parseInt(rowVals[iQty - c0], 10) : 1;
+    const qty = q > 0 ? q : 1;
+    const key = m.id + '|' + label + '|' + qty;
+    if (seen[key]) return;   // the same import row sent twice
+    seen[key] = true;
+    (found[m.id] = found[m.id] || []).push({ qty: qty, name: label });
+  });
+
+  const toCache = {};
+  Object.keys(found).forEach(id => {
+    lines[id] = found[id];
+    toCache['otl_' + id] = JSON.stringify(found[id]);
+  });
+  try { if (Object.keys(toCache).length) cache.putAll(toCache, 21600); } catch (err) {}
+  return jsonResponse({ lines: lines });
+}
+
+function getTikTokOrderLinesV1(e) {
   const wanted = {};
   String(e.parameter.ids || '').split(',').forEach(s => { const id = s.replace(/\D/g, ''); if (id) wanted[id] = true; });
   if (!Object.keys(wanted).length) return jsonResponse({ lines: {} });
