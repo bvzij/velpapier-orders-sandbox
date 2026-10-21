@@ -819,6 +819,7 @@ function qcModalOrderBlock(id, channel, idx) {
     idHref = '';
   }
 
+  if (channel === 'Manual') idLabel = o ? (items.map(p => String(p.name)).sort((a, b) => a.localeCompare(b, 'es')).slice(0, 2).join(', ') || 'Manual') : 'Manual';
   const itemRows = items.length
     ? items.map(p => `<div class="cal-detail-item"><span>${escapeHtml(p.qty)}×</span><span>${escapeHtml(p.name)}</span>${p.price ? `<span class="cal-detail-item-price">${formatMXN(p.price)}</span>` : ''}</div>`).join('')
     : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
@@ -2317,7 +2318,7 @@ function renderTikTokTab() {
   const summary = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;font-size:12px;color:var(--text-muted)">
       <span><strong>${tikTokOrders.length}</strong> órdenes pendientes · ${daysDesc.length} día${daysDesc.length !== 1 ? 's' : ''}</span>
-      <select class="sort-select" onchange="setTikTokSort(this.value)">
+      <select class="sort-select" style="margin-left:auto;order:3" onchange="setTikTokSort(this.value)">
         <option value="newest"${currentSort === 'newest' ? ' selected' : ''}>Importación: más reciente</option>
         <option value="oldest"${currentSort === 'oldest' ? ' selected' : ''}>Importación: más antigua</option>
         <option value="paid"${currentSort === 'paid' ? ' selected' : ''}>Fecha de pago: más reciente</option>
@@ -2325,7 +2326,7 @@ function renderTikTokTab() {
         <option value="az"${currentSort === 'az' ? ' selected' : ''}>Nombre: A → Z</option>
         <option value="za"${currentSort === 'za' ? ' selected' : ''}>Nombre: Z → A</option>
       </select>
-      ${(currentSort === 'az' || currentSort === 'za' || currentSort === 'paid' || currentSort === 'paidold') ? '' : `<span>
+      ${(currentSort === 'az' || currentSort === 'za' || currentSort === 'paid' || currentSort === 'paidold') ? '' : `<span style="order:2;display:flex;gap:6px;white-space:nowrap">
         <button class="refresh-btn" onclick="setTikTokAll(false)">Expandir todo</button>
         <button class="refresh-btn" onclick="setTikTokAll(true)">Colapsar todo</button>
       </span>`}
