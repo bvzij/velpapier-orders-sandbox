@@ -13,6 +13,38 @@ let PER_PAGE = Number(localStorage.getItem('vp_cal_perpage')) || 100;
 let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
+let CUST_TEXT = {};   // Customer ID -> lowercase "primary alias1 alias2"
+let CUST_NAMES = {};  // Customer ID -> [primary, ...aliases]
+
+// The username stored on a QC row is a snapshot from the day it was packed,
+// so one person can appear under several names after a merge or a
+// primary/alias swap. Everything below resolves people by Customer ID.
+function addCustomerNamesToCombo() {
+  const ids = new Set(QC.map(r => String(r['Customer ID'] || '').trim()).filter(Boolean));
+  const extra = [];
+  ids.forEach(id => (CUST_NAMES[id] || []).forEach(n => extra.push(n)));
+  allUsernames = [...new Set([...allUsernames, ...extra])].sort();
+}
+
+async function loadCalidadCustomers() {
+  try {
+    const data = await VP.get('action=customers');
+    const text = {}, names = {};
+    (data.records || []).forEach(c => {
+      const id = String(c['Customer ID'] || '').trim();
+      if (!id) return;
+      const list = [String(c['Primary Username'] || '').trim(), ...String(c['Aliases'] || '').split(',').map(x => x.trim())].filter(Boolean);
+      names[id] = list;
+      text[id] = list.join(' ').toLowerCase();
+    });
+    CUST_TEXT = text;
+    CUST_NAMES = names;
+    addCustomerNamesToCombo();
+    render();
+  } catch (e) {
+    console.warn('[calidad] customers not loaded, filtering by saved username only', e);
+  }
+}
 let hasLoadedOnce = false; // tells a genuinely empty result apart from a load that hasn't finished/succeeded yet
 let hasFullOrdersLoaded = false; // set once the actual action=orders payload (not just QC) has landed
 
@@ -110,6 +142,7 @@ function applyQcData(q, o) {
     return diff || String(b['QC ID'] || '').localeCompare(String(a['QC ID'] || ''));
   });
   allUsernames = [...new Set(QC.map(r => String(r['Primary Username'] || '').trim()).filter(Boolean))].sort();
+  addCustomerNamesToCombo();
   hasLoadedOnce = true;
 
   // The orders fetch can land well after the modal was opened (the full
@@ -152,6 +185,7 @@ async function manualRefresh() {
   try {
     await VP.ensureToken();
     VP.mountNav('calidad');
+    loadCalidadCustomers();
 
     // Cache-first: show instantly if we have a prior snapshot, refresh
     // quietly in the background, re-render when fresh data lands.
@@ -382,9 +416,11 @@ function filteredRows() {
   let rows = QC;
 
   if (customerFilter) {
-    rows = rows.filter(r => String(r['Primary Username'] || '').trim() === customerFilter);
+    const pickIds = new Set(QC.filter(r => String(r['Primary Username'] || '').trim() === customerFilter).map(r => String(r['Customer ID'] || '').trim()).filter(Boolean));
+    Object.keys(CUST_NAMES).forEach(id => { if (CUST_NAMES[id].includes(customerFilter)) pickIds.add(id); });
+    rows = rows.filter(r => String(r['Primary Username'] || '').trim() === customerFilter || pickIds.has(String(r['Customer ID'] || '').trim()));
   } else if (custTyped) {
-    rows = rows.filter(r => String(r['Primary Username'] || '').toLowerCase().includes(custTyped));
+    rows = rows.filter(r => String(r['Primary Username'] || '').toLowerCase().includes(custTyped) || (CUST_TEXT[String(r['Customer ID'] || '').trim()] || '').includes(custTyped));
   }
 
   if (from || to) {
