@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-21.2';
+const SCRIPT_VERSION = '2026-10-21.3';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -6725,7 +6725,7 @@ function runHealthChecksAction(body) {
 // removes any existing triggers for these handlers first, so running it
 // again never creates duplicates.
 function installTriggers() {
-  const jobs = [['nightlyBackup', 2], ['reconcileCustomerAggregates', 3], ['runHealthChecks', 4]];
+  const jobs = [['nightlyBackup', 2], ['reconcileCustomerAggregates', 3], ['runHealthChecks', 4], ['archiveOldQcPhotos', 5]];
   const names = jobs.map(j => j[0]);
   ScriptApp.getProjectTriggers().forEach(t => {
     if (names.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
@@ -6920,7 +6920,9 @@ const MAYOREO_DEFAULT_SETTINGS = {
   lapse_days: 30,
   especial_mode: 'manual',      // 'manual' unit price | 'percent' off store price
   especial_default_pct: 25,
-  min_pieces: 3
+  min_pieces: 3,
+  pdf_validity_days: 7,
+  pdf_bank_info: ''
 };
 
 function mayoreoAllowed(identity) {
@@ -7150,7 +7152,7 @@ function logAuditSafe(action, target, details) {
 // run retries: already-deleted photos come back "not_found" and the row is
 // still switched to the placeholder.
 // Run archiveOldQcPhotosDryRun() from the dropdown to see counts only.
-const QC_PHOTO_KEEP_DAYS = 45;
+const QC_PHOTO_KEEP_DAYS = 30;
 const QC_ARCHIVE_MAX_ROWS = 800;   // per run; the next run picks up the rest
 const QC_PLACEHOLDER_ID = 'velpapier/qc/airtable/_archivado';
 const QC_PHOTO_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5',
@@ -7173,7 +7175,7 @@ function archiveOldQcPhotos(dryRun) {
   const cloud = p.getProperty('CLOUDINARY_CLOUD');
   const auth = 'Basic ' + Utilities.base64Encode(
     p.getProperty('CLOUDINARY_API_KEY') + ':' + p.getProperty('CLOUDINARY_API_SECRET'));
-  const placeholderUrl = 'https://res.cloudinary.com/' + cloud + '/image/upload/' + QC_PLACEHOLDER_ID + '.jpg';
+  const placeholderUrl = 'https://res.cloudinary.com/dgm5ock3o/image/upload/v1792386859/velpapier/qc/airtable/_archivado.jpg';
 
   const sheet = getQCSheet();
   const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -7198,15 +7200,18 @@ function archiveOldQcPhotos(dryRun) {
     rows.push(r);
   }
 
+  const tms = rows.map(r => ts[r] instanceof Date ? ts[r].getTime() : Date.parse(String(ts[r] || '')));
   const summary = { dry_run: dryRun, keep_days: QC_PHOTO_KEEP_DAYS, rows: rows.length,
+                    newest_packed: tms.length ? new Date(Math.max.apply(null, tms)).toISOString() : '',
+                    oldest_packed: tms.length ? new Date(Math.min.apply(null, tms)).toISOString() : '',
                     photos: ids.length, rows_left_for_next_run: pending, deleted: 0, not_found: 0 };
   if (dryRun || !rows.length) {
     Logger.log(JSON.stringify(summary) + '  sample: ' + ids.slice(0, 3).join(' | '));
     return summary;
   }
 
-  for (let i = 0; i < ids.length; i += 100) {
-    const q = ids.slice(i, i + 100).map(id => 'public_ids[]=' + encodeURIComponent(id)).join('&');
+  for (let i = 0; i < ids.length; i += 15) {
+    const q = ids.slice(i, i + 15).map(id => 'public_ids[]=' + encodeURIComponent(id)).join('&');
     const res = UrlFetchApp.fetch('https://api.cloudinary.com/v1_1/' + cloud + '/resources/image/upload?' + q,
       { method: 'delete', headers: { Authorization: auth }, muteHttpExceptions: true });
     if (res.getResponseCode() !== 200) {
