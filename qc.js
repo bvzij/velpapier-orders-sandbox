@@ -1160,6 +1160,7 @@ async function submitQC() {
 // ── Lightbox ─────────────────────────────────────────────────────────────
 
 function openLightbox(url) {
+  if (window.VP && VP.lightbox) { VP.lightbox(url); return; }
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;-webkit-tap-highlight-color:transparent';
   const big = /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_1600,c_limit,q_auto,f_auto/') : url;
