@@ -540,19 +540,60 @@ function anotadoOrdersByTracking() {
   return out;
 }
 
+// ── Packing filter: Todos / TikTok / Mayoristas (remembered per device) ──
+// Mayorista orders come from the Mayoristas tab as Orders rows with
+// Channel 'Mayorista' (Order ID MAY-###). Anotado on a TikTok shipment ->
+// they ride inside that TikTok card as an add-on, exactly like Manual.
+// Not Anotado -> they ship on their own and get their own card here.
+let packFilter = localStorage.getItem('vp_pack_filter') || 'all';
+function setPackFilter(f) {
+  packFilter = f;
+  try { localStorage.setItem('vp_pack_filter', f); } catch (e) { /* best-effort */ }
+  renderPendingList();
+}
+
+// The mirror row's Notes are written by the Mayoristas sync, e.g.
+// "Mayoreo MAY-004 · Saldo pendiente $5,862 · Paquetería: Estafeta · Guía: 123"
+function mayoristaNoteInfo(o) {
+  const n = String((o && o['Notes']) || '');
+  const pick = re => { const m = n.match(re); return m ? m[1].trim() : ''; };
+  return { saldo: pick(/Saldo pendiente ([^·]+)/), guia: pick(/Guía: ([^·]+)/), paq: pick(/Paquetería: ([^·]+)/) };
+}
+
+function renderPackFilterBar(counts) {
+  const list = document.getElementById('pending-list');
+  if (!document.getElementById('pack-filter-style')) {
+    const st = document.createElement('style');
+    st.id = 'pack-filter-style';
+    st.textContent = `
+      .pack-filter { display:flex; gap:6px; margin-bottom:10px; }
+      .pack-chip { flex:1; border:0.5px solid var(--border-strong); background:var(--surface); color:var(--text-muted); border-radius:20px; padding:7px 6px; font-size:12.5px; font-family:inherit; cursor:pointer; }
+      .pack-chip.is-active { background:var(--text); color:var(--surface); border-color:var(--text); }
+      .pack-chip b { font-weight:700; margin-left:3px; }
+      .pending-card--may { border-left:3px solid #534ab7; }
+      .may-pack-badge { display:inline-block; font-size:10.5px; font-weight:700; letter-spacing:.3px; text-transform:uppercase; padding:2px 7px; border-radius:20px; background:#ecebfa; color:#534ab7; margin-right:6px; }
+      .may-pack-warn { font-size:12px; font-weight:600; color:#b54708; margin-top:5px; }
+      .may-pack-items { margin-top:10px; padding:10px 12px; background:var(--surface2); border-radius:10px; font-size:13px; }
+      .may-pack-items li { display:flex; gap:10px; padding:4px 0; }
+      .may-pack-items li span:first-child { font-weight:700; min-width:34px; }`;
+    document.head.appendChild(st);
+  }
+  let bar = document.getElementById('pack-filter');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'pack-filter';
+    bar.className = 'pack-filter';
+    list.parentNode.insertBefore(bar, list);
+  }
+  bar.innerHTML = [['all', 'Todos'], ['tiktok', 'TikTok'], ['mayorista', 'Mayoristas']]
+    .map(([k, l]) => `<button class="pack-chip${packFilter === k ? ' is-active' : ''}" onclick="setPackFilter('${k}')">${l}<b>${counts[k]}</b></button>`).join('');
+}
+
 function renderPendingList() {
   const list = document.getElementById('pending-list');
   const tikTokOrders = allActiveOrders.filter(r => r['Channel'] === 'TikTok' && r['Status'] === 'Pagado');
-  if (tikTokOrders.length === 0) {
-    // "Nothing pending" and "nothing has loaded yet" look identical from
-    // this filter alone -- hasLoadedOnce (set in loadPending) tells them
-    // apart, so a failed/incomplete load is never mistaken for a real
-    // empty queue.
-    list.innerHTML = hasLoadedOnce
-      ? '<div class="empty-state">Sin órdenes TikTok pendientes de empacar 🎉</div>'
-      : '<div class="empty-state">⚠ La lista no cargó correctamente. Toca el botón de actualizar.</div>';
-    return;
-  }
+  // Mayorista orders that ship on their own (not Anotado on a TikTok label).
+  const soloMayorista = allActiveOrders.filter(r => r['Channel'] === 'Mayorista' && (r['Status'] === 'Pagado' || r['Status'] === 'No Pagado'));
 
   // Tracking IDs already finalized (possibly on another device) — drop them
   const finalizedTids = new Set(
@@ -567,39 +608,68 @@ function renderPendingList() {
     groups[tid].push(r);
   });
 
-  // Shopify/Manual orders written on a shipment's label in Pedidos
-  // (Status Anotado, Linked Shipment = that tracking ID). Shown on the
-  // card here and pre-selected as add-ons when the shipment is opened.
+  // Shopify/Manual/Mayorista orders written on a shipment's label in
+  // Pedidos (Status Anotado, Linked Shipment = that tracking ID). Shown on
+  // the card here and pre-selected as add-ons when the shipment is opened.
   const anotadoByTid = anotadoOrdersByTracking();
 
-  // Search filter — by username, tracking ID or TikTok Order ID
+  // One entry per card. A standalone Mayorista order is keyed by its own
+  // MAY-### ID -- that is also its QC record's Tracking ID.
+  const allEntries = Object.entries(groups).map(([tid, orders]) => ({
+    tid, orders, kind: 'tiktok',
+    hasMay: (anotadoByTid[tid] || []).some(o => o['Channel'] === 'Mayorista'),
+  }));
+  soloMayorista.forEach(r => {
+    const tid = String(r['Order ID']);
+    if (!finalizedTids.has(tid)) allEntries.push({ tid, orders: [r], kind: 'mayorista', hasMay: true });
+  });
+
+  const counts = {
+    all: allEntries.length,
+    tiktok: allEntries.filter(e => e.kind === 'tiktok').length,
+    mayorista: allEntries.filter(e => e.hasMay).length,
+  };
+  renderPackFilterBar(counts);
+
+  if (allEntries.length === 0) {
+    // "Nothing pending" and "nothing has loaded yet" look identical from
+    // this filter alone -- hasLoadedOnce (set in loadPending) tells them
+    // apart, so a failed/incomplete load is never mistaken for a real
+    // empty queue.
+    list.innerHTML = hasLoadedOnce
+      ? '<div class="empty-state">Sin órdenes pendientes de empacar 🎉</div>'
+      : '<div class="empty-state">⚠ La lista no cargó correctamente. Toca el botón de actualizar.</div>';
+    return;
+  }
+
+  let entries = allEntries.filter(e => packFilter === 'all' || (packFilter === 'tiktok' ? e.kind === 'tiktok' : e.hasMay));
+
+  // Search filter — by username, tracking ID, TikTok Order ID, MAY-### or guía
   const searchInput = document.getElementById('search-input');
   const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
-  let filteredEntries = Object.entries(groups);
   if (query) {
-    filteredEntries = filteredEntries.filter(([tid, orders]) => {
+    entries = entries.filter(({ tid, orders }) => {
       const username = (orders[0]['Username'] || orders[0]['Primary Username'] || '').toLowerCase();
-      const ttIds = orders.map(o => String(o['Order ID'] || '')).join(' ').toLowerCase();
-      return username.includes(query) || tid.toLowerCase().includes(query) || ttIds.includes(query);
+      const ids = orders.map(o => String(o['Order ID'] || '')).join(' ').toLowerCase();
+      const notes = orders.map(o => String(o['Notes'] || '')).join(' ').toLowerCase();
+      return username.includes(query) || tid.toLowerCase().includes(query) || ids.includes(query) || notes.includes(query);
     });
   }
 
   const sortSelect = document.getElementById('sort-select');
   const sortMode = sortSelect ? sortSelect.value : 'az';
-  const entries = filteredEntries;
-  entries.sort(([, aOrders], [, bOrders]) => {
-    const aUser = (aOrders[0]['Username'] || aOrders[0]['Primary Username'] || '').toLowerCase();
-    const bUser = (bOrders[0]['Username'] || bOrders[0]['Primary Username'] || '').toLowerCase();
-    const aDate = new Date(aOrders[0]['Created Date'] || aOrders[0]['Created Time'] || 0).getTime();
-    const bDate = new Date(bOrders[0]['Created Date'] || bOrders[0]['Created Time'] || 0).getTime();
-    if (sortMode === 'old-new') return aDate - bDate;
-    if (sortMode === 'az') return aUser.localeCompare(bUser);
-    if (sortMode === 'za') return bUser.localeCompare(aUser);
-    return bDate - aDate; // new-old (default)
+  const userOfE = e => (e.orders[0]['Username'] || e.orders[0]['Primary Username'] || '').toLowerCase();
+  const dateOfE = e => new Date(e.orders[0]['Created Date'] || e.orders[0]['Created Time'] || 0).getTime();
+  entries.sort((a, b) => {
+    if (sortMode === 'old-new') return dateOfE(a) - dateOfE(b);
+    if (sortMode === 'az') return userOfE(a).localeCompare(userOfE(b));
+    if (sortMode === 'za') return userOfE(b).localeCompare(userOfE(a));
+    return dateOfE(b) - dateOfE(a); // new-old (default)
   });
 
   if (entries.length === 0) {
-    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Sin órdenes TikTok pendientes de empacar 🎉'}</div>`;
+    const what = packFilter === 'mayorista' ? 'pedidos de mayoreo' : packFilter === 'tiktok' ? 'órdenes TikTok' : 'órdenes';
+    list.innerHTML = `<div class="empty-state">${query ? 'Sin resultados para "' + escapeHtml(query) + '"' : 'Sin ' + what + ' pendientes de empacar 🎉'}</div>`;
     return;
   }
 
@@ -607,42 +677,66 @@ function renderPendingList() {
     if (window.vpLocalUrgent && window.vpLocalUrgent.has(tid)) return true;
     const q = allQcRows.find(r => r['Tracking ID'] === tid); return !!(q && q['Urgent']);
   };
-  const userOf = ([, o]) => (o[0]['Username'] || o[0]['Primary Username'] || '').toLowerCase();
-  const urgentEntries = entries.filter(([tid]) => urgentOf(tid)).sort((a, b) => userOf(a).localeCompare(userOf(b)));
-  const normalEntries = entries.filter(([tid]) => !urgentOf(tid));
-  list.innerHTML = [...urgentEntries, ...normalEntries].map(([tid, orders]) => {
+  const urgentEntries = entries.filter(e => urgentOf(e.tid)).sort((a, b) => userOfE(a).localeCompare(userOfE(b)));
+  const normalEntries = entries.filter(e => !urgentOf(e.tid));
+
+  const photoBadge = tid => {
+    const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
+    const n = qcRow ? ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5'].filter(c => qcRow[c]).length : 0;
+    return n > 0 ? `<div class="pending-progress">✓ ${n} foto${n !== 1 ? 's' : ''} guardada${n !== 1 ? 's' : ''}</div>` : '';
+  };
+  const openAttr = shipment => `onclick='openCapture(${JSON.stringify(shipment).replace(/'/g, "&apos;")})'`;
+
+  list.innerHTML = [...urgentEntries, ...normalEntries].map(({ tid, orders, kind }) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
+    const urgentCls = urgentOf(tid) ? ' pending-card--urgent' : '';
+
+    if (kind === 'mayorista') {
+      const info = mayoristaNoteInfo(first);
+      const pieces = parseAddonProducts(first['Products']).reduce((s, p) => s + p.qty, 0);
+      return `
+      <div class="pending-card pending-card--may${urgentCls}" ${openAttr({
+        tracking_id: tid,
+        order_ids: [{ id: tid, channel: 'Mayorista' }],
+        customer_id: first['Customer ID'] || '',
+        username: username,
+      })}>
+        <div class="pending-card-top">
+          <span class="pending-username">${escapeHtml(username)} <span class="vp-qc-ttid-prominent">${escapeHtml(tid)}</span></span>
+          <span class="pending-count">${pieces} pieza${pieces !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="pending-tracking"><span class="may-pack-badge">Mayoreo</span>envío propio${info.paq ? ' · ' + escapeHtml(info.paq) : ''}${info.guia ? ' · guía ' + escapeHtml(info.guia) : ''}</div>
+        ${info.saldo ? `<div class="may-pack-warn">⚠ Saldo pendiente ${escapeHtml(info.saldo)} — confirmar pago antes de enviar</div>` : ''}
+        ${photoBadge(tid)}
+      </div>`;
+    }
+
     const orderIds = orders.map(o => ({ id: o['Order ID'], channel: 'TikTok' })).filter(o => o.id);
-
-    const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
-    const photoCount = qcRow
-      ? ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5']
-          .filter(c => qcRow[c]).length
-      : 0;
-    const progressBadge = photoCount > 0
-      ? `<div class="pending-progress">✓ ${photoCount} foto${photoCount !== 1 ? 's' : ''} guardada${photoCount !== 1 ? 's' : ''}</div>`
-      : '';
-
-    // Every order in this list is TikTok (renderPendingList filters to
-    // Channel === 'TikTok' before building groups), so orderIds here are
-    // always TikTok Order IDs -- no channel check needed before showing them.
+    // Every order in a TikTok card is TikTok, so orderIds here are always
+    // TikTok Order IDs -- no channel check needed before showing them.
     const ttIdHtml = orderIds.length
       ? ` <span class="vp-qc-ttid-prominent">${escapeHtml(orderIds[0].id)}${orderIds.length > 1 ? ' +' + (orderIds.length - 1) : ''}</span>`
       : '';
+    const extras = anotadoByTid[tid] || [];
+    const extrasText = extras.length
+      ? ' · ' + ['Shopify', 'Manual', 'Mayorista'].map(ch => { const n = extras.filter(o => (o['Channel'] || 'Manual') === ch).length; return n ? '+' + n + ' ' + ch : ''; }).filter(Boolean).join(', ')
+      : '';
+    const owing = extras.filter(o => o['Channel'] === 'Mayorista' && mayoristaNoteInfo(o).saldo);
     return `
-      <div class="pending-card${urgentOf(tid) ? ' pending-card--urgent' : ''}" onclick='openCapture(${JSON.stringify({
+      <div class="pending-card${urgentCls}" ${openAttr({
         tracking_id: first['Tracking ID'] || '',
         order_ids: orderIds,
         customer_id: first['Customer ID'] || '',
         username: username,
-      }).replace(/'/g, "&apos;")})'>
+      })}>
         <div class="pending-card-top">
           <span class="pending-username">${escapeHtml(username)}${ttIdHtml}</span>
-          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${(anotadoByTid[tid] || []).length ? ' · ' + ['Shopify','Manual'].map(ch => { const n = anotadoByTid[tid].filter(o => (o['Channel'] || 'Manual') === ch).length; return n ? '+' + n + ' ' + ch : ''; }).filter(Boolean).join(', ') : ''}</span>
+          <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${extrasText}</span>
         </div>
-        ${first['Tracking ID'] ? `<div class="pending-tracking">${escapeHtml(first['Tracking ID'])}</div>` : ''}
-        ${progressBadge}
+        ${first['Tracking ID'] ? `<div class="pending-tracking">${extras.some(o => o['Channel'] === 'Mayorista') ? '<span class="may-pack-badge">+ Mayoreo</span>' : ''}${escapeHtml(first['Tracking ID'])}</div>` : ''}
+        ${owing.length ? `<div class="may-pack-warn">⚠ Mayoreo con saldo pendiente: ${owing.map(o => escapeHtml(o['Order ID'] + ' ' + mayoristaNoteInfo(o).saldo)).join(', ')}</div>` : ''}
+        ${photoBadge(tid)}
       </div>`;
   }).join('');
 }
@@ -706,10 +800,25 @@ function openCapture(shipment, opts) {
   const idsHtml = (shipment.order_ids || []).map(o =>
     `<div style="font-size:13px;margin-top:4px">${escapeHtml(o.channel || '')} · <strong>${escapeHtml(o.id)}</strong></div>`
   ).join('');
+  // A standalone Mayorista order has no TikTok packing slip -- the item
+  // list shown here IS the packing list.
+  const mayHtml = (shipment.order_ids || []).filter(o => o.channel === 'Mayorista').map(o => {
+    const r = allActiveOrders.find(x => String(x['Order ID']) === String(o.id));
+    if (!r) return '';
+    const info = mayoristaNoteInfo(r);
+    const items = parseAddonProducts(r['Products']);
+    return `<div class="may-pack-items">
+      <div style="font-weight:700;margin-bottom:4px">Contenido · ${items.reduce((s, p) => s + p.qty, 0)} piezas</div>
+      <ul style="list-style:none;margin:0;padding:0">${items.map(p => `<li><span>${p.qty}×</span><span>${escapeHtml(p.name)}</span></li>`).join('')}</ul>
+      ${info.paq || info.guia ? `<div style="margin-top:6px;color:var(--text-muted)">${escapeHtml([info.paq, info.guia ? 'guía ' + info.guia : ''].filter(Boolean).join(' · '))}</div>` : ''}
+      ${info.saldo ? `<div class="may-pack-warn">⚠ Saldo pendiente ${escapeHtml(info.saldo)}</div>` : ''}
+    </div>`;
+  }).join('');
   document.getElementById('ship-summary').innerHTML = `
     <div class="ship-summary-username">${escapeHtml(shipment.username)}</div>
     ${idsHtml}
-    ${shipment.tracking_id ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
+    ${shipment.tracking_id && !/^MAY-\d+$/.test(shipment.tracking_id) ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
+    ${mayHtml}
   `;
 
   let restored = false;
@@ -804,6 +913,7 @@ const SHOPIFY_STORE_HANDLE = '41uqww-0a';
 
 function addonLabel(o) {
   const ch = o['Channel'] || 'Manual';
+  if (ch === 'Mayorista') return 'Mayoreo ' + o['Order ID'] + (mayoristaNoteInfo(o).saldo ? ' · ⚠ saldo ' + mayoristaNoteInfo(o).saldo : '');
   if (ch !== 'Shopify') return ch;
   const n = String(o['Shopify Order Number'] || '').trim().replace(/^#/, '');
   return n ? `Shopify #${n}` : 'Shopify';
@@ -1099,6 +1209,19 @@ async function submitQC() {
     return;
   }
 
+  // A wholesale order normally only ships once fully paid -- the office
+  // may still say "send it", so this asks instead of blocking.
+  const owing = [...selected.order_ids, ...selectedAddons]
+    .filter(o => o.channel === 'Mayorista')
+    .map(o => allActiveOrders.find(x => String(x['Order ID']) === String(o.id)))
+    .filter(r => r && mayoristaNoteInfo(r).saldo);
+  if (owing.length && !confirm(owing.map(r => `${r['Order ID']}: saldo pendiente ${mayoristaNoteInfo(r).saldo}`).join('\n') +
+      '\n\nEste pedido de mayoreo aún no está liquidado. ¿Enviar de todos modos?')) {
+    btn.disabled = false;
+    btn.textContent = 'Enviar';
+    return;
+  }
+
   localFinalizeInProgress = true;  // suppress "shipped elsewhere" false-positive from our own poll tick
 
   savingInProgress = true;
@@ -1160,11 +1283,9 @@ async function submitQC() {
 // ── Lightbox ─────────────────────────────────────────────────────────────
 
 function openLightbox(url) {
-  if (window.VP && VP.lightbox) { VP.lightbox(url); return; }
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;-webkit-tap-highlight-color:transparent';
-  const big = /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_1600,c_limit,q_auto,f_auto/') : url;
-  overlay.innerHTML = `<img src="${big}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px">`;
+  overlay.innerHTML = `<img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px">`;
   const close = () => {
     overlay.remove();
     document.removeEventListener('keydown', onKey);
