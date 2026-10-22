@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-21.3';
+const SCRIPT_VERSION = '2026-10-22.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -368,6 +368,7 @@ function doGet(e) {
     if (action === 'qc') return getQC(e);
     if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
     if (action === 'mayoreo_data') return mayoreoAllowed(identity) ? mayoreoDataAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_products') return mayoreoAllowed(identity) ? mayoreoProductsAction(e) : jsonResponse({ error: 'unauthorized' });
 
     // Ajustes-only tools -- duplicate finders/mergers, product merge
     // search/history. Staff role is a valid token but not allowed here.
@@ -935,8 +936,15 @@ function doPost(e) {
 function dispatchPostAction(action, body, role) {
     if (action === 'mayoreo_save_settings') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveSettingsAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_save_cliente') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveClienteAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'mayoreo_save_order') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveOrderAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'mayoreo_delete_order') return mayoreoAllowed(_currentIdentity) ? mayoreoDeleteOrderAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_save_order') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveOrderSynced(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_delete_order') return mayoreoAllowed(_currentIdentity) ? mayoreoDeleteOrderSynced(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_resync') return mayoreoAllowed(_currentIdentity) ? mayoreoResyncAction(body) : jsonResponse({ error: 'unauthorized' });
+    // Mayoreo sync hooks -- these run before the normal routes further down.
+    if (action === 'save_qc') return saveQCWithMayoreo(body);
+    if (action === 'update_order_status') return mayoreoAfterOrderChange(updateOrderStatus(body), body.order_id);
+    if (action === 'update_order') return mayoreoAfterOrderChange(updateOrder(body), body.order_id);
+    if (action === 'mayoreo_save_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoSavePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_delete_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoDeletePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
     if (action === 'update_order_status') return updateOrderStatus(body);
@@ -6900,9 +6908,11 @@ function installSessionClearTrigger() {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAYOREO — wholesale channel (Mayoristas tab). Lives in its own spreadsheet.
-// Access: admins + USER_KARIN. Tiers are NOT stored here: the frontend
-// computes them live from history + settings, so changing a setting is
-// retroactive automatically. Saved orders keep the discount they were saved with.
+// Access: admins + USER_KARIN. Tiers are NOT stored: the frontend computes
+// them live from history + settings, so setting changes are retroactive.
+// v2 (2026-10-21): client contact/address/invoice data, payment log,
+// status history, shipping block, templates (Pack Inicial / Especial),
+// product list for autocomplete, TikTok spend only when it counts.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAYOREO_EXTRA_USERS = ['KARIN'];
@@ -6913,17 +6923,28 @@ const MAYOREO_DEFAULT_SETTINGS = {
     { nivel: 2, min: 20000, pct: 19 },
     { nivel: 3, min: 50000, pct: 23 }
   ],
-  count_tiktok: false,          // TikTok spend counts toward history
-  history_basis: 'after',       // 'after' = total after discount, 'before' = subtotal
-  current_counts: false,        // current order counts toward its own tier
-  lapse_rule: 'flag',           // 'flag' | 'drop_one' | 'drop_to_1'
+  count_tiktok: false,
+  history_basis: 'after',
+  current_counts: false,
+  lapse_rule: 'flag',
   lapse_days: 30,
-  especial_mode: 'manual',      // 'manual' unit price | 'percent' off store price
+  reactivate_days: 21,
+  especial_mode: 'manual',
   especial_default_pct: 25,
   min_pieces: 3,
+  quote_followup_days: 3,
+  prep_days: 7,
   pdf_validity_days: 7,
-  pdf_bank_info: ''
+  pdf_bank_info: '',
+  wa_tpl_quote: 'Hola {nombre} 😊 Te comparto tu cotización {pedido} por {total}: {pdf}',
+  wa_tpl_deposit: 'Hola {nombre}, para apartar tu pedido {pedido} el anticipo del 50% es de {anticipo}. ¡Gracias!',
+  wa_tpl_ready: 'Hola {nombre}, tu pedido {pedido} ya está listo ✨ El saldo restante es {saldo} + envío.',
+  wa_tpl_shipped: 'Hola {nombre}, tu pedido {pedido} ya va en camino 🚚 Paquetería: {paqueteria}, guía: {guia}'
 };
+
+const MAYOREO_JSON_COLS = ['PDF Historial', 'Pagos', 'Status Historial', 'Items'];
+const MAYOREO_TEXT_COLS_CLIENTES = ['Customer ID', 'Teléfono', 'CP', 'CP Fiscal', 'RFC'];
+const MAYOREO_TEXT_COLS_ORDERS = ['Mayoreo ID', 'Customer ID', 'Linked Order IDs', 'Guía'];
 
 function mayoreoAllowed(identity) {
   if (!identity) return false;
@@ -6937,7 +6958,10 @@ function getMayoreoSheet(name) {
   return sh;
 }
 
-// Reads a tab into [{header: value}] objects. Dates become yyyy-MM-dd.
+function mayoreoNow() { return Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH:mm'); }
+function mayoreoToday() { return Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd'); }
+
+// Reads a tab into [{header: value}] objects. Dates -> yyyy-MM-dd, JSON columns parsed.
 function mayoreoReadTab(name) {
   const sh = getMayoreoSheet(name);
   const data = sh.getDataRange().getValues();
@@ -6950,6 +6974,9 @@ function mayoreoReadTab(name) {
     headers.forEach((h, j) => {
       let v = data[i][j];
       if (v instanceof Date) v = Utilities.formatDate(v, MX_TZ, 'yyyy-MM-dd');
+      if (MAYOREO_JSON_COLS.indexOf(h) >= 0) {
+        try { v = v ? JSON.parse(v) : []; } catch (e) { v = []; }
+      }
       o[h] = v;
     });
     rows.push(o);
@@ -6968,7 +6995,6 @@ function mayoreoGetSettings() {
   return s;
 }
 
-// TikTok spend per Customer ID (only for the given IDs). Cancelled rows skipped.
 function mayoreoTikTokSpend(customerIds) {
   const want = {};
   customerIds.forEach(id => { want[id] = true; });
@@ -6987,12 +7013,33 @@ function mayoreoTikTokSpend(customerIds) {
   return out;
 }
 
+// Fills in Usuario / Nombre for clients added before v2 (one-time, self-healing).
+function mayoreoBackfillNames(clientes) {
+  const missing = clientes.filter(c => !c['Usuario']);
+  if (!missing.length) return;
+  const custs = sheetToObjects(getCustomersSheet());
+  const byId = {};
+  custs.forEach(c => { byId[String(c['Customer ID'])] = c; });
+  missing.forEach(c => {
+    const src = byId[String(c['Customer ID'])];
+    if (!src) return;
+    const upd = { 'Usuario': src['Primary Username'] || '' };
+    const full = [src['First Name'], src['Surname']].filter(Boolean).join(' ').trim();
+    if (!c['Nombre'] && full) upd['Nombre'] = full;
+    mayoreoUpsert('Mayoreo Clientes', 'Customer ID', c['Customer ID'], upd, MAYOREO_TEXT_COLS_CLIENTES);
+    Object.assign(c, upd);
+  });
+}
+
 // GET ?action=mayoreo_data — everything the tab needs in one call.
 function mayoreoDataAction(e) {
   const settings = mayoreoGetSettings();
   const clientes = mayoreoReadTab('Mayoreo Clientes').rows;
+  mayoreoBackfillNames(clientes);
   const orders = mayoreoReadTab('Mayoreo Orders').rows;
   const items = mayoreoReadTab('Mayoreo Items').rows;
+  let plantillas = [];
+  try { plantillas = mayoreoReadTab('Mayoreo Plantillas').rows; } catch (err) { plantillas = []; }
   const byId = {};
   items.forEach(it => {
     const id = String(it['Mayoreo ID']);
@@ -7000,18 +7047,38 @@ function mayoreoDataAction(e) {
   });
   orders.forEach(o => {
     o.items = (byId[String(o['Mayoreo ID'])] || []).sort((a, b) => Number(a['Línea']) - Number(b['Línea']));
-    try { o['PDF Historial'] = o['PDF Historial'] ? JSON.parse(o['PDF Historial']) : []; } catch (err) { o['PDF Historial'] = []; }
   });
   const ids = clientes.map(c => String(c['Customer ID']));
   return jsonResponse({
     settings: settings,
     clientes: clientes,
     orders: orders,
-    tiktok_spend: ids.length ? mayoreoTikTokSpend(ids) : {}
+    plantillas: plantillas,
+    // Reading the whole Orders sheet is the slow part -- only when it counts.
+    tiktok_spend: settings.count_tiktok && ids.length ? mayoreoTikTokSpend(ids) : {}
   });
 }
 
-// POST { action:'mayoreo_save_settings', settings:{...} } — full replace.
+// GET ?action=mayoreo_products — catalog names for quote autocomplete.
+function mayoreoProductsAction(e) {
+  const parents = sheetToObjects(getProductParentsSheet());
+  const pName = {};
+  parents.forEach(p => {
+    const n = String(p['Parent Name'] || '');
+    if (n && n.indexOf('(merged→') < 0) pName[String(p['Parent ID'])] = n;
+  });
+  const variants = sheetToObjects(getProductVariantsSheet());
+  const out = [];
+  variants.forEach(v => {
+    const parent = pName[String(v['Parent ID'])];
+    if (!parent) return;
+    const vn = String(v['Variant Name'] || '');
+    if (vn.indexOf('(merged→') >= 0) return;
+    out.push({ id: String(v['Catalog ID']), name: vn && vn !== parent ? parent + ' (' + vn + ')' : parent });
+  });
+  return jsonResponse({ products: out });
+}
+
 function mayoreoSaveSettingsAction(body) {
   const s = body.settings || {};
   const rows = Object.keys(MAYOREO_DEFAULT_SETTINGS)
@@ -7025,7 +7092,7 @@ function mayoreoSaveSettingsAction(body) {
   return jsonResponse({ ok: true, settings: mayoreoGetSettings() });
 }
 
-// Upserts one row by key column. obj keys = header names. Returns row number.
+// Upserts one row by key column. obj keys = header names. Returns { rowNum, before }.
 function mayoreoUpsert(sheetName, keyHeader, keyValue, obj, textCols) {
   const sh = getMayoreoSheet(sheetName);
   const lastCol = sh.getLastColumn();
@@ -7035,32 +7102,36 @@ function mayoreoUpsert(sheetName, keyHeader, keyValue, obj, textCols) {
   const last = sh.getLastRow();
   const keys = last > 1 ? sh.getRange(2, iKey + 1, last - 1, 1).getValues().map(r => String(r[0])) : [];
   let rowNum = keys.indexOf(String(keyValue));
-  let row;
+  let row, before = null;
   if (rowNum >= 0) {
     rowNum += 2;
     row = sh.getRange(rowNum, 1, 1, lastCol).getValues()[0];
+    before = {};
+    h.forEach((k, i) => { before[k] = row[i]; });
   } else {
     rowNum = last + 1;
     row = h.map(() => '');
   }
   Object.keys(obj).forEach(k => {
     const i = h.indexOf(k);
-    if (i >= 0) row[i] = obj[k];
+    if (i < 0) return;
+    let v = obj[k];
+    if (v !== null && typeof v === 'object') v = JSON.stringify(v);
+    row[i] = v;
   });
   row[iKey] = keyValue;
   forceTextFormat(sh, h, textCols || [], rowNum, 1);
   sh.getRange(rowNum, 1, 1, lastCol).setValues([row]);
-  return rowNum;
+  return { rowNum: rowNum, before: before };
 }
 
-// POST { action:'mayoreo_save_cliente', cliente:{ 'Customer ID':..., ... } }
 function mayoreoSaveClienteAction(body) {
-  const c = body.cliente || {};
+  const c = Object.assign({}, body.cliente || {});
   const cid = String(c['Customer ID'] || '').trim();
   if (!cid) return jsonResponse({ error: 'Falta Customer ID' });
   const existing = mayoreoReadTab('Mayoreo Clientes').rows.some(r => String(r['Customer ID']) === cid);
-  if (!existing && !c['Fecha Alta']) c['Fecha Alta'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd');
-  mayoreoUpsert('Mayoreo Clientes', 'Customer ID', cid, c, ['Customer ID']);
+  if (!existing && !c['Fecha Alta']) c['Fecha Alta'] = mayoreoToday();
+  mayoreoUpsert('Mayoreo Clientes', 'Customer ID', cid, c, MAYOREO_TEXT_COLS_CLIENTES);
   logAuditSafe('mayoreo_save_cliente', cid, c);
   return jsonResponse({ ok: true });
 }
@@ -7075,25 +7146,34 @@ function mayoreoNextId() {
   return 'MAY-' + String(max + 1).padStart(3, '0');
 }
 
-// POST { action:'mayoreo_save_order', order:{ header fields }, items:[{...}] }
-// New order when order['Mayoreo ID'] is empty. Items fully replace the old set.
+// POST { action:'mayoreo_save_order', order:{...}, items:[...]|undefined }
+// New when order['Mayoreo ID'] is empty. Items (when sent) fully replace the
+// old set. Status changes are stamped into Status Historial server-side.
 function mayoreoSaveOrderAction(body) {
   const o = Object.assign({}, body.order || {});
   const items = Array.isArray(body.items) ? body.items : null;
   if (!o['Customer ID']) return jsonResponse({ error: 'Falta Customer ID' });
   let id = String(o['Mayoreo ID'] || '').trim();
   const isNew = !id;
+  let prevStatus = '', prevHist = [];
   if (isNew) {
     id = mayoreoNextId();
     o['Creado Por'] = _currentIdentity ? _currentIdentity.name : '';
-    if (!o['Fecha']) o['Fecha'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd');
+    if (!o['Fecha']) o['Fecha'] = mayoreoToday();
     if (!o['Status']) o['Status'] = 'Cotización';
+  } else {
+    const cur = mayoreoReadTab('Mayoreo Orders').rows.find(r => String(r['Mayoreo ID']) === id);
+    if (cur) { prevStatus = cur['Status']; prevHist = Array.isArray(cur['Status Historial']) ? cur['Status Historial'] : []; }
+  }
+  if (o['Status'] && o['Status'] !== prevStatus) {
+    o['Status Historial'] = prevHist.concat([{ status: o['Status'], fecha: mayoreoNow(), por: _currentIdentity ? _currentIdentity.name : '' }]);
+  } else {
+    delete o['Status Historial'];   // never let a stale client copy overwrite it
   }
   o['Mayoreo ID'] = id;
-  o['Actualizado'] = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH:mm');
-  if (Array.isArray(o['PDF Historial'])) o['PDF Historial'] = JSON.stringify(o['PDF Historial']);
+  o['Actualizado'] = mayoreoNow();
   delete o.items;
-  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, o, ['Mayoreo ID', 'Customer ID', 'Linked Order IDs']);
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, o, MAYOREO_TEXT_COLS_ORDERS);
 
   if (items) {
     const sh = getMayoreoSheet('Mayoreo Items');
@@ -7116,11 +7196,10 @@ function mayoreoSaveOrderAction(body) {
       sh.getRange(2, 1, out.length, lastCol).setValues(out);
     }
   }
-  logAuditSafe(isNew ? 'mayoreo_create_order' : 'mayoreo_update_order', id, { order: o, items: items ? items.length : null });
+  logAuditSafe(isNew ? 'mayoreo_create_order' : 'mayoreo_update_order', id, { status: o['Status'] || '', items: items ? items.length : null });
   return jsonResponse({ ok: true, id: id });
 }
 
-// POST { action:'mayoreo_delete_order', id }
 function mayoreoDeleteOrderAction(body) {
   const id = String(body.id || '');
   if (!id) return jsonResponse({ error: 'Falta id' });
@@ -7139,7 +7218,39 @@ function mayoreoDeleteOrderAction(body) {
   return jsonResponse({ ok: true });
 }
 
-// Audit is best-effort here — never fail a save because of logging.
+// POST { action:'mayoreo_save_plantilla', plantilla:{ 'Plantilla ID'?, Nombre, Tipo, Activa, Vence, Items:[...] } }
+function mayoreoSavePlantillaAction(body) {
+  const p = Object.assign({}, body.plantilla || {});
+  if (!String(p['Nombre'] || '').trim()) return jsonResponse({ error: 'Falta nombre' });
+  let id = String(p['Plantilla ID'] || '').trim();
+  if (!id) {
+    let max = 0;
+    mayoreoReadTab('Mayoreo Plantillas').rows.forEach(r => {
+      const m = String(r['Plantilla ID'] || '').match(/^PL-(\d+)$/);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    });
+    id = 'PL-' + String(max + 1).padStart(3, '0');
+  }
+  p['Plantilla ID'] = id;
+  p['Actualizado'] = mayoreoNow();
+  mayoreoUpsert('Mayoreo Plantillas', 'Plantilla ID', id, p, ['Plantilla ID']);
+  logAuditSafe('mayoreo_save_plantilla', id, { nombre: p['Nombre'] });
+  return jsonResponse({ ok: true, id: id });
+}
+
+function mayoreoDeletePlantillaAction(body) {
+  const id = String(body.id || '');
+  const sh = getMayoreoSheet('Mayoreo Plantillas');
+  const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  const iId = h.indexOf('Plantilla ID');
+  const last = sh.getLastRow();
+  if (last < 2) return jsonResponse({ ok: true });
+  const vals = sh.getRange(2, iId + 1, last - 1, 1).getValues();
+  for (let i = vals.length - 1; i >= 0; i--) if (String(vals[i][0]) === id) sh.deleteRow(i + 2);
+  logAuditSafe('mayoreo_delete_plantilla', id, {});
+  return jsonResponse({ ok: true });
+}
+
 function logAuditSafe(action, target, details) {
   try { logAuditEvent(action, 'Mayoreo', target, details); } catch (e) {}
 }
@@ -7232,4 +7343,251 @@ function archiveOldQcPhotos(dryRun) {
   flushAudit();
   Logger.log(JSON.stringify(summary));
   return summary;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAYOREO ↔ PEDIDOS / EMPACAR SYNC
+// A confirmed wholesale order (Apartado, Listo, Pagado, Enviado) gets a
+// MIRROR row in the Orders sheet: Channel 'Mayorista', Order ID = MAY-###.
+// That one row is what makes the rest of the platform work unchanged:
+// Pedidos lists it under the customer and can mark it Anotado on a TikTok
+// shipment; Empacar shows it (inside that TikTok card, or as its own card
+// when it ships alone); the Empacar finalize ships it like any Manual order.
+//
+// Who owns what:
+//   Mayoreo sheet  -> items, prices, payments, client (the commercial side)
+//   Orders mirror  -> packing state: Anotado + Linked Shipment, Enviado
+// Mayoreo -> mirror after every Mayoristas save; mirror -> Mayoreo after a
+// Pedidos status change on a MAY-### row and after an Empacar finalize.
+// 'Sincronizar con Pedidos' (Mayoristas > Ajustes) re-runs everything.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAYOREO_MIRROR_STATUSES = ['Apartado', 'Listo', 'Pagado', 'Enviado'];
+const MAYOREO_LEGACY_STATUS = { 'Anticipo': 'Apartado', 'Liquidado': 'Pagado' };
+
+function isMayoreoId(id) { return /^MAY-\d+$/.test(String(id || '').trim()); }
+
+function mayoreoFmtMoney(n) { return '$' + Math.round(Number(n) || 0).toLocaleString('en-US'); }
+
+// Small Mayoreo tabs, read once and shared across a whole resync.
+function mayoreoSyncCache() {
+  return {
+    orders:   mayoreoReadTab('Mayoreo Orders').rows,
+    items:    mayoreoReadTab('Mayoreo Items').rows,
+    clientes: mayoreoReadTab('Mayoreo Clientes').rows,
+  };
+}
+
+function mayoreoPaid(o) {
+  const pagos = Array.isArray(o['Pagos']) ? o['Pagos'] : [];
+  let p = pagos.reduce((s, x) => s + (Number(x.monto) || 0), 0);
+  if (!pagos.length) p = (Number(o['Anticipo Monto']) || 0) + (Number(o['Liquidación Monto']) || 0);   // pre-v2 orders
+  return p;
+}
+
+// Mayoreo -> Orders. Creates, updates or removes the mirror row of one order.
+function mayoreoSyncMirror(id, cache) {
+  cache = cache || mayoreoSyncCache();
+  const o = cache.orders.find(r => String(r['Mayoreo ID']) === String(id));
+  const sheet = getOrdersSheet();
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const col = name => oh.indexOf(name) + 1;
+  const rowIndex = findOrderRow(sheet, id);
+  const curStatus = rowIndex && col('Status') ? String(sheet.getRange(rowIndex, col('Status')).getValue()) : '';
+  const shipped = curStatus === 'Enviado' || curStatus === 'Archivado';
+
+  const status = o ? (MAYOREO_LEGACY_STATUS[o['Status']] || o['Status']) : '';
+  // Deleted, back to Cotización, or Cancelado: the mirror goes away --
+  // unless the package already left, then it stays as the shipping record.
+  if (!o || MAYOREO_MIRROR_STATUSES.indexOf(status) < 0) {
+    if (rowIndex && !shipped) {
+      sheet.deleteRow(rowIndex);
+      logAuditEvent('mayoreo_mirror_removed', 'Order', id, { reason: o ? status : 'deleted' });
+      return 'removed';
+    }
+    return 'none';
+  }
+
+  const items = cache.items.filter(it => String(it['Mayoreo ID']) === String(id))
+    .sort((a, b) => Number(a['Línea']) - Number(b['Línea']));
+  const products = items.map(it => `${Number(it['Cantidad']) || 0} x ${String(it['Artículo'] || '').replace(/;/g, ',')}`).join('; ');
+  const cl = cache.clientes.find(c => String(c['Customer ID']) === String(o['Customer ID'])) || {};
+  const pending = Math.max(0, (Number(o['Total']) || 0) + (Number(o['Envío']) || 0) - mayoreoPaid(o));
+  // Notes carry what packers need to know -- they never open Mayoristas.
+  const notes = [
+    'Mayoreo ' + id,
+    pending > 0 ? 'Saldo pendiente ' + mayoreoFmtMoney(pending) : 'Pagado ✓',
+    o['Paquetería'] ? 'Paquetería: ' + o['Paquetería'] : '',
+    o['Guía'] ? 'Guía: ' + o['Guía'] : '',
+  ].filter(Boolean).join(' · ');
+
+  let newStatus;
+  if (shipped) newStatus = curStatus;                       // already left: never pull it back
+  else if (status === 'Enviado') newStatus = 'Enviado';     // marked shipped in Mayoristas
+  else if (curStatus === 'Anotado') newStatus = 'Anotado';  // linked in Pedidos: keep the link
+  else newStatus = pending > 0 ? 'No Pagado' : 'Pagado';
+
+  const fields = {
+    'Customer ID': o['Customer ID'] || '',
+    'Primary Username': cl['Usuario'] || cl['Nombre'] || '',
+    'Products': products,
+    'Price': Number(o['Total']) || 0,
+    'Notes': notes,
+  };
+
+  if (rowIndex) {
+    Object.keys(fields).forEach(k => { if (col(k)) sheet.getRange(rowIndex, col(k)).setValue(fields[k]); });
+    if (newStatus !== curStatus && col('Status')) {
+      sheet.getRange(rowIndex, col('Status')).setValue(newStatus);
+      applyStatusSideEffects(sheet, rowIndex, newStatus, oh, curStatus);
+      logAudit('mayoreo_mirror_status', 'Order', id, 'Status', curStatus, newStatus);
+    }
+    return 'updated';
+  }
+
+  const values = Object.assign({}, fields, {
+    'Order ID': id,
+    'Channel': 'Mayorista',
+    'Status': newStatus,
+    'Created Date': nowISO(),
+    'Order Date': o['Fecha'] || '',
+    'Shipped Date': newStatus === 'Enviado' ? nowISO() : '',
+  });
+  const row = oh.map(h => (values[h] !== undefined ? values[h] : ''));
+  const newRowNum = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, oh, ['Order ID', 'Tracking ID'], newRowNum, 1);
+  sheet.appendRow(row);
+  logAuditEvent('mayoreo_mirror_created', 'Order', id, { status: newStatus });
+  return 'created';
+}
+
+// Orders -> Mayoreo. Copies the packing state of a mirror row back.
+function mayoreoPullFromMirror(id, cache) {
+  cache = cache || mayoreoSyncCache();
+  const o = cache.orders.find(r => String(r['Mayoreo ID']) === String(id));
+  if (!o) return 'none';
+  const sheet = getOrdersSheet();
+  const rowIndex = findOrderRow(sheet, id);
+  if (!rowIndex) return 'none';
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const get = name => { const c = oh.indexOf(name); return c >= 0 ? sheet.getRange(rowIndex, c + 1).getValue() : ''; };
+  const st = String(get('Status'));
+  const link = String(get('Linked Shipment') || '').trim();
+
+  const upd = {};
+  if (st === 'Anotado') upd['Envío TikTok'] = link;
+  else if (st === 'Pagado' || st === 'No Pagado') upd['Envío TikTok'] = '';
+  if ((st === 'Enviado' || st === 'Archivado') && o['Status'] !== 'Enviado') {
+    upd['Status'] = 'Enviado';
+    const hist = Array.isArray(o['Status Historial']) ? o['Status Historial'] : [];
+    upd['Status Historial'] = hist.concat([{ status: 'Enviado', fecha: mayoreoNow(), por: _currentIdentity ? _currentIdentity.name : '' }]);
+    if (link && !isMayoreoId(link)) {
+      upd['Envío TikTok'] = link;
+      if (!o['Guía']) upd['Guía'] = link;
+    }
+  }
+  if (!Object.keys(upd).length) return 'none';
+  upd['Actualizado'] = mayoreoNow();
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS.concat(['Envío TikTok']));
+  Object.assign(o, upd);
+  return 'pulled';
+}
+
+// After an Empacar finalize that shipped MAY-### orders.
+function mayoreoMarkShipped(id, trackingId, tiktokIds, qcId) {
+  const cache = mayoreoSyncCache();
+  const o = cache.orders.find(r => String(r['Mayoreo ID']) === String(id));
+  if (!o) return;
+  const upd = { 'QC ID': qcId || '', 'Actualizado': mayoreoNow() };
+  if (o['Status'] !== 'Enviado') {
+    upd['Status'] = 'Enviado';
+    const hist = Array.isArray(o['Status Historial']) ? o['Status Historial'] : [];
+    upd['Status Historial'] = hist.concat([{ status: 'Enviado', fecha: mayoreoNow(), por: _currentIdentity ? _currentIdentity.name : '' }]);
+  }
+  if (trackingId && !isMayoreoId(trackingId)) {        // travelled inside a TikTok package
+    upd['Envío TikTok'] = trackingId;
+    if (!o['Guía']) upd['Guía'] = trackingId;
+  }
+  if (tiktokIds && tiktokIds.length) upd['Linked Order IDs'] = tiktokIds.join(', ');
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS.concat(['Envío TikTok', 'QC ID']));
+}
+
+function mayoreoParse(res) {
+  try { return JSON.parse(res.getContent()); } catch (e) { return null; }
+}
+
+// POST mayoreo_save_order, then refresh the mirror. An order whose mirror
+// already left through Empacar stays Enviado, even if the Mayoristas page
+// that saved it was opened before the package was sent.
+function mayoreoSaveOrderSynced(body) {
+  const ord = body.order || {};
+  const id = String(ord['Mayoreo ID'] || '');
+  if (isMayoreoId(id) && ord['Status'] && ord['Status'] !== 'Enviado') {
+    const sheet = getOrdersSheet();
+    const ri = findOrderRow(sheet, id);
+    if (ri) {
+      const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      const st = String(sheet.getRange(ri, oh.indexOf('Status') + 1).getValue());
+      if (st === 'Enviado' || st === 'Archivado') ord['Status'] = 'Enviado';
+    }
+  }
+  const res = mayoreoSaveOrderAction(body);
+  const parsed = mayoreoParse(res);
+  if (!parsed || !parsed.ok || !parsed.id) return res;
+  try { parsed.mirror = mayoreoSyncMirror(parsed.id); } catch (e) { parsed.mirror_error = e.message; }
+  return jsonResponse(parsed);
+}
+
+// POST mayoreo_delete_order, then remove the mirror (unless already shipped).
+function mayoreoDeleteOrderSynced(body) {
+  const res = mayoreoDeleteOrderAction(body);
+  const parsed = mayoreoParse(res);
+  if (!parsed || !parsed.ok) return res;
+  try { parsed.mirror = mayoreoSyncMirror(String(body.id || '')); } catch (e) { parsed.mirror_error = e.message; }
+  return jsonResponse(parsed);
+}
+
+// update_order_status / update_order on a MAY-### row (Anotado, Enviado...)
+// -> copy the new packing state back to Mayoreo. Other orders pass straight through.
+function mayoreoAfterOrderChange(res, orderId) {
+  if (!isMayoreoId(orderId)) return res;
+  const parsed = mayoreoParse(res);
+  if (!parsed || parsed.error) return res;
+  try { mayoreoPullFromMirror(String(orderId)); } catch (e) { parsed.mayoreo_sync_error = e.message; }
+  return jsonResponse(parsed);
+}
+
+// save_qc: the normal save; after a finalize that shipped MAY-### orders,
+// mark them Enviado in Mayoreo with the shipment, TikTok IDs and QC ID.
+function saveQCWithMayoreo(body) {
+  const res = saveQC(body);
+  if (!body.finalize) return res;
+  const mayIds = (body.order_ids || []).map(x => String(x.id)).filter(isMayoreoId);
+  if (!mayIds.length) return res;
+  const parsed = mayoreoParse(res);
+  if (!parsed || parsed.error) return res;
+  try {
+    const shippedIds = (parsed.orders || []).filter(x => x.result === 'shipped').map(x => String(x.order_id));
+    const ttIds = (body.order_ids || []).filter(x => x.channel === 'TikTok').map(x => String(x.id));
+    mayIds.filter(id => shippedIds.indexOf(id) >= 0)
+      .forEach(id => mayoreoMarkShipped(id, String(body.tracking_id || ''), ttIds, parsed.qc_id));
+  } catch (e) { parsed.mayoreo_sync_error = e.message; }
+  return jsonResponse(parsed);
+}
+
+// POST mayoreo_resync -- pull packing state, then push every order again.
+function mayoreoResyncAction(body) {
+  const cache = mayoreoSyncCache();
+  const out = { pulled: 0, created: 0, updated: 0, removed: 0, errors: [] };
+  cache.orders.forEach(o => {
+    const id = String(o['Mayoreo ID'] || '');
+    if (!isMayoreoId(id)) return;
+    try {
+      if (mayoreoPullFromMirror(id, cache) === 'pulled') out.pulled++;
+      const r = mayoreoSyncMirror(id, cache);
+      if (out[r] !== undefined) out[r]++;
+    } catch (e) { out.errors.push(id + ': ' + e.message); }
+  });
+  logAuditEvent('mayoreo_resync', 'Mayoreo', '', out);
+  return jsonResponse(Object.assign({ ok: true }, out));
 }
