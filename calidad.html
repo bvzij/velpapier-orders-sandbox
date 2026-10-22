@@ -77,15 +77,6 @@
       </label>
 
       <div class="cal-field">
-        <span class="cal-field-label">Envíos por página</span>
-        <select class="vp-input" id="cal-per-page" aria-label="Envíos por página">
-          <option value="20">20</option>
-          <option value="50">50</option>
-          <option value="100" selected>100</option>
-        </select>
-      </div>
-
-      <div class="cal-field">
         <span class="cal-field-label">Desde</span>
         <input class="vp-input" id="cal-from" type="date">
       </div>
@@ -95,6 +86,7 @@
         <input class="vp-input" id="cal-to" type="date">
       </div>
 
+      <button class="refresh-btn" id="cal-search-go" onclick="applyTextFilters()" style="width:100%;margin-bottom:8px;font-weight:600">Buscar</button>
       <button class="refresh-btn cal-clear-btn" id="cal-clear">Limpiar filtros</button>
     </aside>
 
