@@ -104,8 +104,24 @@ function statusPillClass(status) {
 }
 
 function channelTag(channel) {
+  if (channel === 'Mayorista') return '<span class="channel-tag channel-manual" style="background:#ecebfa;color:#534ab7">Mayorista</span>';
   const cls = channel === 'TikTok' ? 'channel-tiktok' : channel === 'Shopify' ? 'channel-shopify' : 'channel-manual';
   return `<span class="channel-tag ${cls}">${escapeHtml(channel || 'Manual')}</span>`;
+}
+
+// Mayorista rows are mirrors of orders that live in the Mayoristas tab
+// (Order ID MAY-###). Contents, prices and payments are edited there; here
+// they only show up under the customer and can be marked Anotado.
+function canOpenMayoristas() {
+  const name = (VP.getUserName ? VP.getUserName() : '').toUpperCase();
+  return VP.getRole() === 'admin' || name === 'KARIN';
+}
+function mayoristaLine(r) {
+  const id = escapeHtml(r.ID);
+  const label = canOpenMayoristas()
+    ? `<a href="mayoristas.html#${id}" class="notas-link" title="Abrir en Mayoristas" onclick="event.stopPropagation()">Mayoreo ${id}</a>`
+    : `Mayoreo ${id}`;
+  return `${label} · ${summarizeProductCount(r.Producto)}`;
 }
 
 function mapFromApi(r) {
@@ -1935,20 +1951,32 @@ function renderOrderRow(r, showActions) {
   // The username used to repeat on every row even though the group header
   // directly above already shows it once. Only the channel tag stays here;
   // opening the customer's history moved onto that header name.
-  info.innerHTML = `<div class="order-userline">${channelTag(r.Channel)}</div><div class="order-producto">${shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
+  const isMayorista = r.Channel === 'Mayorista';
+  info.innerHTML = `<div class="order-userline">${channelTag(r.Channel)}</div><div class="order-producto">${isMayorista ? mayoristaLine(r) : shopifyOrderLine(r)}</div><div class="order-meta">${metaParts.join(' · ')}${notasHtml ? ' · ' + notasHtml : ''}</div>`;
 
   const hoverZone = document.createElement('div');
   hoverZone.className = 'row-hover-zone';
 
-  const editBtn = document.createElement('button');
-  editBtn.className = 'btn btn-xs btn-edit'; editBtn.textContent = 'Editar';
-  editBtn.addEventListener('click', () => showEditModal(id));
-  hoverZone.appendChild(editBtn);
+  if (isMayorista) {
+    // Editing or deleting the mirror here would put it out of sync with
+    // Mayoristas -- that page is where this order is changed.
+    if (canOpenMayoristas()) {
+      const openBtn = document.createElement('button');
+      openBtn.className = 'btn btn-xs btn-edit'; openBtn.textContent = 'Abrir en Mayoristas';
+      openBtn.addEventListener('click', () => { window.location.href = 'mayoristas.html#' + encodeURIComponent(id); });
+      hoverZone.appendChild(openBtn);
+    }
+  } else {
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn btn-xs btn-edit'; editBtn.textContent = 'Editar';
+    editBtn.addEventListener('click', () => showEditModal(id));
+    hoverZone.appendChild(editBtn);
 
-  const delBtn = document.createElement('button');
-  delBtn.className = 'btn btn-xs btn-danger'; delBtn.textContent = 'Eliminar';
-  delBtn.addEventListener('click', () => requestDelete(id, r.Producto || 'este pedido'));
-  hoverZone.appendChild(delBtn);
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-xs btn-danger'; delBtn.textContent = 'Eliminar';
+    delBtn.addEventListener('click', () => requestDelete(id, r.Producto || 'este pedido'));
+    hoverZone.appendChild(delBtn);
+  }
 
   const prev = previousStatus(status);
   if (prev && showActions) {
@@ -2369,7 +2397,7 @@ function renderTikTokTab() {
         ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeHtml(x.ShopifyOrderId)}" target="_blank" rel="noopener noreferrer" class="notas-link">${escapeHtml(label)}</a>`
         : escapeHtml(label);
     }
-    return 'Manual';
+    return x.Channel === 'Mayorista' ? mayoristaLine(x) : 'Manual';
   };
 
   const rowHtml = r => {
