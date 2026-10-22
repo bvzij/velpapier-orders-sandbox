@@ -62,10 +62,38 @@ const esc = s => VP.esc(s);
       if (cached) { applyData(cached); render(); }
     } catch (e) { /* corrupt cache: ignore */ }
     await load();
+    openFromHash();
+    window.addEventListener('hashchange', openFromHash);
   } catch (e) {
     console.error(e);
   }
 })();
+
+// Pedidos and Calidad link here as mayoristas.html#MAY-004 (or #CUST-512).
+function openFromHash() {
+  const h = decodeURIComponent(location.hash.replace(/^#/, '')).trim();
+  if (!h || !S) return;
+  if (/^MAY-\d+$/.test(h)) {
+    if (ORDERS.some(o => o['Mayoreo ID'] === h)) openEditor(h);
+    else VP.toast('No se encontró ' + h, true);
+  } else if (/^CUST-/.test(h) && cliente(h)) {
+    openClient(h);
+  }
+  history.replaceState(null, '', location.pathname);   // a refresh must not reopen it
+}
+
+// Where the order is in the packing flow (Pedidos / Empacar), from the
+// columns the sync writes back: Envío TikTok, QC ID, Linked Order IDs.
+function packInfo(o) {
+  const st = o['Status'];
+  if (st === 'Cotización' || st === 'Cancelado') return null;
+  if (st === 'Enviado') return { short: o['QC ID'] ? '✓ empacado' : 'enviado', cls: 'grey',
+    long: o['QC ID'] ? `Empacado y enviado (${esc(o['QC ID'])})${o['Envío TikTok'] ? ' dentro del envío TikTok ' + esc(o['Envío TikTok']) : ''}${o['Linked Order IDs'] ? ' · TikTok ' + esc(o['Linked Order IDs']) : ''}. Fotos en Calidad.` : 'Marcado como enviado.' };
+  if (o['Envío TikTok']) return { short: 'en envío TikTok', cls: '',
+    long: `Anotado en el envío TikTok <b>${esc(o['Envío TikTok'])}</b>: se empaca dentro de ese paquete en Empacar. Para cambiarlo: Pedidos → Estado.` };
+  return { short: 'envío propio', cls: 'grey',
+    long: 'Envío propio: aparece en Empacar como tarjeta “Mayoreo”. Para mandarlo dentro de un envío TikTok, márcalo Anotado en Pedidos.' };
+}
 
 function applyData(data) {
   S = data.settings;
@@ -279,7 +307,7 @@ function renderPedidos() {
         return `<tr class="vp-table-row-clickable" data-id="${esc(o['Mayoreo ID'])}">
           <td><b>${esc(o['Mayoreo ID'])}</b><div class="may-sub">${esc(o['Fecha'])}</div></td>
           <td><span class="may-link" data-client="${esc(cid)}">${esc(custName(cid))}</span><div class="may-sub">${tierBadge(tierInfo(cid).tier)}</div></td>
-          <td>${statusPill(o['Status'])}</td>
+          <td>${statusPill(o['Status'])}${packInfo(o) ? `<div class="may-sub" style="margin-top:3px">📦 ${packInfo(o).short}</div>` : ''}</td>
           <td>${money(o['Total'])}</td>
           <td>${pending(o) ? money(pending(o)) : '<span class="may-sub">—</span>'}</td>
           <td>${f ? `<span class="may-flag ${f.cls}">${esc(f.text)}</span>` : ''}</td>
@@ -871,6 +899,7 @@ function openEditor(id, cidForNew, copyFrom) {
           <button class="btn btn-sm" id="ed-pay" style="margin-top:8px">+ Registrar pago</button>
 
           <div class="may-h3">Envío</div>
+          <div class="may-note" style="margin:-2px 0 10px;line-height:1.5">${packInfo(o) ? packInfo(o).long : 'Al confirmar (Apartado) aparece en Pedidos y en Empacar.'}</div>
           <div class="may-grid">
             <label class="may-field">Paquetería<input class="vp-input" data-f="Paquetería" value="${esc(o['Paquetería'] || '')}"></label>
             <label class="may-field">Guía<input class="vp-input" data-f="Guía" value="${esc(o['Guía'] || '')}"></label>
@@ -980,6 +1009,8 @@ function openEditor(id, cidForNew, copyFrom) {
   function payload(c) {
     const head = Object.assign({}, o);
     delete head.items; delete head['Status Historial'];
+    // Written by the Pedidos/Empacar sync -- this editor's copy may be older.
+    delete head['Envío TikTok']; delete head['QC ID']; delete head['Linked Order IDs'];
     Object.assign(head, {
       'Subtotal': c.sub, 'Descuento %': c.pct, 'Total': c.total,
       'Descuento Origen': manualPct !== null ? 'manual' : 'auto',
@@ -1323,8 +1354,22 @@ function openSettings() {
     ${[['wa_tpl_quote', 'Cotización lista'], ['wa_tpl_deposit', 'Pedir anticipo'], ['wa_tpl_ready', 'Pedido listo · saldo'], ['wa_tpl_shipped', 'Enviado · guía']].map(([k, l]) =>
       `<label class="may-field" style="margin-bottom:8px">${l}<textarea class="vp-input" data-wa="${k}" rows="2">${esc(S[k] || '')}</textarea></label>`).join('')}
 
+    <div class="may-h3">Pedidos y Empacar</div>
+    <div class="may-note" style="margin-bottom:8px">Cada pedido confirmado aparece en Pedidos y Empacar automáticamente. Si algo no cuadra, sincroniza todo de nuevo.</div>
+    <button class="btn btn-sm" id="st-resync">Sincronizar con Pedidos</button>
+
     <div class="may-actions"><button class="btn btn-primary" id="st-save">Guardar ajustes</button></div>
   `, { maxWidth: '660px' });
+
+  m.el.querySelector('#st-resync').onclick = async e => {
+    const b = e.target; b.disabled = true; b.textContent = 'Sincronizando…';
+    try {
+      const r = await VP.post({ action: 'mayoreo_resync' });
+      VP.toast(`Listo: ${r.created} creados, ${r.updated} actualizados, ${r.removed} quitados, ${r.pulled} traídos de Pedidos${r.errors && r.errors.length ? ' · ' + r.errors.length + ' errores' : ''}`, !!(r.errors && r.errors.length));
+      await load();
+    } catch (err) { VP.toast(err.message, true); }
+    b.disabled = false; b.textContent = 'Sincronizar con Pedidos';
+  };
 
   m.el.querySelector('#st-save').onclick = async () => {
     const q = s => m.el.querySelector(s);
