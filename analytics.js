@@ -388,8 +388,8 @@ function blockRevenueOverTime(sc) {
 /* ── 3 · Channel + status funnel ────────────────────────────────────── */
 
 function blockChannelAndFunnel(now) {
-  const channels = ['TikTok', 'Shopify', 'Manual'];
-  const colors   = { TikTok: '#185fa5', Shopify: '#3b6d11', Manual: '#854f0b' };
+  const channels = ['TikTok', 'Shopify', 'Manual', 'Mayorista'];
+  const colors   = { TikTok: '#185fa5', Shopify: '#3b6d11', Manual: '#854f0b', Mayorista: '#534ab7' };
 
   const rows = channels.map(ch => {
     const rs = now.filter(r => r['Channel'] === ch);
