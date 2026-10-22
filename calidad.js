@@ -699,12 +699,22 @@ function renderDetailOrderBlock(id, channel, idx) {
   }
 
   if (channel === 'Manual') idLabel = o ? (items.map(p => String(p.name)).sort((a, b) => a.localeCompare(b, 'es')).slice(0, 2).join(', ') || 'Manual') : 'Manual';
+  // Wholesale orders (MAY-###) sit in the QC row's Manual column; the link
+  // into Mayoristas is only offered to people who can open that page.
+  let mayLink = '';
+  if (channel === 'Mayorista') {
+    idLabel = 'Mayoreo ' + id;
+    const who = (VP.getUserName ? VP.getUserName() : '').toUpperCase();
+    if (VP.getRole() === 'admin' || who === 'KARIN') mayLink = `<a href="mayoristas.html#${encodeURIComponent(id)}" class="cal-detail-order-link" onclick="event.stopPropagation()">Ver en Mayoristas →</a>`;
+  }
   const itemRows = items.length
     ? items.map(p => `<div class="cal-detail-item"><span>${VP.esc(p.qty)}×</span><span>${VP.esc(p.name)}</span>${p.price ? `<span class="cal-detail-item-price">${VP.mxn(p.price)}</span>` : ''}</div>`).join('')
     : '<div class="cal-detail-item cal-detail-item--empty">Sin detalle de productos</div>';
 
   const detailId = `cal-order-detail-${idx}`;
-  const labelHtml = channel === 'Shopify'
+  const labelHtml = channel === 'Mayorista'
+    ? `<span class="cal-detail-order-id">${VP.esc(idLabel)}</span>${mayLink}`
+    : channel === 'Shopify'
     ? `<span class="cal-detail-order-id">Shopify #${VP.esc(idLabel)}</span>${idHref ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-link" onclick="event.stopPropagation()">Ver en Shopify →</a>` : ''}`
     : idHref
       ? `<a href="${idHref}" target="_blank" rel="noopener noreferrer" class="cal-detail-order-id" onclick="event.stopPropagation()">TikTok ${VP.esc(idLabel)}</a>`
@@ -788,7 +798,7 @@ function showOrderDetailModal(r) {
   const orderBlocks = [
     ...ids.tiktok.map(id => renderDetailOrderBlock(id, 'TikTok', idx++)),
     ...ids.shopify.map(id => renderDetailOrderBlock(id, 'Shopify', idx++)),
-    ...ids.manual.map(id => renderDetailOrderBlock(id, 'Manual', idx++)),
+    ...ids.manual.map(id => renderDetailOrderBlock(id, /^MAY-\d+$/.test(id) ? 'Mayorista' : 'Manual', idx++)),
   ];
   const hasAnyIds = ids.tiktok.length + ids.shopify.length + ids.manual.length > 0;
   // "No orders found" is only a true empty state once the full Orders
