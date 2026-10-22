@@ -474,7 +474,8 @@ window.VP = (function () {
   function lightbox(url) {
     const overlay = document.createElement('div');
     overlay.className = 'vp-lightbox';
-    overlay.innerHTML = `<img src="${url}" alt="">`;
+    const big = /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_1600,c_limit,q_auto,f_auto/') : url;
+    overlay.innerHTML = `<img src="${big}" alt="">`;
     const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
     const onKey = e => { if (e.key === 'Escape') close(); };
     overlay.onclick = close;
