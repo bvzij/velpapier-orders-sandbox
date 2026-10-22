@@ -436,10 +436,77 @@ function openClient(cid) {
   }));
 }
 
+// SAT catalogs (CFDI 4.0). Stored in the sheet exactly as shown: "626 - RÉGIMEN ...".
+const REGIMENES = ['',
+  '601 - RÉGIMEN GENERAL DE LEY PERSONAS MORALES',
+  '603 - PERSONAS MORALES CON FINES NO LUCRATIVOS',
+  '605 - RÉGIMEN DE SUELDOS Y SALARIOS E INGRESOS ASIMILADOS A SALARIOS',
+  '606 - RÉGIMEN DE ARRENDAMIENTO',
+  '607 - RÉGIMEN DE ENAJENACIÓN O ADQUISICIÓN DE BIENES',
+  '608 - RÉGIMEN DE LOS DEMÁS INGRESOS',
+  '610 - RÉGIMEN RESIDENTES EN EL EXTRANJERO SIN ESTABLECIMIENTO PERMANENTE EN MÉXICO',
+  '611 - RÉGIMEN DE INGRESOS POR DIVIDENDOS (SOCIOS Y ACCIONISTAS)',
+  '612 - RÉGIMEN DE LAS PERSONAS FÍSICAS CON ACTIVIDADES EMPRESARIALES Y PROFESIONALES',
+  '614 - RÉGIMEN DE LOS INGRESOS POR INTERESES',
+  '615 - RÉGIMEN DE LOS INGRESOS POR OBTENCIÓN DE PREMIOS',
+  '616 - SIN OBLIGACIONES FISCALES',
+  '620 - SOCIEDADES COOPERATIVAS DE PRODUCCIÓN QUE OPTAN POR DIFERIR SUS INGRESOS',
+  '621 - RÉGIMEN DE INCORPORACIÓN FISCAL',
+  '622 - RÉGIMEN DE ACTIVIDADES AGRÍCOLAS, GANADERAS, SILVÍCOLAS Y PESQUERAS PM',
+  '623 - RÉGIMEN DE OPCIONAL PARA GRUPOS DE SOCIEDADES',
+  '624 - RÉGIMEN DE LOS COORDINADOS',
+  '625 - RÉGIMEN DE LAS ACTIVIDADES EMPRESARIALES CON INGRESOS A TRAVÉS DE PLATAFORMAS TECNOLÓGICAS',
+  '626 - RÉGIMEN SIMPLIFICADO DE CONFIANZA',
+  '628 - HIDROCARBUROS',
+  '629 - DE LOS REGÍMENES FISCALES PREFERENTES Y DE LAS EMPRESAS MULTINACIONALES',
+  '630 - ENAJENACIÓN DE ACCIONES EN BOLSA DE VALORES',
+];
+
+const USOS_CFDI = ['',
+  { g: 'Gastos y compras', items: [
+    'G01 - ADQUISICIÓN DE MERCANCÍAS',
+    'G02 - DEVOLUCIONES, DESCUENTOS O BONIFICACIONES',
+    'G03 - GASTOS EN GENERAL' ] },
+  { g: 'Inversiones y activos fijos', items: [
+    'I01 - CONSTRUCCIONES',
+    'I02 - MOBILIARIO Y EQUIPO DE OFICINA POR INVERSIONES',
+    'I03 - EQUIPO DE TRANSPORTE',
+    'I04 - EQUIPO DE CÓMPUTO Y ACCESORIOS',
+    'I05 - DADOS, TROQUELES, MOLDES, MATRICES Y HERRAMENTAL',
+    'I06 - COMUNICACIONES TELEFÓNICAS',
+    'I07 - COMUNICACIONES SATELITALES',
+    'I08 - OTRA MAQUINARIA Y EQUIPO' ] },
+  { g: 'Deducciones personales (solo personas físicas)', items: [
+    'D01 - HONORARIOS MÉDICOS, DENTALES Y GASTOS HOSPITALARIOS',
+    'D02 - GASTOS MÉDICOS POR INCAPACIDAD O DISCAPACIDAD',
+    'D03 - GASTOS FUNERALES',
+    'D04 - DONATIVOS',
+    'D05 - INTERESES REALES EFECTIVAMENTE PAGADOS POR CRÉDITOS HIPOTECARIOS (CASA HABITACIÓN)',
+    'D06 - APORTACIONES VOLUNTARIAS AL SAR',
+    'D07 - PRIMAS POR SEGUROS DE GASTOS MÉDICOS',
+    'D08 - GASTOS DE TRANSPORTACIÓN ESCOLAR OBLIGATORIA',
+    'D09 - DEPÓSITOS EN CUENTAS PARA EL AHORRO, PRIMAS QUE TENGAN COMO BASE PLANES DE PENSIONES',
+    'D10 - PAGOS POR SERVICIOS EDUCATIVOS (COLEGIATURAS)' ] },
+  { g: 'Otros', items: [
+    'S01 - SIN EFECTOS FISCALES',
+    'CP01 - PAGOS',
+    'CN01 - NÓMINA' ] },
+];
+
+// <option>s for a dropdown. opts = strings and/or { g: label, items: [...] }.
+// A saved value that is not in the list (old free text) is kept as its own
+// option, so opening and saving a client never silently erases it.
+function selectOptions(opts, cur) {
+  const flat = opts.flatMap(x => typeof x === 'string' ? [x] : x.items);
+  const extra = cur && flat.indexOf(cur) < 0 ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : '';
+  const opt = o => `<option value="${esc(o)}" ${String(cur || flat[0]) === o ? 'selected' : ''}>${o === '' ? '— Elegir —' : esc(o)}</option>`;
+  return extra + opts.map(x => typeof x === 'string' ? opt(x) : `<optgroup label="${esc(x.g)}">${x.items.map(opt).join('')}</optgroup>`).join('');
+}
+
 const CLIENT_FIELDS = [
   ['Contacto', [['Nombre', 'Nombre', 'may-span2'], ['Teléfono', 'Teléfono / WhatsApp'], ['Email', 'Email']]],
   ['Dirección de envío', [['Calle y Número', 'Calle y número', 'may-span2'], ['Colonia', 'Colonia'], ['Ciudad', 'Ciudad'], ['Estado', 'Estado'], ['CP', 'CP'], ['Referencias', 'Referencias', 'may-span2'], ['Paquetería Preferida', 'Paquetería preferida']]],
-  ['Facturación', [['Requiere Factura', 'Requiere factura', '', ['No', 'Sí']], ['Razón Social', 'Razón social', 'may-span2'], ['RFC', 'RFC'], ['Régimen Fiscal', 'Régimen fiscal'], ['CP Fiscal', 'CP fiscal'], ['Uso CFDI', 'Uso de CFDI']]],
+  ['Facturación', [['Requiere Factura', 'Requiere factura', '', ['No', 'Sí']], ['Razón Social', 'Razón social', 'may-span2'], ['RFC', 'RFC'], ['Régimen Fiscal', 'Régimen fiscal', 'may-span2', REGIMENES], ['CP Fiscal', 'CP fiscal'], ['Uso CFDI', 'Uso de CFDI', 'may-span2', USOS_CFDI]]],
 ];
 
 // prefill: values for a brand-new mayorista (Customer ID, Usuario, Nombre).
@@ -447,7 +514,7 @@ function openClientEdit(cid, prefill, onDone) {
   const c = Object.assign({}, cliente(cid) || {}, prefill || {});
   const isNew = !cliente(cid);
   const field = ([key, label, cls, opts]) => `<label class="may-field ${cls || ''}">${esc(label)}${opts
-    ? `<select class="vp-input" data-k="${esc(key)}">${opts.map(o => `<option ${String(c[key] || opts[0]) === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`
+    ? `<select class="vp-input" data-k="${esc(key)}">${selectOptions(opts, c[key])}</select>`
     : `<input class="vp-input" data-k="${esc(key)}" value="${esc(c[key] || '')}">`}</label>`;
 
   const m = VP.showModal(`
