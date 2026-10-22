@@ -891,7 +891,7 @@ async function loadQCViewBody(trackingId) {
       ? `<div class="cal-detail-photo-group">
           <div class="cal-detail-photo-group-label">${label}</div>
           <div class="cal-detail-photos">${urls.map(u =>
-            `<img src="${escapeHtml(u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
+            `<img src="${escapeHtml(/res\.cloudinary\.com\/.+\/upload\//.test(u) ? u.replace('/upload/', '/upload/w_400,c_limit,q_auto,f_auto/') : u)}" loading="lazy" alt="" onclick="VP.lightbox('${u.replace(/'/g, "\\'")}')">`).join('')}</div>
         </div>`
       : '';
     const photoGrid = (contentPhotos.length || boxPhotos.length)
