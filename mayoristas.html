@@ -11,42 +11,69 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
   <style>
-    .may-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:1.25rem; }
+    .may-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:1rem; }
     .may-toolbar-right { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .may-search { min-width:220px; }
+    .may-stats { margin-bottom:1rem; }
+    .may-stats .vp-stat-value { font-size:24px; }
+    .may-chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+    .may-chip { border:0.5px solid var(--border-strong); background:var(--surface); color:var(--text-muted); border-radius:20px; padding:5px 12px; font-size:12.5px; cursor:pointer; font-family:inherit; }
+    .may-chip.is-active { background:var(--text); color:var(--surface); border-color:var(--text); }
+    .may-chip b { font-weight:600; margin-left:4px; }
+
     .may-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-md); overflow-x:auto; }
+    .may-card .vp-table th { padding-top:13px; }
+    .may-tbl th, .may-tbl td { text-align:center; vertical-align:middle; }
+    .may-tbl th:first-child, .may-tbl td:first-child { text-align:left; }
+    .may-tbl td.left, .may-tbl th.left { text-align:left; }
+
     .may-tier { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11.5px; font-weight:600; white-space:nowrap; }
     .may-tier-0 { background:var(--surface2); color:var(--text-muted); }
     .may-tier-1 { background:var(--blue-bg); color:var(--blue-text); }
     .may-tier-2 { background:var(--purple-bg); color:var(--purple-text); }
     .may-tier-3 { background:var(--green-bg); color:var(--green-text); }
-    .may-flag { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:20px; font-size:11px; background:var(--amber-bg); color:var(--amber-text); }
-    .may-progress { height:5px; background:var(--surface2); border-radius:3px; overflow:hidden; min-width:90px; margin-top:4px; }
+    .may-flag { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:20px; font-size:11px; background:var(--amber-bg); color:var(--amber-text); white-space:nowrap; }
+    .may-flag.red { background:var(--red-bg); color:var(--red-text); }
+    .may-flag.grey { background:var(--surface2); color:var(--text-muted); }
+    .may-progress { height:5px; background:var(--surface2); border-radius:3px; overflow:hidden; min-width:90px; max-width:160px; margin:4px auto 0; }
     .may-progress > div { height:100%; background:var(--green-text); }
     .may-sub { font-size:12px; color:var(--text-faint); }
-    .may-status { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11.5px; font-weight:500; }
+    .may-status { display:inline-block; padding:2px 9px; border-radius:20px; font-size:11.5px; font-weight:500; white-space:nowrap; }
     .may-st-Cotización { background:var(--surface2); color:var(--text-muted); }
-    .may-st-Anticipo { background:var(--amber-bg); color:var(--amber-text); }
-    .may-st-Liquidado { background:var(--blue-bg); color:var(--blue-text); }
+    .may-st-Apartado { background:var(--amber-bg); color:var(--amber-text); }
+    .may-st-Listo { background:var(--purple-bg); color:var(--purple-text); }
+    .may-st-Pagado { background:var(--blue-bg); color:var(--blue-text); }
     .may-st-Enviado { background:var(--green-bg); color:var(--green-text); }
     .may-st-Cancelado { background:var(--red-bg); color:var(--red-text); }
-    .may-h2 { font-family:'Fraunces',serif; font-size:22px; font-weight:500; margin:0 0 4px; }
+    .may-acts { display:flex; gap:4px; justify-content:center; flex-wrap:nowrap; }
+    .may-acts .btn { padding:4px 8px; }
+    .may-link { color:var(--blue-text); cursor:pointer; text-decoration:none; }
+    .may-link:hover { text-decoration:underline; }
+
+    .may-h2 { font-family:'Fraunces',serif; font-size:22px; font-weight:500; margin:0 0 4px; padding-right:80px; }
     .may-h3 { font-size:13px; font-weight:600; margin:18px 0 8px; color:var(--text-muted); }
     .may-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
     .may-field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-muted); }
     .may-field .vp-input { width:100%; box-sizing:border-box; }
+    .may-span2 { grid-column:span 2; }
+    .may-full { grid-column:1/-1; }
+    .may-edit-btn { position:absolute; top:12px; right:52px; width:32px; height:32px; border:none; background:var(--surface2); border-radius:50%; cursor:pointer; font-size:14px; }
+    .may-edit-btn:hover { background:var(--border); }
+
     .may-items { width:100%; min-width:680px; border-collapse:collapse; table-layout:fixed; }
-    .may-items th { text-align:left; font-size:12px; font-weight:500; color:var(--text-faint); padding:0 4px 6px; }
-    .may-items th.num { text-align:right; padding-right:12px; }
-    .may-items td { padding:4px; vertical-align:middle; }
-    .may-items td.num { text-align:right; font-variant-numeric:tabular-nums; padding-right:12px; }
-    .may-items .vp-input { width:100%; box-sizing:border-box; padding:6px 8px; }
-    .may-items .vp-input.num { text-align:right; font-variant-numeric:tabular-nums; -moz-appearance:textfield; appearance:textfield; }
-    .may-items .vp-input.num::-webkit-outer-spin-button, .may-items .vp-input.num::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+    .may-items th { text-align:center; font-size:12px; font-weight:500; color:var(--text-faint); padding:0 4px 6px; }
+    .may-items th:first-child { text-align:left; }
+    .may-items td { padding:4px; vertical-align:middle; text-align:center; font-variant-numeric:tabular-nums; }
+    .may-items .vp-input { width:100%; box-sizing:border-box; padding:6px 8px; text-align:center; }
+    .may-items td:first-child .vp-input { text-align:left; }
+    .may-items .vp-input[type=number] { -moz-appearance:textfield; appearance:textfield; }
+    .may-items .vp-input[type=number]::-webkit-outer-spin-button, .may-items .vp-input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+    .may-items select.vp-input { text-align-last:center; }
     .may-items .vp-input.may-low { border-color:var(--amber-border); background:var(--amber-bg); }
-    .may-warn { color:var(--amber-text); font-size:11.5px; }
-    .may-totals { margin-left:auto; max-width:380px; font-size:13.5px; }
-    .may-totals div { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
+    .may-warn { color:var(--amber-text); font-size:11.5px; font-weight:500; }
+
+    .may-totals { margin-left:auto; max-width:380px; font-size:13.5px; flex:1; min-width:260px; }
+    .may-totals > div { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
     .may-totals .big { font-size:17px; font-weight:600; border-top:0.5px solid var(--border-strong); margin-top:4px; padding-top:8px; }
     .may-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:18px; }
     .may-combo { position:relative; }
@@ -57,6 +84,14 @@
     .may-note { font-size:12px; color:var(--text-faint); margin-top:4px; }
     .may-pdfs a { color:var(--blue-text); font-size:13px; margin-right:12px; }
     .may-empty { padding:3rem 1rem; text-align:center; color:var(--text-faint); font-size:13.5px; }
+    .may-pays { width:100%; border-collapse:collapse; font-size:13px; }
+    .may-pays td { padding:5px 4px; border-bottom:0.5px solid var(--border); text-align:center; }
+    .may-pays td:first-child { text-align:left; }
+    .may-react { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+    .may-react-item { background:var(--amber-bg); color:var(--amber-text); border-radius:var(--radius-sm); padding:6px 10px; font-size:12.5px; cursor:pointer; }
+    .may-section { margin-bottom:1.5rem; }
+    .may-wa-opt { display:block; width:100%; text-align:left; margin-bottom:8px; white-space:normal; line-height:1.4; }
+    .may-two { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; }
   </style>
 </head>
 <body>
@@ -69,11 +104,17 @@
   </section>
 
   <div class="may-toolbar">
-    <input class="vp-input may-search" id="may-search" type="text" placeholder="Buscar cliente…" autocomplete="off">
+    <div class="vp-period" id="may-view">
+      <button class="vp-period-btn is-active" data-view="pedidos">Pedidos</button>
+      <button class="vp-period-btn" data-view="clientes">Clientes</button>
+      <button class="vp-period-btn" data-view="listas">Listas</button>
+      <button class="vp-period-btn" data-view="resumen">Resumen</button>
+    </div>
     <div class="may-toolbar-right">
-      <button class="refresh-btn" id="may-new-client">+ Nuevo mayorista</button>
-      <button class="refresh-btn" id="may-settings">⚙ Ajustes</button>
-      <button class="refresh-btn" id="may-refresh">Actualizar</button>
+      <input class="vp-input may-search" id="may-search" type="text" placeholder="Buscar pedido o cliente…" autocomplete="off">
+      <button class="refresh-btn" id="may-settings" title="Ajustes de mayoreo">⚙ Ajustes</button>
+      <button class="refresh-btn" id="may-new-client">+ Mayorista</button>
+      <button class="btn btn-primary btn-sm" id="may-new-quote">+ Cotización</button>
     </div>
   </div>
 
@@ -81,9 +122,12 @@
 
 </main>
 
+<datalist id="may-products"></datalist>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="common.js"></script>
+<script src="uploader.js"></script>
 <script src="mayoristas.js"></script>
 </body>
 </html>
