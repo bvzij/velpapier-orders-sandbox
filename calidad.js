@@ -9,7 +9,20 @@ const BOX_COLS     = ['Box1', 'Box2', 'Box3', 'Box4', 'Box5'];
 
 let QC = [], ORDERS_BY_ID = {};
 let currentPage = 1;
-let PER_PAGE = Number(localStorage.getItem('vp_cal_perpage')) || 100;
+const PER_PAGE = 20;   // hard limit: 20 shipments per page
+// Text filters (Cliente / Pedido / Producto) only take effect when Buscar or Enter is pressed.
+let APPLIED = { customer: '', order: '', product: '' };
+
+function applyTextFilters() {
+  APPLIED.customer = document.getElementById('cal-customer').value.trim().toLowerCase();
+  APPLIED.order    = document.getElementById('cal-search-order').value.trim().toLowerCase();
+  APPLIED.product  = document.getElementById('cal-search-product').value.trim().toLowerCase();
+  if (customerFilter && APPLIED.customer !== customerFilter.toLowerCase()) customerFilter = '';
+  currentPage = 1;
+  document.getElementById('cal-customer-list').classList.remove('is-open');
+  render();
+  document.getElementById('cal-sidebar-close').click();   // phones: close the filter panel to show results
+}
 let viewMode = localStorage.getItem('vp_cal_viewmode') || 'tiles';
 let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
@@ -245,7 +258,8 @@ function wire() {
   ['cal-search-order', 'cal-search-product', 'cal-from', 'cal-to'].forEach(id => {
     const el = document.getElementById(id);
     const isText = id === 'cal-search-order' || id === 'cal-search-product';
-    el.addEventListener(isText ? 'input' : 'change', () => { currentPage = 1; render(); });
+    if (isText) el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyTextFilters(); } });
+    else el.addEventListener('change', () => { currentPage = 1; render(); });
   });
 
   // Small × button inside each search field, so clearing it is one tap
@@ -259,6 +273,7 @@ function wire() {
     input.addEventListener('input', syncVisibility);
     btn.addEventListener('click', () => {
       input.value = '';
+      APPLIED[inputId === 'cal-search-order' ? 'order' : 'product'] = '';
       syncVisibility();
       currentPage = 1;
       render();
@@ -280,21 +295,13 @@ function wire() {
 
   wireCustomerCombo();
 
-  const perPageSel = document.getElementById('cal-per-page');
-  perPageSel.value = String(PER_PAGE);
-  perPageSel.addEventListener('change', () => {
-    PER_PAGE = Number(perPageSel.value) || 100;
-    localStorage.setItem('vp_cal_perpage', String(PER_PAGE));
-    currentPage = 1;
-    render();
-  });
-
   document.getElementById('cal-clear').addEventListener('click', () => {
     document.getElementById('cal-search-order').value = '';
     document.getElementById('cal-search-product').value = '';
     document.getElementById('cal-from').value = '';
     document.getElementById('cal-to').value = '';
     document.getElementById('cal-customer').value = '';
+    APPLIED = { customer: '', order: '', product: '' };
     ['cal-order-tiktok', 'cal-order-shopify', 'cal-product-tiktok', 'cal-product-shopify'].forEach(id => {
       document.getElementById(id).checked = true;
     });
@@ -332,11 +339,9 @@ function wireCustomerCombo() {
 
   input.addEventListener('focus', renderOptions);
   input.addEventListener('input', () => {
-    customerFilter = '';        // free typing = loose match, not a locked pick
-    renderOptions();
-    currentPage = 1;
-    render();
+    renderOptions();   // typing only shows name suggestions; the search runs on Buscar / Enter
   });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyTextFilters(); } });
 
   list.addEventListener('mousedown', e => {
     const opt = e.target.closest('.cal-combo-option');
@@ -344,6 +349,7 @@ function wireCustomerCombo() {
     e.preventDefault();
     input.value = opt.dataset.value;
     customerFilter = opt.dataset.value;
+    APPLIED.customer = opt.dataset.value.toLowerCase();
     hide();
     currentPage = 1;
     render();
@@ -403,13 +409,13 @@ function productNamesForChannels(r, wantTikTok, wantShopify) {
 function filteredRows() {
   const from = document.getElementById('cal-from').value;
   const to   = document.getElementById('cal-to').value;
-  const custTyped = document.getElementById('cal-customer').value.trim().toLowerCase();
+  const custTyped = APPLIED.customer;
 
-  const orderQ      = document.getElementById('cal-search-order').value.trim().toLowerCase();
+  const orderQ      = APPLIED.order;
   const orderTiktok = document.getElementById('cal-order-tiktok').checked;
   const orderShopify = document.getElementById('cal-order-shopify').checked;
 
-  const productQ      = document.getElementById('cal-search-product').value.trim().toLowerCase();
+  const productQ      = APPLIED.product;
   const productTiktok = document.getElementById('cal-product-tiktok').checked;
   const productShopify = document.getElementById('cal-product-shopify').checked;
 
@@ -473,11 +479,11 @@ function filteredRows() {
 }
 
 function anyFilterActive() {
-  return !!(document.getElementById('cal-search-order').value.trim() ||
-            document.getElementById('cal-search-product').value.trim() ||
+  return !!(APPLIED.order ||
+            APPLIED.product ||
             document.getElementById('cal-from').value ||
             document.getElementById('cal-to').value ||
-            document.getElementById('cal-customer').value.trim());
+            APPLIED.customer);
 }
 
 /* ── Render ─────────────────────────────────────────────────────────── */
