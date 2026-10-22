@@ -471,7 +471,132 @@ window.VP = (function () {
 
   /* ── Lightbox ───────────────────────────────────────────────────────── */
 
+  // Zoomable photo viewer. Desktop: click the photo to zoom in/out (wheel also
+  // zooms, drag pans). Phone: pinch to zoom, drag to pan. Click/tap outside the
+  // photo, the round X button, or Escape closes it.
   function lightbox(url) {
+    const overlay = document.createElement('div');
+    overlay.className = 'vp-lightbox';
+    overlay.style.cssText = 'cursor:pointer;touch-action:none;overflow:hidden;-webkit-tap-highlight-color:transparent';
+    const big = /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_1600,c_limit,q_auto,f_auto/') : url;
+
+    const img = document.createElement('img');
+    img.alt = '';
+    img.draggable = false;
+    img.src = big;
+    img.onerror = () => { if (img.src !== url) img.src = url; };
+    img.style.cssText = 'touch-action:none;user-select:none;-webkit-user-select:none;-webkit-user-drag:none;cursor:zoom-in;transform-origin:50% 50%;will-change:transform';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', 'Cerrar');
+    closeBtn.style.cssText = 'position:fixed;top:max(14px,env(safe-area-inset-top));right:14px;width:42px;height:42px;border-radius:50%;border:0;padding:0;background:rgba(255,255,255,.2);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
+    closeBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+    const MAX = 6, TAP_ZOOM = 2.5;
+    let s = 1, tx = 0, ty = 0, lastGesture = 0;
+
+    const clamp = () => {
+      if (s <= 1) { s = 1; tx = 0; ty = 0; return; }
+      const mx = Math.max(0, (img.offsetWidth * s - overlay.clientWidth) / 2);
+      const my = Math.max(0, (img.offsetHeight * s - overlay.clientHeight) / 2);
+      tx = Math.min(mx, Math.max(-mx, tx));
+      ty = Math.min(my, Math.max(-my, ty));
+    };
+    const apply = animate => {
+      clamp();
+      img.style.transition = animate ? 'transform .18s ease-out' : 'none';
+      img.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + s + ')';
+      img.style.cursor = s > 1 ? 'zoom-out' : 'zoom-in';
+    };
+    // Zoom by `ratio`, keeping the screen point (cx, cy) fixed under the finger/cursor.
+    const zoomAt = (cx, cy, ratio) => {
+      const r = overlay.getBoundingClientRect();
+      const px = cx - r.left - r.width / 2, py = cy - r.top - r.height / 2;
+      const ns = Math.min(MAX, Math.max(1, s * ratio));
+      const k = ns / s;
+      tx = px - (px - tx) * k;
+      ty = py - (py - ty) * k;
+      s = ns;
+    };
+
+    const ptrs = new Map();
+    let moved = 0, lastDist = 0, lastMidX = 0, lastMidY = 0;
+
+    img.addEventListener('pointerdown', e => {
+      try { img.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (ptrs.size === 1) moved = 0;
+      if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()];
+        lastDist = Math.hypot(a.x - b.x, a.y - b.y);
+        lastMidX = (a.x + b.x) / 2; lastMidY = (a.y + b.y) / 2;
+        moved = 99;
+      }
+      e.preventDefault();
+    });
+    img.addEventListener('pointermove', e => {
+      const p = ptrs.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        if (lastDist) zoomAt(mx, my, dist / lastDist);
+        tx += mx - lastMidX; ty += my - lastMidY;
+        lastDist = dist; lastMidX = mx; lastMidY = my;
+        apply(false);
+      } else if (ptrs.size === 1) {
+        moved += Math.abs(dx) + Math.abs(dy);
+        if (s > 1 && moved > 6) { tx += dx; ty += dy; apply(false); }
+      }
+    });
+    const endPtr = e => {
+      if (!ptrs.has(e.pointerId)) return;
+      const wasSingle = ptrs.size === 1;
+      ptrs.delete(e.pointerId);
+      if (!wasSingle) { lastGesture = Date.now(); lastDist = 0; apply(true); return; }
+      // A plain mouse click on the photo toggles zoom. Touch taps do nothing (pinch instead).
+      if (e.type === 'pointerup' && e.pointerType !== 'touch' && moved < 8) {
+        if (s > 1) { s = 1; tx = 0; ty = 0; } else zoomAt(e.clientX, e.clientY, TAP_ZOOM);
+        apply(true);
+      }
+    };
+    img.addEventListener('pointerup', endPtr);
+    img.addEventListener('pointercancel', endPtr);
+
+    overlay.addEventListener('wheel', e => {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+      apply(false);
+    }, { passive: false });
+
+    const onResize = () => apply(false);
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    const close = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResize);
+    };
+    // Clicking the dark area around the photo closes it.
+    overlay.addEventListener('click', e => {
+      if (e.target !== overlay) return;
+      if (Date.now() - lastGesture < 400) return;
+      close();
+    });
+    closeBtn.addEventListener('click', e => { e.stopPropagation(); close(); });
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onResize);
+
+    overlay.appendChild(img);
+    overlay.appendChild(closeBtn);
+    document.body.appendChild(overlay);
+  }
+
+  // Old version, no longer used. Safe to delete this whole function later.
+  function lightboxOld(url) {
     const overlay = document.createElement('div');
     overlay.className = 'vp-lightbox';
     const big = /res\.cloudinary\.com\/.+\/upload\//.test(url) ? url.replace('/upload/', '/upload/w_1600,c_limit,q_auto,f_auto/') : url;
