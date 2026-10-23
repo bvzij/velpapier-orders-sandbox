@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-22.1';
+const SCRIPT_VERSION = '2026-10-22.2';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -939,6 +939,9 @@ function dispatchPostAction(action, body, role) {
     if (action === 'mayoreo_save_order') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveOrderSynced(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_delete_order') return mayoreoAllowed(_currentIdentity) ? mayoreoDeleteOrderSynced(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_resync') return mayoreoAllowed(_currentIdentity) ? mayoreoResyncAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'mayoreo_tiktok_shipments') return mayoreoAllowed(_currentIdentity) ? mayoreoTikTokShipmentsAction(body) : jsonResponse({ error: 'unauthorized' });
+    // Packers (staff) call this from Empacar -- it can only record packing data.
+    if (action === 'mayoreo_mark_packed') return mayoreoMarkPackedAction(body);
     // Mayoreo sync hooks -- these run before the normal routes further down.
     if (action === 'save_qc') return saveQCWithMayoreo(body);
     if (action === 'update_order_status') return mayoreoAfterOrderChange(updateOrderStatus(body), body.order_id);
@@ -7346,7 +7349,9 @@ function archiveOldQcPhotos(dryRun) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MAYOREO ↔ PEDIDOS / EMPACAR SYNC
+// MAYOREO ↔ PEDIDOS / EMPACAR SYNC  (v3 — shipping method, shipping charged
+// afterwards, packed-before-shipped step)
+//
 // A confirmed wholesale order (Apartado, Listo, Pagado, Enviado) gets a
 // MIRROR row in the Orders sheet: Channel 'Mayorista', Order ID = MAY-###.
 // That one row is what makes the rest of the platform work unchanged:
@@ -7355,19 +7360,50 @@ function archiveOldQcPhotos(dryRun) {
 // when it ships alone); the Empacar finalize ships it like any Manual order.
 //
 // Who owns what:
-//   Mayoreo sheet  -> items, prices, payments, client (the commercial side)
+//   Mayoreo sheet  -> items, prices, payments, client, shipping method/cost
 //   Orders mirror  -> packing state: Anotado + Linked Shipment, Enviado
-// Mayoreo -> mirror after every Mayoristas save; mirror -> Mayoreo after a
-// Pedidos status change on a MAY-### row and after an Empacar finalize.
-// 'Sincronizar con Pedidos' (Mayoristas > Ajustes) re-runs everything.
+//
+// Shipping, in short:
+//   Envío Método      'Propio' (own package) | 'TikTok' (rides inside a TikTok package)
+//   Envío Gestionado  'Sí' only when WE book the shipping and charge it; the
+//                     cost (Envío) is typed in AFTER packing, once weight and
+//                     measures are known. Default: the customer buys their own label.
+//   Empacado          set by the packer in Empacar (weight + measures + photos):
+//                     the order is packed but NOT shipped yet.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// v3 additions to the v2 constants above (kept here so that block stays untouched).
+MAYOREO_DEFAULT_SETTINGS.wa_tpl_ready = 'Hola {nombre}, tu pedido {pedido} ya está empacado ✨ Peso: {peso} · Medidas: {medidas}. Saldo restante: {saldo}. Con estos datos puedes generar tu guía y compartirnos la etiqueta 🙌';
+MAYOREO_DEFAULT_SETTINGS.wa_tpl_ready_envio = 'Hola {nombre}, tu pedido {pedido} ya está listo ✨ Peso: {peso} · Medidas: {medidas}. Costo de envío: {envio}. Saldo restante (incluye envío): {saldo}';
+['Envío TikTok', 'Medidas', 'QC ID'].forEach(function (c) {
+  if (MAYOREO_TEXT_COLS_ORDERS.indexOf(c) < 0) MAYOREO_TEXT_COLS_ORDERS.push(c);
+});
 
 const MAYOREO_MIRROR_STATUSES = ['Apartado', 'Listo', 'Pagado', 'Enviado'];
 const MAYOREO_LEGACY_STATUS = { 'Anticipo': 'Apartado', 'Liquidado': 'Pagado' };
+let _mayoreoWarning = '';
 
 function isMayoreoId(id) { return /^MAY-\d+$/.test(String(id || '').trim()); }
 
 function mayoreoFmtMoney(n) { return '$' + Math.round(Number(n) || 0).toLocaleString('en-US'); }
+
+// 'TikTok' | 'Propio' | ''. Orders linked in Pedidos before the selector
+// existed carry only 'Envío TikTok' -- they count as TikTok.
+function mayoreoShipMethod(o) {
+  const m = String(o['Envío Método'] || '');
+  if (m === 'TikTok' || m === 'Propio') return m;
+  return String(o['Envío TikTok'] || '').trim() ? 'TikTok' : '';
+}
+// We only bill shipping when we book it: explicit 'Sí', or (older orders)
+// a cost already typed in. Never for orders that ride inside a TikTok package.
+function mayoreoShipHandled(o) {
+  if (mayoreoShipMethod(o) === 'TikTok') return false;
+  const g = String(o['Envío Gestionado'] || '');
+  if (g === 'Sí') return true;
+  if (g === 'No') return false;
+  return (Number(o['Envío']) || 0) > 0;
+}
+function mayoreoShipCost(o) { return mayoreoShipHandled(o) ? (Number(o['Envío']) || 0) : 0; }
 
 // Small Mayoreo tabs, read once and shared across a whole resync.
 function mayoreoSyncCache() {
@@ -7387,6 +7423,7 @@ function mayoreoPaid(o) {
 
 // Mayoreo -> Orders. Creates, updates or removes the mirror row of one order.
 function mayoreoSyncMirror(id, cache) {
+  _mayoreoWarning = '';
   cache = cache || mayoreoSyncCache();
   const o = cache.orders.find(r => String(r['Mayoreo ID']) === String(id));
   const sheet = getOrdersSheet();
@@ -7394,6 +7431,7 @@ function mayoreoSyncMirror(id, cache) {
   const col = name => oh.indexOf(name) + 1;
   const rowIndex = findOrderRow(sheet, id);
   const curStatus = rowIndex && col('Status') ? String(sheet.getRange(rowIndex, col('Status')).getValue()) : '';
+  const curLink = rowIndex && col('Linked Shipment') ? String(sheet.getRange(rowIndex, col('Linked Shipment')).getValue()).trim() : '';
   const shipped = curStatus === 'Enviado' || curStatus === 'Archivado';
 
   const status = o ? (MAYOREO_LEGACY_STATUS[o['Status']] || o['Status']) : '';
@@ -7412,31 +7450,56 @@ function mayoreoSyncMirror(id, cache) {
     .sort((a, b) => Number(a['Línea']) - Number(b['Línea']));
   const products = items.map(it => `${Number(it['Cantidad']) || 0} x ${String(it['Artículo'] || '').replace(/;/g, ',')}`).join('; ');
   const cl = cache.clientes.find(c => String(c['Customer ID']) === String(o['Customer ID'])) || {};
-  const pending = Math.max(0, (Number(o['Total']) || 0) + (Number(o['Envío']) || 0) - mayoreoPaid(o));
-  // Notes carry what packers need to know -- they never open Mayoristas.
-  const notes = [
-    'Mayoreo ' + id,
-    pending > 0 ? 'Saldo pendiente ' + mayoreoFmtMoney(pending) : 'Pagado ✓',
-    o['Paquetería'] ? 'Paquetería: ' + o['Paquetería'] : '',
-    o['Guía'] ? 'Guía: ' + o['Guía'] : '',
-  ].filter(Boolean).join(' · ');
 
-  let newStatus;
-  if (shipped) newStatus = curStatus;                       // already left: never pull it back
-  else if (status === 'Enviado') newStatus = 'Enviado';     // marked shipped in Mayoristas
-  else if (curStatus === 'Anotado') newStatus = 'Anotado';  // linked in Pedidos: keep the link
-  else newStatus = pending > 0 ? 'No Pagado' : 'Pagado';
+  const method = mayoreoShipMethod(o);
+  const handled = mayoreoShipHandled(o);
+  const cost = mayoreoShipCost(o);
+  const pending = Math.max(0, (Number(o['Total']) || 0) + cost - mayoreoPaid(o));
+  const wantLink = method === 'TikTok' ? String(o['Envío TikTok'] || '').trim() : '';
+
+  // Status + link of the mirror.
+  let newStatus, newLink = curLink;
+  if (shipped) {
+    newStatus = curStatus;                                          // already left: never pull it back
+  } else if (status === 'Enviado') {
+    newStatus = 'Enviado';                                          // marked shipped in Mayoristas
+  } else if (wantLink && !isTrackingShipped(sheet, oh, wantLink)) {
+    newStatus = 'Anotado'; newLink = wantLink;                      // rides inside that TikTok package
+  } else if (curStatus === 'Anotado' && curLink && !wantLink && !String(o['Envío Método'] || '')) {
+    newStatus = 'Anotado';                                          // linked in Pedidos, selector never used: keep it
+  } else {
+    if (wantLink) _mayoreoWarning = 'El envío de TikTok ' + wantLink + ' ya salió; el pedido no se pudo anotar ahí.';
+    newStatus = pending > 0 ? 'No Pagado' : 'Pagado';
+    if (curStatus === 'Anotado') newLink = '';                      // release the link we were holding
+  }
+
+  // Notes carry what packers need to know -- they never open Mayoristas.
+  const clean = s => String(s || '').replace(/[·\n]/g, ' ').trim();
+  const tokens = ['Mayoreo ' + id, 'Estado: ' + status];
+  tokens.push(pending > 0 ? 'Saldo pendiente ' + mayoreoFmtMoney(pending) + (handled && !cost ? ' + envío por cotizar' : '') : 'Pagado ✓');
+  if (pending === 0 && handled && !cost) tokens.push('Envío por cotizar');
+  if (method === 'TikTok') {
+    tokens.push(newLink ? 'Con TikTok ' + newLink : 'Con TikTok (sin anotar)');
+  } else {
+    tokens.push('Envío propio');
+    if (o['Paquetería']) tokens.push('Paquetería: ' + clean(o['Paquetería']));
+    if (o['Guía']) tokens.push('Guía: ' + clean(o['Guía']));
+  }
+  if (o['Empacado']) tokens.push('Empacado ✓');
+  if (o['Peso Kg']) tokens.push('Peso: ' + clean(o['Peso Kg']) + ' kg');
+  if (o['Medidas']) tokens.push('Medidas: ' + clean(o['Medidas']));
 
   const fields = {
     'Customer ID': o['Customer ID'] || '',
     'Primary Username': cl['Usuario'] || cl['Nombre'] || '',
     'Products': products,
     'Price': Number(o['Total']) || 0,
-    'Notes': notes,
+    'Notes': tokens.join(' · '),
   };
 
   if (rowIndex) {
     Object.keys(fields).forEach(k => { if (col(k)) sheet.getRange(rowIndex, col(k)).setValue(fields[k]); });
+    if (col('Linked Shipment') && newLink !== curLink) sheet.getRange(rowIndex, col('Linked Shipment')).setValue(newLink);
     if (newStatus !== curStatus && col('Status')) {
       sheet.getRange(rowIndex, col('Status')).setValue(newStatus);
       applyStatusSideEffects(sheet, rowIndex, newStatus, oh, curStatus);
@@ -7449,6 +7512,7 @@ function mayoreoSyncMirror(id, cache) {
     'Order ID': id,
     'Channel': 'Mayorista',
     'Status': newStatus,
+    'Linked Shipment': newLink,
     'Created Date': nowISO(),
     'Order Date': o['Fecha'] || '',
     'Shipped Date': newStatus === 'Enviado' ? nowISO() : '',
@@ -7462,7 +7526,10 @@ function mayoreoSyncMirror(id, cache) {
 }
 
 // Orders -> Mayoreo. Copies the packing state of a mirror row back.
-function mayoreoPullFromMirror(id, cache) {
+// opts.shippedOnly: only copy "it shipped" (used by the full resync, which
+// must not guess about links -- Mayoristas is the source for those there).
+function mayoreoPullFromMirror(id, cache, opts) {
+  opts = opts || {};
   cache = cache || mayoreoSyncCache();
   const o = cache.orders.find(r => String(r['Mayoreo ID']) === String(id));
   if (!o) return 'none';
@@ -7475,20 +7542,28 @@ function mayoreoPullFromMirror(id, cache) {
   const link = String(get('Linked Shipment') || '').trim();
 
   const upd = {};
-  if (st === 'Anotado') upd['Envío TikTok'] = link;
-  else if (st === 'Pagado' || st === 'No Pagado') upd['Envío TikTok'] = '';
+  if (!opts.shippedOnly) {
+    if (st === 'Anotado' && link) {
+      // Written on a TikTok label in Pedidos.
+      if (String(o['Envío TikTok'] || '') !== link) upd['Envío TikTok'] = link;
+      if (o['Envío Método'] !== 'TikTok') upd['Envío Método'] = 'TikTok';
+    } else if ((st === 'Pagado' || st === 'No Pagado') && String(o['Envío TikTok'] || '').trim()) {
+      upd['Envío TikTok'] = '';        // released in Pedidos; the method stays "TikTok" until it is linked again
+    }
+  }
   if ((st === 'Enviado' || st === 'Archivado') && o['Status'] !== 'Enviado') {
     upd['Status'] = 'Enviado';
     const hist = Array.isArray(o['Status Historial']) ? o['Status Historial'] : [];
     upd['Status Historial'] = hist.concat([{ status: 'Enviado', fecha: mayoreoNow(), por: _currentIdentity ? _currentIdentity.name : '' }]);
     if (link && !isMayoreoId(link)) {
       upd['Envío TikTok'] = link;
+      upd['Envío Método'] = 'TikTok';
       if (!o['Guía']) upd['Guía'] = link;
     }
   }
   if (!Object.keys(upd).length) return 'none';
   upd['Actualizado'] = mayoreoNow();
-  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS.concat(['Envío TikTok']));
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS);
   Object.assign(o, upd);
   return 'pulled';
 }
@@ -7506,10 +7581,13 @@ function mayoreoMarkShipped(id, trackingId, tiktokIds, qcId) {
   }
   if (trackingId && !isMayoreoId(trackingId)) {        // travelled inside a TikTok package
     upd['Envío TikTok'] = trackingId;
+    upd['Envío Método'] = 'TikTok';
     if (!o['Guía']) upd['Guía'] = trackingId;
+  } else if (!o['Envío Método']) {
+    upd['Envío Método'] = 'Propio';
   }
   if (tiktokIds && tiktokIds.length) upd['Linked Order IDs'] = tiktokIds.join(', ');
-  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS.concat(['Envío TikTok', 'QC ID']));
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS);
 }
 
 function mayoreoParse(res) {
@@ -7534,7 +7612,10 @@ function mayoreoSaveOrderSynced(body) {
   const res = mayoreoSaveOrderAction(body);
   const parsed = mayoreoParse(res);
   if (!parsed || !parsed.ok || !parsed.id) return res;
-  try { parsed.mirror = mayoreoSyncMirror(parsed.id); } catch (e) { parsed.mirror_error = e.message; }
+  try {
+    parsed.mirror = mayoreoSyncMirror(parsed.id);
+    if (_mayoreoWarning) parsed.mirror_warning = _mayoreoWarning;
+  } catch (e) { parsed.mirror_error = e.message; }
   return jsonResponse(parsed);
 }
 
@@ -7575,7 +7656,7 @@ function saveQCWithMayoreo(body) {
   return jsonResponse(parsed);
 }
 
-// POST mayoreo_resync -- pull packing state, then push every order again.
+// POST mayoreo_resync -- pull "it shipped", then push every order again.
 function mayoreoResyncAction(body) {
   const cache = mayoreoSyncCache();
   const out = { pulled: 0, created: 0, updated: 0, removed: 0, errors: [] };
@@ -7583,11 +7664,71 @@ function mayoreoResyncAction(body) {
     const id = String(o['Mayoreo ID'] || '');
     if (!isMayoreoId(id)) return;
     try {
-      if (mayoreoPullFromMirror(id, cache) === 'pulled') out.pulled++;
+      if (mayoreoPullFromMirror(id, cache, { shippedOnly: true }) === 'pulled') out.pulled++;
       const r = mayoreoSyncMirror(id, cache);
       if (out[r] !== undefined) out[r]++;
     } catch (e) { out.errors.push(id + ': ' + e.message); }
   });
   logAuditEvent('mayoreo_resync', 'Mayoreo', '', out);
   return jsonResponse(Object.assign({ ok: true }, out));
+}
+
+// POST mayoreo_mark_packed -- called from EMPACAR (packers are staff, not
+// Mayoristas users, so this is open to any logged-in person and can only
+// touch packing data). Records weight + measures, stamps "Empacado" and
+// moves Apartado -> Listo. It does NOT ship anything: the shipping quote
+// and the final payment still have to happen.
+function mayoreoMarkPackedAction(body) {
+  const id = String(body.order_id || '').trim();
+  if (!isMayoreoId(id)) return jsonResponse({ error: 'Pedido de mayoreo inválido' });
+  const cache = mayoreoSyncCache();
+  const o = cache.orders.find(r => String(r['Mayoreo ID']) === id);
+  if (!o) return jsonResponse({ error: 'No se encontró ' + id });
+  const st = MAYOREO_LEGACY_STATUS[o['Status']] || o['Status'];
+  if (MAYOREO_MIRROR_STATUSES.indexOf(st) < 0 || st === 'Enviado') {
+    return jsonResponse({ error: id + ' está en ' + st + '; no se puede marcar como empacado.' });
+  }
+  const upd = { 'Empacado': mayoreoNow(), 'Actualizado': mayoreoNow() };
+  const rawKg = String(body.peso_kg === undefined ? '' : body.peso_kg).replace(',', '.').trim();
+  if (rawKg !== '' && !isNaN(Number(rawKg)) && Number(rawKg) >= 0) upd['Peso Kg'] = Math.round(Number(rawKg) * 100) / 100;
+  if (body.medidas !== undefined) upd['Medidas'] = String(body.medidas || '').replace(/[·\n]/g, ' ').trim().slice(0, 120);
+  let movedTo = '';
+  if (st === 'Apartado') {
+    movedTo = 'Listo';
+    upd['Status'] = 'Listo';
+    const hist = Array.isArray(o['Status Historial']) ? o['Status Historial'] : [];
+    upd['Status Historial'] = hist.concat([{ status: 'Listo', fecha: mayoreoNow(), por: _currentIdentity ? _currentIdentity.name : '' }]);
+  }
+  mayoreoUpsert('Mayoreo Orders', 'Mayoreo ID', id, upd, MAYOREO_TEXT_COLS_ORDERS);
+  let mirror = '';
+  try { mirror = mayoreoSyncMirror(id); } catch (e) { mirror = 'error: ' + e.message; }
+  logAuditEvent('mayoreo_marked_packed', 'Order', id, { peso_kg: upd['Peso Kg'], medidas: upd['Medidas'], moved_to: movedTo });
+  return jsonResponse({ ok: true, status: movedTo || st, needs_quote: mayoreoShipHandled(o) && !mayoreoShipCost(o), mirror: mirror });
+}
+
+// POST mayoreo_tiktok_shipments { customer_id } -- the customer's pending
+// TikTok shipments (Pagado, not yet shipped), grouped by tracking ID, for the
+// "Con un envío de TikTok" picker in the Mayoristas order modal.
+function mayoreoTikTokShipmentsAction(body) {
+  const cid = String(body.customer_id || '').trim();
+  if (!cid) return jsonResponse({ error: 'Falta customer_id' });
+  const data = getOrdersSheet().getDataRange().getValues();
+  if (data.length < 2) return jsonResponse({ shipments: [] });
+  const h = data[0];
+  const iC = h.indexOf('Customer ID'), iCh = h.indexOf('Channel'), iS = h.indexOf('Status');
+  const iT = h.indexOf('Tracking ID'), iO = h.indexOf('Order ID');
+  const iD = h.indexOf('Order Date'), iCr = h.indexOf('Created Date');
+  const by = {};
+  for (let r = 1; r < data.length; r++) {
+    const row = data[r];
+    if (String(row[iC]) !== cid || row[iCh] !== 'TikTok' || row[iS] !== 'Pagado') continue;
+    const tid = String(row[iT] || '').trim();
+    if (!tid) continue;
+    let d = (iD >= 0 && row[iD]) || row[iCr] || '';
+    if (d instanceof Date) d = Utilities.formatDate(d, MX_TZ, 'yyyy-MM-dd');
+    if (!by[tid]) by[tid] = { tracking_id: tid, order_ids: [], date: String(d).slice(0, 10) };
+    by[tid].order_ids.push(String(row[iO]));
+  }
+  const shipments = Object.keys(by).map(k => by[k]).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return jsonResponse({ shipments: shipments });
 }
