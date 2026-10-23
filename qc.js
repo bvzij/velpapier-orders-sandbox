@@ -557,7 +557,13 @@ function setPackFilter(f) {
 function mayoristaNoteInfo(o) {
   const n = String((o && o['Notes']) || '');
   const pick = re => { const m = n.match(re); return m ? m[1].trim() : ''; };
-  return { saldo: pick(/Saldo pendiente ([^·]+)/), guia: pick(/Guía: ([^·]+)/), paq: pick(/Paquetería: ([^·]+)/) };
+  return {
+    saldo: pick(/Saldo pendiente ([^·]+)/), guia: pick(/Guía: ([^·]+)/), paq: pick(/Paquetería: ([^·]+)/),
+    peso: pick(/Peso: ([^·]+)/), medidas: pick(/Medidas: ([^·]+)/),
+    empacado: /Empacado ✓/.test(n),
+    sinAnotar: /Con TikTok \(sin anotar\)/.test(n),      // meant to ride inside a TikTok package, not linked to one yet
+    porCotizar: /envío por cotizar/i.test(n),            // we bill the shipping and its cost is not known yet
+  };
 }
 
 function renderPackFilterBar(counts) {
@@ -706,8 +712,10 @@ function renderPendingList() {
           <span class="pending-username">${escapeHtml(username)} <span class="vp-qc-ttid-prominent">${escapeHtml(tid)}</span></span>
           <span class="pending-count">${pieces} pieza${pieces !== 1 ? 's' : ''}</span>
         </div>
-        <div class="pending-tracking"><span class="may-pack-badge">Mayoreo</span>envío propio${info.paq ? ' · ' + escapeHtml(info.paq) : ''}${info.guia ? ' · guía ' + escapeHtml(info.guia) : ''}</div>
+        <div class="pending-tracking"><span class="may-pack-badge">Mayoreo</span>${info.sinAnotar ? 'va con TikTok (sin anotar)' : 'envío propio'}${info.paq ? ' · ' + escapeHtml(info.paq) : ''}${info.guia ? ' · guía ' + escapeHtml(info.guia) : ''}${info.empacado ? ' · <b>✓ empacado</b>' + (info.peso ? ' ' + escapeHtml(info.peso) : '') : ''}</div>
+        ${info.sinAnotar ? '<div class="may-pack-warn">⚠ Va dentro de un envío de TikTok, pero aún no está anotado en ninguno</div>' : ''}
         ${info.saldo ? `<div class="may-pack-warn">⚠ Saldo pendiente ${escapeHtml(info.saldo)} — confirmar pago antes de enviar</div>` : ''}
+        ${!info.saldo && info.porCotizar ? '<div class="may-pack-warn">⚠ Falta cotizar el envío</div>' : ''}
         ${photoBadge(tid)}
       </div>`;
     }
@@ -802,6 +810,7 @@ function openCapture(shipment, opts) {
   ).join('');
   // A standalone Mayorista order has no TikTok packing slip -- the item
   // list shown here IS the packing list.
+  const standaloneMay = (shipment.order_ids || []).length === 1 && shipment.order_ids[0].channel === 'Mayorista' && /^MAY-\d+$/.test(shipment.tracking_id || '');
   const mayHtml = (shipment.order_ids || []).filter(o => o.channel === 'Mayorista').map(o => {
     const r = allActiveOrders.find(x => String(x['Order ID']) === String(o.id));
     if (!r) return '';
@@ -812,6 +821,15 @@ function openCapture(shipment, opts) {
       <ul style="list-style:none;margin:0;padding:0">${items.map(p => `<li><span>${p.qty}×</span><span>${escapeHtml(p.name)}</span></li>`).join('')}</ul>
       ${info.paq || info.guia ? `<div style="margin-top:6px;color:var(--text-muted)">${escapeHtml([info.paq, info.guia ? 'guía ' + info.guia : ''].filter(Boolean).join(' · '))}</div>` : ''}
       ${info.saldo ? `<div class="may-pack-warn">⚠ Saldo pendiente ${escapeHtml(info.saldo)}</div>` : ''}
+      ${!info.saldo && info.porCotizar ? '<div class="may-pack-warn">⚠ Falta cotizar el envío</div>' : ''}
+      ${info.sinAnotar ? '<div class="may-pack-warn">⚠ Va con un envío de TikTok, pero aún no está anotado</div>' : ''}
+      ${standaloneMay ? `<div class="may-pack-pkg" style="margin-top:12px">
+        <div style="font-weight:700;margin-bottom:6px">Datos del paquete <span style="font-weight:400;color:var(--text-muted)">· para cotizar el envío</span></div>
+        <div style="display:flex;gap:8px">
+          <input id="may-peso" type="number" inputmode="decimal" step="0.1" min="0" placeholder="Peso (kg)" value="${escapeAttr(String(info.peso || '').replace(/[^\d.,]/g, ''))}" style="width:34%;padding:9px;border:0.5px solid var(--border-strong);border-radius:8px;font-family:inherit;font-size:14px;background:var(--bg);color:var(--text)">
+          <input id="may-medidas" type="text" placeholder="Medidas cm: 40x30x25" value="${escapeAttr(info.medidas || '')}" style="flex:1;min-width:0;padding:9px;border:0.5px solid var(--border-strong);border-radius:8px;font-family:inherit;font-size:14px;background:var(--bg);color:var(--text)">
+        </div>
+      </div>` : ''}
     </div>`;
   }).join('');
   document.getElementById('ship-summary').innerHTML = `
@@ -866,6 +884,21 @@ function openCapture(shipment, opts) {
   submitBtn.disabled = gallery.content.length === 0;
   submitBtn.textContent = 'Enviar';  // reset — otherwise a previous "Guardando…" sticks forever
   applyShippedLock(rowIsShipped);
+  // A standalone wholesale order is packed BEFORE it can ship: the packer saves photos,
+  // weight and measures (the office quotes the shipping from them) and the order stays
+  // here until it is paid and ready to hand to the carrier -- then "Enviar".
+  const oldPk = document.getElementById('may-packed-btn');
+  if (oldPk) oldPk.remove();
+  if (standaloneMay && !rowIsShipped) {
+    const pk = document.createElement('button');
+    pk.id = 'may-packed-btn';
+    pk.className = 'qc-submit';
+    pk.style.cssText = 'background:#534ab7;margin-bottom:8px';
+    pk.textContent = '📦 Guardar como empacado (falta enviar)';
+    pk.disabled = gallery.content.length === 0;
+    pk.onclick = markMayoristaPacked;
+    submitBtn.parentNode.insertBefore(pk, submitBtn);
+  }
   window.scrollTo(0, 0);
 
   // The list's QC data can be up to 20 s old -- check the server right
@@ -1082,6 +1115,59 @@ function refreshSubmitState() {
   if (savingInProgress) return;
   document.getElementById('qc-submit').disabled =
     uploadsInFlight > 0 || (!isEditingShipped && gallery.content.length === 0);
+  const pk = document.getElementById('may-packed-btn');
+  if (pk) pk.disabled = uploadsInFlight > 0 || gallery.content.length === 0;
+}
+
+// Standalone wholesale order: save photos + weight + measures and mark it packed.
+// Does NOT finalize -- nothing ships yet. In Mayoristas the order moves to Listo and
+// the office quotes the shipping (or sends the package data to the customer).
+async function markMayoristaPacked() {
+  if (!selected || savingInProgress) return;
+  const mayId = (selected.order_ids[0] || {}).id;
+  if (gallery.content.length === 0) { showToast('Falta al menos una foto de contenido', true); return; }
+  if (uploadsInFlight > 0) { showToast('Espera a que terminen de subir las fotos', true); return; }
+  const peso = ((document.getElementById('may-peso') || {}).value || '').trim();
+  const medidas = ((document.getElementById('may-medidas') || {}).value || '').trim();
+  if ((!peso || !medidas) && !confirm('Falta el peso o las medidas: con eso se cotiza el envío. ¿Guardar de todos modos?')) return;
+  const btn = document.getElementById('may-packed-btn');
+  const gen = captureGen;
+  savingInProgress = true;
+  btn.disabled = true;
+  btn.textContent = 'Guardando…';
+  try {
+    if (photoSyncsInFlight > 0) {
+      const t0 = Date.now();
+      while (photoSyncsInFlight > 0 && Date.now() - t0 < 15000) await new Promise(r => setTimeout(r, 200));
+    }
+    // 1) photos + notes exactly as they stand now (not a finalize)
+    const r1 = await apiPost({
+      action:       'save_qc',
+      qc_id:        currentQcId || undefined,
+      tracking_id:  selected.tracking_id,
+      order_ids:    selected.order_ids,
+      customer_id:  selected.customer_id,
+      username:     selected.username,
+      packer:       currentPacker(),
+      content_urls: gallery.content.filter(p => !p.uploading).map(p => p.url),
+      box_urls:     gallery.box.filter(p => !p.uploading).map(p => p.url),
+      notes:        document.getElementById('qc-notes').value.trim(),
+    });
+    if (r1.error === 'already_shipped') throw new Error('Este pedido ya fue enviado desde otro dispositivo');
+    if (r1.error) throw new Error(r1.error);
+    if (r1.qc_id) currentQcId = r1.qc_id;
+    // 2) packed: weight + measures, Apartado -> Listo
+    const r2 = await apiPost({ action: 'mayoreo_mark_packed', order_id: mayId, peso_kg: peso, medidas: medidas });
+    if (r2.error) throw new Error(r2.error);
+    showToast(r2.needs_quote ? '✓ Empacado — falta cotizar el envío' : '✓ Empacado — falta enviar');
+    if (gen === captureGen) backToPending();
+  } catch (e) {
+    showToast('Error: ' + e.message, true);
+    btn.disabled = false;
+    btn.textContent = '📦 Guardar como empacado (falta enviar)';
+  } finally {
+    savingInProgress = false;
+  }
 }
 
 function bindAddButton(group, btnId) {
@@ -1214,9 +1300,11 @@ async function submitQC() {
   const owing = [...selected.order_ids, ...selectedAddons]
     .filter(o => o.channel === 'Mayorista')
     .map(o => allActiveOrders.find(x => String(x['Order ID']) === String(o.id)))
-    .filter(r => r && mayoristaNoteInfo(r).saldo);
-  if (owing.length && !confirm(owing.map(r => `${r['Order ID']}: saldo pendiente ${mayoristaNoteInfo(r).saldo}`).join('\n') +
-      '\n\nEste pedido de mayoreo aún no está liquidado. ¿Enviar de todos modos?')) {
+    .filter(r => r && (mayoristaNoteInfo(r).saldo || mayoristaNoteInfo(r).porCotizar || (selected.order_ids.length === 1 && mayoristaNoteInfo(r).sinAnotar)));
+  if (owing.length && !confirm(owing.map(r => {
+      const i = mayoristaNoteInfo(r);
+      return `${r['Order ID']}: ` + [i.saldo ? 'saldo pendiente ' + i.saldo : '', !i.saldo && i.porCotizar ? 'falta cotizar el envío' : '', i.sinAnotar ? 'iba con un envío de TikTok sin anotar' : ''].filter(Boolean).join(' · ');
+    }).join('\n') + '\n\nEste pedido de mayoreo aún no está listo para salir. ¿Enviar de todos modos?')) {
     btn.disabled = false;
     btn.textContent = 'Enviar';
     return;
