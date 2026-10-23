@@ -448,7 +448,9 @@ def annotate_pdf(pdf_bytes: bytes, shipment_meta: dict) -> bytes:
             _annotate_packing_slip(new_slip, block["username"], block["shipment_count"])
 
     buf = io.BytesIO()
-    out.save(buf)
+    # garbage=4 removes the duplicate fonts/resources that per-page insert_pdf
+    # copies in (was 673 KB in -> 13.3 MB out); deflate compresses streams.
+    out.save(buf, garbage=4, deflate=True)
     out.close()
     src.close()
     return buf.getvalue()
