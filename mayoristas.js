@@ -17,6 +17,11 @@ const NEXT_STATUS = { 'Cotización': 'Apartado', 'Apartado': 'Listo', 'Listo': '
 const CACHE_KEY = 'vp_may_data_v2';
 const PRODUCTS_KEY = 'vp_may_products_v1';
 const UPLOAD_FOLDER = 'velpapier/mayoreo';
+// WhatsApp "pedido listo" texts. The first one used to promise "+ envío";
+// the customer now buys their own label by default, so it is upgraded unless edited.
+const OLD_READY = 'Hola {nombre}, tu pedido {pedido} ya está listo ✨ El saldo restante es {saldo} + envío.';
+const NEW_READY = 'Hola {nombre}, tu pedido {pedido} ya está empacado ✨ Peso: {peso} · Medidas: {medidas}. Saldo restante: {saldo}. Con estos datos puedes generar tu guía y compartirnos la etiqueta 🙌';
+const NEW_READY_ENVIO = 'Hola {nombre}, tu pedido {pedido} ya está listo ✨ Peso: {peso} · Medidas: {medidas}. Costo de envío: {envio}. Saldo restante (incluye envío): {saldo}';
 
 let S = null;            // settings
 let CLIENTES = [];       // Mayoreo Clientes rows
@@ -87,16 +92,25 @@ function openFromHash() {
 function packInfo(o) {
   const st = o['Status'];
   if (st === 'Cotización' || st === 'Cancelado') return null;
+  const meas = [o['Peso Kg'] ? o['Peso Kg'] + ' kg' : '', o['Medidas']].filter(Boolean).join(' · ');
   if (st === 'Enviado') return { short: o['QC ID'] ? '✓ empacado' : 'enviado', cls: 'grey',
     long: o['QC ID'] ? `Empacado y enviado (${esc(o['QC ID'])})${o['Envío TikTok'] ? ' dentro del envío TikTok ' + esc(o['Envío TikTok']) : ''}${o['Linked Order IDs'] ? ' · TikTok ' + esc(o['Linked Order IDs']) : ''}. Fotos en Calidad.` : 'Marcado como enviado.' };
-  if (o['Envío TikTok']) return { short: 'en envío TikTok', cls: '',
-    long: `Anotado en el envío TikTok <b>${esc(o['Envío TikTok'])}</b>: se empaca dentro de ese paquete en Empacar. Para cambiarlo: Pedidos → Estado.` };
+  if (shipMethod(o) === 'TikTok') {
+    if (o['Envío TikTok']) return { short: 'en envío TikTok', cls: '',
+      long: `Va dentro del envío TikTok <b>${esc(o['Envío TikTok'])}</b>: se empaca dentro de ese paquete en Empacar. Para cambiarlo, elige otro arriba o usa Pedidos → Estado.` };
+    return { short: 'va con TikTok · sin anotar', cls: '',
+      long: 'Va dentro de un envío de TikTok, pero aún no se eligió cuál. Elígelo aquí abajo, o anótalo en Pedidos → Estado → Anotado.' };
+  }
+  if (o['Empacado']) return { short: '✓ empacado' + (meas ? ' · ' + meas : ''), cls: 'grey',
+    long: `Empacado el ${esc(String(o['Empacado']).slice(0, 10))}${meas ? ' · ' + esc(meas) : ''}.${needsQuote(o) ? ' <b>Falta cotizar el envío.</b>' : ''}` };
   return { short: 'envío propio', cls: 'grey',
-    long: 'Envío propio: aparece en Empacar como tarjeta “Mayoreo”. Para mandarlo dentro de un envío TikTok, márcalo Anotado en Pedidos.' };
+    long: 'Envío propio (paquete aparte): aparece en Empacar como tarjeta “Mayoreo”. Los empacadores guardan fotos, peso y medidas; con eso se cotiza o se le avisa al cliente.' };
 }
 
 function applyData(data) {
   S = data.settings;
+  if (S.wa_tpl_ready === OLD_READY) S.wa_tpl_ready = NEW_READY;
+  if (!S.wa_tpl_ready_envio) S.wa_tpl_ready_envio = NEW_READY_ENVIO;
   CLIENTES = data.clientes || [];
   ORDERS = (data.orders || []).map(normalizeOrder);
   PLANTILLAS = data.plantillas || [];
@@ -152,7 +166,28 @@ function waLink(phone, text) {
 /* ── Money / status helpers ───────────────────────────────────────────── */
 
 function paid(o) { return (o['Pagos'] || []).reduce((s, p) => s + (Number(p.monto) || 0), 0); }
-function due(o) { return (Number(o['Total']) || 0) + (Number(o['Envío']) || 0); }
+// Shipping. Method: 'TikTok' (rides inside a TikTok package) | 'Propio' (its own
+// package) | '' (not decided). Orders linked in Pedidos before the selector
+// existed only carry 'Envío TikTok' -- they count as TikTok.
+function shipMethod(o) {
+  const m = String(o['Envío Método'] || '');
+  if (m === 'TikTok' || m === 'Propio') return m;
+  return String(o['Envío TikTok'] || '').trim() ? 'TikTok' : '';
+}
+// Shipping is only billed when WE handle it ("Envío Gestionado" = Sí). By
+// default the customer buys their own label, so there is no shipping amount in
+// the balance or on the PDF. Older orders with a cost typed in keep billing it.
+function shipHandled(o) {
+  if (shipMethod(o) === 'TikTok') return false;
+  const g = String(o['Envío Gestionado'] || '');
+  if (g === 'Sí') return true;
+  if (g === 'No') return false;
+  return (Number(o['Envío']) || 0) > 0;
+}
+function shipCost(o) { return shipHandled(o) ? (Number(o['Envío']) || 0) : 0; }
+// We bill the shipping but its cost is not known yet (it needs the packed weight/measures).
+function needsQuote(o) { return ['Apartado', 'Listo'].indexOf(o['Status']) >= 0 && shipHandled(o) && !shipCost(o); }
+function due(o) { return (Number(o['Total']) || 0) + shipCost(o); }
 function pending(o) { return Math.max(0, due(o) - paid(o)); }
 
 function statusSince(o) {
@@ -188,6 +223,7 @@ function waitFlag(o) {
     return { text: `preparando · día ${b} de ${lim}`, cls: 'grey' };
   }
   if (st === 'Listo') {
+    if (needsQuote(o)) return { text: 'falta cotizar envío', cls: '' };
     if (d >= (Number(S.quote_followup_days) || 3)) return { text: `esperando pago hace ${d} días`, cls: '' };
     return { text: 'esperando pago', cls: 'grey' };
   }
@@ -278,6 +314,7 @@ function renderPedidos() {
   const quotes = ORDERS.filter(o => o['Status'] === 'Cotización');
   const toCollect = ORDERS.filter(o => ['Apartado', 'Listo'].indexOf(o['Status']) >= 0 && pending(o) > 0);
   const toShip = ORDERS.filter(o => o['Status'] === 'Pagado');
+  const toQuote = ORDERS.filter(needsQuote);
   const monthSales = ORDERS.filter(o => COUNTING.indexOf(o['Status']) >= 0 && String(o['Fecha']).slice(0, 7) === thisMonth);
 
   const chips = ['Activos', ...STATUSES];
@@ -295,6 +332,7 @@ function renderPedidos() {
       ${stat('Cotizaciones abiertas', money(quotes.reduce((s, o) => s + due(o), 0)), `${quotes.length} pedido${quotes.length === 1 ? '' : 's'}`)}
       ${stat('Por cobrar', money(toCollect.reduce((s, o) => s + pending(o), 0)), `${toCollect.length} apartado${toCollect.length === 1 ? '' : 's'} / listo${toCollect.length === 1 ? '' : 's'}`)}
       ${stat('Por enviar', String(toShip.length), toShip.length ? 'pagados, sin enviar' : 'todo al día')}
+      ${toQuote.length ? stat('Envíos por cotizar', String(toQuote.length), 'falta el costo de envío') : ''}
       ${stat('Ventas del mes', money(monthSales.reduce((s, o) => s + (Number(o['Total']) || 0), 0)), `${monthSales.length} pedido${monthSales.length === 1 ? '' : 's'} confirmado${monthSales.length === 1 ? '' : 's'}`)}
     </div>
     <div class="may-chips">${chips.map(f => `<button class="may-chip${FILTER === f && !q ? ' is-active' : ''}" data-filter="${f}">${f}<b>${count(f)}</b></button>`).join('')}</div>
@@ -315,6 +353,7 @@ function renderPedidos() {
             <button class="btn btn-sm" data-act="wa" title="WhatsApp">💬</button>
             ${o['PDF URL'] ? `<a class="btn btn-sm" href="${esc(o['PDF URL'])}" target="_blank" rel="noopener" data-act="pdf" title="Ver PDF" style="text-decoration:none">PDF</a>` : ''}
             ${ACTIVE.indexOf(o['Status']) >= 0 ? '<button class="btn btn-sm" data-act="pay" title="Registrar pago">$</button>' : ''}
+            ${needsQuote(o) ? '<button class="btn btn-sm" data-act="ship" title="Cotizar envío">🚚</button>' : ''}
             ${next ? `<button class="btn btn-sm" data-act="next" title="Mover a ${next}">→ ${next}</button>` : ''}
           </div></td>
         </tr>`;
@@ -331,6 +370,7 @@ function renderPedidos() {
     e.preventDefault();
     if (act.dataset.act === 'wa') openWhatsApp(o);
     if (act.dataset.act === 'pay') openPayment(o, null, async pago => quickPayment(o, pago));
+    if (act.dataset.act === 'ship') openShippingQuote(o);
     if (act.dataset.act === 'next') quickNext(o);
   }));
 }
@@ -347,7 +387,11 @@ async function saveHead(o, fields) {
 async function quickNext(o) {
   const next = NEXT_STATUS[o['Status']];
   if (!next) return;
+  // We bill the shipping and its cost is still unknown: quote it first, then move.
+  if (next === 'Listo' && needsQuote(o)) { openShippingQuote(o, { thenMove: 'Listo' }); return; }
   let msg = `¿Mover ${o['Mayoreo ID']} a ${next}?`;
+  if (next === 'Listo' && !o['Empacado'] && shipMethod(o) !== 'TikTok') msg += '\n\nNota: Empacar aún no registra peso y medidas de este pedido.';
+  if (next === 'Pagado' && needsQuote(o)) msg += '\n\nOjo: falta cotizar el envío.';
   if (next === 'Apartado' && paid(o) < (Number(o['Total']) || 0) / 2) msg += `\n\nOjo: solo hay ${money(paid(o))} registrado de pagos (50% = ${money(o['Total'] / 2)}).`;
   if (next === 'Pagado' && pending(o) > 0) msg += `\n\nOjo: aún hay ${money(pending(o))} pendiente.`;
   if (next === 'Enviado' && !o['Guía']) msg += '\n\nAún no tiene número de guía (puedes agregarlo después).';
@@ -361,7 +405,8 @@ function suggestStatusAfterPayment(o, pagos) {
   const p = pagos.reduce((s, x) => s + (Number(x.monto) || 0), 0);
   const total = Number(o['Total']) || 0;
   if (o['Status'] === 'Cotización' && p >= total / 2 - 1) return 'Apartado';
-  if (['Apartado', 'Listo'].indexOf(o['Status']) >= 0 && p >= due(o) - 1) return 'Pagado';
+  // Not "fully paid" while a shipping cost we bill is still unknown.
+  if (['Apartado', 'Listo'].indexOf(o['Status']) >= 0 && p >= due(o) - 1 && !(shipHandled(o) && !shipCost(o))) return 'Pagado';
   return null;
 }
 
@@ -372,6 +417,58 @@ async function quickPayment(o, pago) {
   if (sug && confirm(`Pago registrado. ¿Mover ${o['Mayoreo ID']} a ${sug}?`)) fields['Status'] = sug;
   try { await saveHead(o, fields); VP.toast('Pago registrado'); await load(); }
   catch (e) { VP.toast(e.message, true); }
+}
+
+// Shipping data once the package is packed: weight/measures (from Empacar, editable),
+// carrier and -- only when we handle the shipping -- its cost. Optionally moves the
+// order to Listo and opens the matching WhatsApp ("ready" message with the balance).
+function openShippingQuote(o, opts) {
+  opts = opts || {};
+  const handled = shipHandled(o);
+  const rest = Math.max(0, (Number(o['Total']) || 0) - paid(o));
+  const m = VP.showModal(`
+    <h2 class="may-h2">Datos de envío · ${esc(o['Mayoreo ID'])}</h2>
+    <div class="may-sub">${esc(custName(o['Customer ID']))} · ${o['Empacado'] ? 'empacado ' + esc(String(o['Empacado']).slice(0, 10)) : 'aún sin empacar en Empacar'}</div>
+    <div class="may-grid" style="margin-top:14px">
+      <label class="may-field">Peso (kg)<input class="vp-input" id="sq-peso" type="number" min="0" step="0.1" value="${esc(o['Peso Kg'] || '')}"></label>
+      <label class="may-field may-span2">Medidas (cm)<input class="vp-input" id="sq-med" value="${esc(o['Medidas'] || '')}" placeholder="40 x 30 x 25"></label>
+      <label class="may-field">Paquetería<input class="vp-input" id="sq-paq" value="${esc(o['Paquetería'] || '')}"></label>
+      ${handled ? `<label class="may-field">Costo de envío<input class="vp-input" id="sq-cost" type="number" min="0" value="${esc(o['Envío'] || '')}" placeholder="0"></label>` : ''}
+    </div>
+    <div class="may-totals" style="margin:16px 0 0;max-width:none">
+      <div><span>Resto del pedido</span><span>${money(rest)}</span></div>
+      ${handled ? `<div><span>+ envío</span><span id="sq-env">${money(o['Envío'])}</span></div>
+      <div class="big"><span>Saldo a cobrar</span><span id="sq-bal">${money(rest + shipCost(o))}</span></div>`
+        : '<div class="may-note">El cliente contrata su paquetería: el mensaje le comparte peso y medidas para que genere su guía.</div>'}
+    </div>
+    <div class="may-actions">
+      <button class="btn" id="sq-save">Guardar${opts.thenMove ? ' y mover a ' + esc(opts.thenMove) : ''}</button>
+      <button class="btn btn-primary" id="sq-wa">Guardar y avisar por WhatsApp</button>
+    </div>`, { maxWidth: '560px' });
+  const q = s => m.el.querySelector(s);
+  const costNow = () => (q('#sq-cost') ? Number(q('#sq-cost').value) || 0 : 0);
+  if (handled) q('#sq-cost').addEventListener('input', () => {
+    q('#sq-env').textContent = money(costNow());
+    q('#sq-bal').textContent = money(rest + costNow());
+  });
+  async function go(withWa) {
+    if (withWa && handled && !costNow()) { VP.toast('Escribe el costo de envío antes de avisar al cliente', true); return; }
+    const fields = {
+      'Peso Kg': q('#sq-peso').value, 'Medidas': q('#sq-med').value.trim(), 'Paquetería': q('#sq-paq').value.trim(),
+      'Envío Gestionado': handled ? 'Sí' : 'No', 'Envío': handled ? costNow() : 0,
+    };
+    if (opts.thenMove) fields['Status'] = opts.thenMove;
+    q('#sq-save').disabled = true; q('#sq-wa').disabled = true;
+    try {
+      await saveHead(o, fields);
+      VP.toast('Guardado');
+      m.close();
+      await load();
+      if (withWa) { const o2 = ORDERS.find(x => x['Mayoreo ID'] === o['Mayoreo ID']); if (o2) openWhatsApp(o2, 'ready'); }
+    } catch (e) { VP.toast(e.message, true); q('#sq-save').disabled = false; q('#sq-wa').disabled = false; }
+  }
+  q('#sq-save').onclick = () => go(false);
+  q('#sq-wa').onclick = () => go(true);
 }
 
 /* ── View: Clientes ───────────────────────────────────────────────────── */
@@ -660,25 +757,29 @@ function fillTemplate(tpl, o) {
     nombre: firstName(cid), pedido: o['Mayoreo ID'] || '', total: money(o['Total']),
     anticipo: money((Number(o['Total']) || 0) / 2), saldo: money(pending(o)),
     pdf: o['PDF URL'] || '', guia: o['Guía'] || '', paqueteria: o['Paquetería'] || '',
+    envio: shipHandled(o) ? (shipCost(o) ? money(shipCost(o)) : 'por cotizar') : '',
+    peso: o['Peso Kg'] ? o['Peso Kg'] + ' kg' : 'por confirmar',
+    medidas: o['Medidas'] || 'por confirmar',
   };
   return String(tpl || '').replace(/\{(\w+)\}/g, (m, k) => (k in map ? map[k] : m));
 }
 
-function openWhatsApp(o) {
+function openWhatsApp(o, prefer) {
   const c = cliente(o['Customer ID']) || {};
   if (!c['Teléfono']) {
     VP.toast('Agrega el teléfono del mayorista', true);
     openClientEdit(o['Customer ID'], null, null);
     return;
   }
+  const handled = shipHandled(o);
   const opts = [
-    ['Cotización lista', S.wa_tpl_quote, 'Cotización'],
-    ['Pedir anticipo', S.wa_tpl_deposit, 'Cotización'],
-    ['Pedido listo · saldo', S.wa_tpl_ready, 'Listo'],
-    ['Enviado · guía', S.wa_tpl_shipped, 'Enviado'],
+    ['Cotización lista', S.wa_tpl_quote],
+    ['Pedir anticipo', S.wa_tpl_deposit],
+    handled ? ['Pedido listo · con costo de envío', S.wa_tpl_ready_envio] : ['Pedido listo · peso y medidas', S.wa_tpl_ready],
+    ['Enviado · guía', S.wa_tpl_shipped],
   ];
   // The message that fits the current status goes first.
-  const fit = { 'Cotización': 0, 'Apartado': 1, 'Listo': 2, 'Pagado': 3, 'Enviado': 3 }[o['Status']] || 0;
+  const fit = prefer === 'ready' ? 2 : ({ 'Cotización': 0, 'Apartado': 2, 'Listo': 2, 'Pagado': 3, 'Enviado': 3 }[o['Status']] || 0);
   const ordered = [opts[fit]].concat(opts.filter((x, i) => i !== fit));
   const m = VP.showModal(`
     <h2 class="may-h2">WhatsApp · ${esc(firstName(o['Customer ID']))}</h2>
@@ -696,10 +797,10 @@ function openWhatsApp(o) {
 function openPayment(o, total, onSave) {
   const p = paid(o);
   const totalNow = total !== null && total !== undefined ? total : Number(o['Total']) || 0;
-  const suggest = p === 0 ? Math.round(totalNow / 2) : Math.max(0, Math.round(totalNow + (Number(o['Envío']) || 0) - p));
+  const suggest = p === 0 ? Math.round(totalNow / 2) : Math.max(0, Math.round(totalNow + shipCost(o) - p));
   const m = VP.showModal(`
     <h2 class="may-h2">Registrar pago</h2>
-    <div class="may-sub">${esc(o['Mayoreo ID'] || 'Pedido nuevo')} · ${esc(custName(o['Customer ID']))} · pagado ${money(p)} de ${money(totalNow + (Number(o['Envío']) || 0))}</div>
+    <div class="may-sub">${esc(o['Mayoreo ID'] || 'Pedido nuevo')} · ${esc(custName(o['Customer ID']))} · pagado ${money(p)} de ${money(totalNow + shipCost(o))}${shipHandled(o) && !shipCost(o) ? ' (sin envío: aún por cotizar)' : ''}</div>
     <div class="may-grid" style="margin-top:14px">
       <label class="may-field">Monto<input class="vp-input" type="number" min="0" id="py-monto" value="${suggest}"></label>
       <label class="may-field">Fecha<input class="vp-input" type="date" id="py-fecha" value="${today()}"></label>
@@ -798,7 +899,7 @@ function openEditor(id, cidForNew, copyFrom) {
   const cl0 = cliente(src ? src['Customer ID'] : cidNew) || {};
   const o = src ? JSON.parse(JSON.stringify(src)) : {
     'Mayoreo ID': '', 'Customer ID': cidNew, 'Fecha': today(), 'Status': 'Cotización',
-    'Descuento Origen': 'auto', 'Envío': 0, 'Pagos': [], 'Status Historial': [], 'PDF Historial': [],
+    'Descuento Origen': 'auto', 'Envío': 0, 'Envío Gestionado': 'No', 'Pagos': [], 'Status Historial': [], 'PDF Historial': [],
     'Paquetería': cl0['Paquetería Preferida'] || '', 'Factura': cl0['Requiere Factura'] === 'Sí' ? 'Pendiente' : '',
     items: copyFrom ? copyFrom.items.map(it => ({ 'Artículo': it['Artículo'], 'Cantidad': Number(it['Cantidad']) || 0, 'Precio Unitario': Number(it['Precio Unitario']) || 0, 'Catálogo': it['Catálogo'] || 'Regular', 'Catalog ID': it['Catalog ID'] || '' })) : [blankItem()],
   };
@@ -806,6 +907,10 @@ function openEditor(id, cidForNew, copyFrom) {
   const cid = String(o['Customer ID']);
   let manualPct = o['Descuento Origen'] === 'manual' ? Number(o['Descuento %']) : null;
   let dirty = false;
+  // Packing-side fields (method, TikTok shipment, weight, measures) are also written by
+  // Empacar and Pedidos while this window is open, so they are only saved when edited here.
+  const touched = new Set();
+  let ttList = null, ttLoading = false;     // this customer's pending TikTok shipments
 
   const m = VP.showModal(`<div id="ed-root"></div>`, { maxWidth: '980px' });
   const root = m.el.querySelector('#ed-root');
@@ -821,6 +926,26 @@ function openEditor(id, cidForNew, copyFrom) {
     const total = Math.round(regSub + espSub - desc);
     const pieces = o.items.reduce((s, it) => s + (Number(it['Cantidad']) || 0), 0);
     return { regSub, espSub, sub: regSub + espSub, info, pct, desc, total, pieces };
+  }
+
+  function loadTt() {
+    ttLoading = true;
+    VP.post({ action: 'mayoreo_tiktok_shipments', customer_id: cid })
+      .then(r => { ttList = r.shipments || []; })
+      .catch(e => { ttList = []; VP.toast('No se pudieron cargar los envíos de TikTok: ' + e.message, true); })
+      .finally(() => { ttLoading = false; render(); });
+  }
+  function ttOptionsHtml() {
+    const cur = String(o['Envío TikTok'] || '');
+    const list = (ttList || []).slice();
+    if (cur && !list.some(s => s.tracking_id === cur)) list.unshift({ tracking_id: cur, order_ids: [], date: '' });   // keep a link that is no longer pending
+    const first = ttList === null ? 'Cargando envíos…'
+      : list.length ? '— Sin elegir (anotar luego en Pedidos) —' : 'Este cliente no tiene envíos de TikTok pendientes';
+    return `<option value="">${first}</option>` + list.map(s => {
+      const ids = s.order_ids || [];
+      const label = [s.date, ids[0] ? 'TikTok ' + ids[0] + (ids.length > 1 ? ' +' + (ids.length - 1) : '') : '', 'guía …' + String(s.tracking_id).slice(-6)].filter(Boolean).join(' · ');
+      return `<option value="${esc(s.tracking_id)}" ${cur === s.tracking_id ? 'selected' : ''}>${esc(label)}</option>`;
+    }).join('');
   }
 
   function focusKey() {
@@ -885,7 +1010,6 @@ function openEditor(id, cidForNew, copyFrom) {
         <div style="flex:1.3;min-width:300px">
           <div class="may-grid">
             <label class="may-field">Descuento %<input class="vp-input" type="number" min="0" max="100" id="ed-pct" value="${c.pct}"></label>
-            <label class="may-field">Envío<input class="vp-input" type="number" min="0" data-f="Envío" value="${esc(o['Envío'] || 0)}"></label>
           </div>
           ${manualPct !== null ? `<label class="may-field" style="margin-top:8px">Motivo del descuento manual (auto: ${c.info.pct}%)
             <input class="vp-input" data-f="Descuento Nota" value="${esc(o['Descuento Nota'] || '')}"></label>
@@ -900,12 +1024,37 @@ function openEditor(id, cidForNew, copyFrom) {
 
           <div class="may-h3">Envío</div>
           <div class="may-note" style="margin:-2px 0 10px;line-height:1.5">${packInfo(o) ? packInfo(o).long : 'Al confirmar (Apartado) aparece en Pedidos y en Empacar.'}</div>
+          ${needsQuote(o) ? '<div class="may-warn" style="margin-bottom:10px">⚠ Falta cotizar el envío: se agrega cuando el paquete está empacado (peso y medidas).</div>' : ''}
           <div class="may-grid">
-            <label class="may-field">Paquetería<input class="vp-input" data-f="Paquetería" value="${esc(o['Paquetería'] || '')}"></label>
-            <label class="may-field">Guía<input class="vp-input" data-f="Guía" value="${esc(o['Guía'] || '')}"></label>
+            <label class="may-field may-span2">Método de envío
+              <select class="vp-input" data-f="Envío Método">
+                <option value="" ${!shipMethod(o) ? 'selected' : ''}>— Por definir —</option>
+                <option value="Propio" ${shipMethod(o) === 'Propio' ? 'selected' : ''}>Envío propio (paquete aparte)</option>
+                <option value="TikTok" ${shipMethod(o) === 'TikTok' ? 'selected' : ''}>Con un envío de TikTok</option>
+              </select></label>
           </div>
-          <div style="margin-top:8px;font-size:13px">${o['Etiqueta URL'] ? `<a class="may-link" href="${esc(o['Etiqueta URL'])}" target="_blank" rel="noopener">Ver etiqueta</a> · ` : ''}
-            <label class="may-link">${o['Etiqueta URL'] ? 'Cambiar' : 'Subir'} etiqueta<input type="file" id="ed-label" accept="image/*,application/pdf" style="display:none"></label></div>
+          ${shipMethod(o) === 'TikTok' ? `
+            <label class="may-field" style="margin-top:10px">Envío de TikTok del cliente
+              <select class="vp-input" id="ed-ttship">${ttOptionsHtml()}</select></label>
+            <div class="may-note">Viaja dentro de ese paquete y no lleva costo de envío. Al elegirlo queda Anotado en Pedidos y los empacadores lo ven dentro de esa tarjeta en Empacar.</div>
+          ` : `
+            <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="ed-handled" ${shipHandled(o) ? 'checked' : ''}> Nosotros gestionamos el envío (se le cobra al cliente)</label>
+            ${shipHandled(o)
+              ? `<div class="may-grid" style="margin-top:8px">
+                  <label class="may-field">Costo de envío<input class="vp-input" type="number" min="0" data-f="Envío" value="${esc(o['Envío'] || '')}" placeholder="se agrega al empacar"></label>
+                </div>
+                <div class="may-note">Se agrega después, cuando el paquete ya está empacado y se conocen peso y medidas. Mientras no se escriba, el saldo no lo incluye y el PDF dice “por cotizar”.</div>`
+              : '<div class="may-note">Por defecto el cliente contrata su paquetería: al empacar se le comparten peso y medidas. El PDF no muestra costo de envío.</div>'}
+            <div class="may-grid" style="margin-top:10px">
+              <label class="may-field">Peso (kg)<input class="vp-input" type="number" min="0" step="0.1" data-f="Peso Kg" value="${esc(o['Peso Kg'] || '')}"></label>
+              <label class="may-field may-span2">Medidas (cm)<input class="vp-input" data-f="Medidas" value="${esc(o['Medidas'] || '')}" placeholder="40 x 30 x 25"></label>
+              <label class="may-field">Paquetería<input class="vp-input" data-f="Paquetería" value="${esc(o['Paquetería'] || '')}"></label>
+              <label class="may-field">Guía<input class="vp-input" data-f="Guía" value="${esc(o['Guía'] || '')}"></label>
+            </div>
+            <div style="margin-top:8px;font-size:13px">${o['Etiqueta URL'] ? `<a class="may-link" href="${esc(o['Etiqueta URL'])}" target="_blank" rel="noopener">Ver etiqueta</a> · ` : ''}
+              <label class="may-link">${o['Etiqueta URL'] ? 'Cambiar' : 'Subir'} etiqueta<input type="file" id="ed-label" accept="image/*,application/pdf" style="display:none"></label></div>
+          `}
 
           <label class="may-field" style="margin-top:12px">Notas internas<input class="vp-input" data-f="Notas" value="${esc(o['Notas'] || '')}"></label>
         </div>
@@ -914,9 +1063,10 @@ function openEditor(id, cidForNew, copyFrom) {
           <div><span>Descuento (${c.pct}%)</span><span>−${money(c.desc)}</span></div>
           ${c.espSub ? `<div><span>Catálogo especial</span><span>${money(c.espSub)}</span></div>` : ''}
           <div class="big"><span>Total</span><span>${money(c.total)}</span></div>
-          <div><span>Envío</span><span>${money(o['Envío'])}</span></div>
+          <div><span>Envío</span><span>${shipHandled(o) ? (shipCost(o) ? money(shipCost(o)) : 'por cotizar') : (shipMethod(o) === 'TikTok' ? 'con TikTok' : 'lo contrata el cliente')}</span></div>
           <div><span>Pagado</span><span>${money(paid(o))}</span></div>
           <div><b>Pendiente</b><b>${money(pending(oc))}</b></div>
+          ${needsQuote(o) ? '<div class="may-note">El pendiente aún no incluye el envío.</div>' : ''}
           ${!c.info.hist.total && tiersSorted()[0] && c.sub < tiersSorted()[0].min ? `<div class="may-warn">Pedido de apertura mínimo ${money(tiersSorted()[0].min)}</div>` : ''}
         </div>
       </div>
@@ -931,12 +1081,29 @@ function openEditor(id, cidForNew, copyFrom) {
       </div>`;
     wire();
     restoreFocus(fk);
+    if (shipMethod(o) === 'TikTok' && ttList === null && !ttLoading) loadTt();
   }
 
   function wire() {
     const q = s => root.querySelector(s);
     q('#ed-client').onclick = () => { if (!dirty || confirm('Hay cambios sin guardar. ¿Salir?')) { m.close(); openClient(cid); } };
-    root.querySelectorAll('[data-f]').forEach(el => el.addEventListener('change', () => { o[el.dataset.f] = el.value; dirty = true; later(); }));
+    root.querySelectorAll('[data-f]').forEach(el => el.addEventListener('change', () => {
+      const f = el.dataset.f;
+      o[f] = el.value; touched.add(f); dirty = true;
+      if (f === 'Envío Método') {
+        // Leaving "TikTok" releases the shipment; choosing it means we never bill shipping.
+        if (el.value !== 'TikTok') { o['Envío TikTok'] = ''; touched.add('Envío TikTok'); }
+        else o['Envío Gestionado'] = 'No';
+      }
+      later();
+    }));
+    const hc = q('#ed-handled');
+    if (hc) hc.addEventListener('change', () => { o['Envío Gestionado'] = hc.checked ? 'Sí' : 'No'; dirty = true; render(); });
+    const ts = q('#ed-ttship');
+    if (ts) ts.addEventListener('change', () => {
+      o['Envío TikTok'] = ts.value; o['Envío Método'] = 'TikTok';
+      touched.add('Envío TikTok'); touched.add('Envío Método'); dirty = true; render();
+    });
     root.querySelectorAll('tr[data-n]').forEach(tr => {
       const it = o.items[Number(tr.dataset.n)];
       tr.querySelectorAll('[data-i]').forEach(el => { if (el.tagName === 'INPUT') el.addEventListener('focus', () => el.select()); });
@@ -980,7 +1147,7 @@ function openEditor(id, cidForNew, copyFrom) {
       if (!confirm('¿Quitar este pago?')) return;
       o['Pagos'].splice(Number(b.dataset.delpay), 1); dirty = true; render();
     });
-    q('#ed-label').addEventListener('change', async e => {
+    if (q('#ed-label')) q('#ed-label').addEventListener('change', async e => {
       const f = e.target.files[0]; if (!f) return;
       try { VP.toast('Subiendo etiqueta…'); o['Etiqueta URL'] = await uploadAny(f); dirty = true; render(); VP.toast('Etiqueta subida — recuerda Guardar'); }
       catch (err) { VP.toast(err.message, true); }
@@ -1010,7 +1177,9 @@ function openEditor(id, cidForNew, copyFrom) {
     const head = Object.assign({}, o);
     delete head.items; delete head['Status Historial'];
     // Written by the Pedidos/Empacar sync -- this editor's copy may be older.
-    delete head['Envío TikTok']; delete head['QC ID']; delete head['Linked Order IDs'];
+    delete head['QC ID']; delete head['Linked Order IDs']; delete head['Empacado'];
+    // Packing-side fields only travel when this person actually edited them here.
+    ['Envío Método', 'Envío TikTok', 'Peso Kg', 'Medidas'].forEach(k => { if (!touched.has(k)) delete head[k]; });
     Object.assign(head, {
       'Subtotal': c.sub, 'Descuento %': c.pct, 'Total': c.total,
       'Descuento Origen': manualPct !== null ? 'manual' : 'auto',
@@ -1018,6 +1187,8 @@ function openEditor(id, cidForNew, copyFrom) {
       'Anticipo Monto': '', 'Anticipo Fecha': '', 'Liquidación Monto': '', 'Liquidación Fecha': '',
     });
     if (manualPct === null) head['Descuento Nota'] = '';
+    head['Envío Gestionado'] = shipHandled(o) ? 'Sí' : 'No';
+    head['Envío'] = shipCost(o);
     const items = o.items.filter(it => String(it['Artículo']).trim()).map(it => ({
       'Artículo': String(it['Artículo']).trim(), 'Cantidad': Number(it['Cantidad']) || 0,
       'Precio Unitario': Number(it['Precio Unitario']) || 0, 'Catálogo': it['Catálogo'] || 'Regular',
@@ -1039,7 +1210,7 @@ function openEditor(id, cidForNew, copyFrom) {
       if (withPdf) {
         VP.toast('Generando PDF…');
         const v = (Number(o['PDF Versión']) || 0) + 1;
-        const blob = buildPdf(head, items, c, v);
+        const blob = buildPdf(head, items, c, v, { method: shipMethod(o), handled: shipHandled(o), cost: shipCost(o) });
         const url = await uploadRaw(blob, 'cotizacion.pdf');
         const hist = (o['PDF Historial'] || []).concat([{ v, url, fecha: today(), total: c.total }]);
         await saveHead(head, { 'PDF URL': url, 'PDF Versión': v, 'PDF Historial': hist });
@@ -1047,6 +1218,7 @@ function openEditor(id, cidForNew, copyFrom) {
       }
       dirty = false;
       VP.toast(withPdf ? 'Guardado y PDF generado' : 'Guardado ' + r.id);
+      if (r.mirror_warning) setTimeout(() => VP.toast(r.mirror_warning, true), 1800);
       await load();
       m.close();
       openEditor(r.id);
@@ -1076,7 +1248,9 @@ function pdfName(head, v) {
   return `Cotizacion_${head['Mayoreo ID']}_v${v}_${n}.pdf`;
 }
 
-function buildPdf(head, items, c, v) {
+function buildPdf(head, items, c, v, ship) {
+  // Shipping is only a line on the quote when WE handle it; otherwise the customer buys their own label.
+  ship = ship || { method: shipMethod(head), handled: shipHandled(head), cost: shipCost(head) };
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'letter' });
   const W = doc.internal.pageSize.getWidth(), L = 18, R = W - 18;
@@ -1130,11 +1304,22 @@ function buildPdf(head, items, c, v) {
   row('Total', fmt(c.total), true);
   y += 2;
 
-  const env = Number(head['Envío']) || 0;
+  const env = ship.cost;
   const pd = (head['Pagos'] || []).reduce((s, p) => s + (Number(p.monto) || 0), 0);
   row('Anticipo 50%', fmt(c.total / 2));
-  row('Resto 50% + envío', fmt(c.total / 2) + (env ? ` + ${fmt(env)}` : ' + envío'));
+  if (ship.handled) {
+    row('Resto 50% + envío', fmt(c.total / 2) + (env ? ` + ${fmt(env)}` : ' + envío'));
+    row('Envío', env ? fmt(env) : 'por cotizar al empacar');
+  } else {
+    row('Resto 50%', fmt(c.total / 2));
+  }
   if (pd) { row('Pagado', fmt(pd)); row('Saldo pendiente', fmt(Math.max(0, c.total + env - pd)), true); }
+  if (!ship.handled) {
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(8.5); doc.setTextColor(...muted);
+    doc.text(ship.method === 'TikTok' ? 'Tu pedido viaja junto con tu envío de TikTok.' : 'Envío por cuenta del cliente: al empacar te compartimos peso y medidas para que lo cotices.',
+      R, y, { align: 'right', maxWidth: 110 });
+    y += 9;
+  }
 
   const after = c.info.hist.total + (S.history_basis === 'before' ? c.sub : c.total);
   const nextAfter = tiersSorted().find(t => t.min > after);
@@ -1151,9 +1336,16 @@ function buildPdf(head, items, c, v) {
   doc.text('Forma de pago', L, fy);
   doc.setFont('helvetica', 'normal'); doc.setTextColor(...muted); doc.setFontSize(8.5);
   doc.text(String(S.pdf_bank_info || 'Transferencia bancaria (datos por WhatsApp).').split('\n'), L, fy + 5);
-  doc.text('Precios en MXN. 50% de anticipo para apartar mercancía; 50% restante + envío al estar listo el pedido. ' +
-    'Preparación hasta 1 semana hábil tras el anticipo. El envío corre por cuenta del cliente; no nos hacemos ' +
-    'responsables por daños o retrasos de la paquetería. Entregamos evidencia fotográfica del paquete.',
+  doc.text(ship.handled
+    ? 'Precios en MXN. 50% de anticipo para apartar mercancía; 50% restante al estar listo el pedido. El costo de envío se cotiza al empacar (peso y medidas) y se liquida junto con el resto. ' +
+      'Preparación hasta 1 semana hábil tras el anticipo. No nos hacemos responsables por daños o retrasos de la paquetería. Entregamos evidencia fotográfica del paquete.'
+    : ship.method === 'TikTok'
+    ? 'Precios en MXN. 50% de anticipo para apartar mercancía; 50% restante al estar listo el pedido. ' +
+      'Preparación hasta 1 semana hábil tras el anticipo. El pedido viaja dentro de tu envío de TikTok. ' +
+      'Entregamos evidencia fotográfica del paquete.'
+    : 'Precios en MXN. 50% de anticipo para apartar mercancía; 50% restante al estar listo el pedido. ' +
+      'Preparación hasta 1 semana hábil tras el anticipo. El envío corre por cuenta del cliente; no nos hacemos ' +
+      'responsables por daños o retrasos de la paquetería. Entregamos evidencia fotográfica del paquete.',
     L + 88, fy + 5, { maxWidth: R - L - 88 });
   return doc.output('blob');
 }
@@ -1350,8 +1542,8 @@ function openSettings() {
     <label class="may-field">Datos bancarios (aparecen en el PDF)<textarea class="vp-input" id="st-bank" rows="3">${esc(S.pdf_bank_info || '')}</textarea></label>
 
     <div class="may-h3">Mensajes de WhatsApp</div>
-    <div class="may-note" style="margin-bottom:8px">Puedes usar: {nombre} {pedido} {total} {anticipo} {saldo} {pdf} {guia} {paqueteria}</div>
-    ${[['wa_tpl_quote', 'Cotización lista'], ['wa_tpl_deposit', 'Pedir anticipo'], ['wa_tpl_ready', 'Pedido listo · saldo'], ['wa_tpl_shipped', 'Enviado · guía']].map(([k, l]) =>
+    <div class="may-note" style="margin-bottom:8px">Puedes usar: {nombre} {pedido} {total} {anticipo} {saldo} {pdf} {guia} {paqueteria} {envio} {peso} {medidas}</div>
+    ${[['wa_tpl_quote', 'Cotización lista'], ['wa_tpl_deposit', 'Pedir anticipo'], ['wa_tpl_ready', 'Pedido listo · el cliente contrata su envío'], ['wa_tpl_ready_envio', 'Pedido listo · nosotros gestionamos el envío'], ['wa_tpl_shipped', 'Enviado · guía']].map(([k, l]) =>
       `<label class="may-field" style="margin-bottom:8px">${l}<textarea class="vp-input" data-wa="${k}" rows="2">${esc(S[k] || '')}</textarea></label>`).join('')}
 
     <div class="may-h3">Pedidos y Empacar</div>
