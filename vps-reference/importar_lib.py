@@ -772,8 +772,8 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
     M = 8
     # Column widths: Seller SKU is wide enough for a full code like
     # "JZA5128-2686" at the default size (a code split mid-way is a packing risk).
-    cx = {"name": M, "name_w": W * 0.40 - M, "sku": W * 0.405, "sku_w": W * 0.205,
-          "seller": W * 0.615, "seller_w": W * 0.265, "qty_r": W - M}
+    cx = {"name": M, "name_w": W * 0.40 - M, "sku": W * 0.405, "sku_w": W * 0.1,
+          "seller": W * 0.4, "seller_w": W * 0.1, "qty_r": W - M}
     limit = _bottom_limit(st, H) - 9      # 9 pt kept free for the "continúa" strip
     pages = []
     state = {"combo": ""}                 # name of the combo whose children are being drawn
@@ -1252,7 +1252,10 @@ def test_slip_pdf(mode, settings):
         out.close()
         out = None                                        # closed: a retry opens a fresh one
         if mode == "single":
-            n_plain = max(1, n_plain - 1)
+            if n_plain > 1:
+                n_plain -= 1
+            else:
+                n_combo = 0
         else:
             n_plain = max(4, n_plain - 2) if too_many else n_plain + 2
     if out is None:
