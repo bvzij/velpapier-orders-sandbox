@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-22.2';
+const SCRIPT_VERSION = '2026-10-24.1';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -383,6 +383,11 @@ function doGet(e) {
     if (action === 'health_report') return requireAdmin(role) ? healthReportAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_redo_status') return undoRedoStatusAction(e);
     if (action === 'audit_trail') return getAuditTrailAction(e);
+    // importar-v2
+    if (action === 'import_log_list') return importLogListAction(e);
+    if (action === 'import_file_get') return importFileGetAction(e);
+    if (action === 'importar_settings_get') return importarSettingsGetAction();
+    if (action === 'funfacts_list') return funFactsListAction();
 
     if (action === 'orders') {
       const sheet = getOrdersSheet();
@@ -958,6 +963,14 @@ function dispatchPostAction(action, body, role) {
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
+    // importar-v2
+    if (action === 'import_context') return importContextAction(body);
+    if (action === 'import_finalize') return importFinalizeAction(body);
+    if (action === 'import_log_save') return importLogSaveAction(body);
+    if (action === 'import_file_save') return importFileSaveAction(body);
+    if (action === 'importar_settings_save') return importarSettingsSaveAction(body);
+    if (action === 'funfacts_save') return funFactsSaveAction(body);
+    if (action === 'funfacts_mark_used') return funFactsMarkUsedAction(body);
     if (action === 'save_qc') return saveQC(body);
     if (action === 'bulk_set_urgent') return bulkSetUrgent(body);
     if (action === 'logout') return logoutAction(body);
@@ -2049,9 +2062,38 @@ function revokeUserSessionsAction(body) {
 // TIKTOK IMPORT
 // ═══════════════════════════════════════════════════════════════════════════
 
+// importar-v2: one Orders row per CSV message (Buyer Message / Seller Note)
+// of a TikTok order. Order ID NOTA-<tiktok order>-C (cliente) / -V (vendedor).
+// The text is exactly the CSV cell (emojis already removed by the VPS).
+function buildNotaRows_(oh, s, tid, customerID, primary, status, dayFirst, orderIdSet) {
+  const out = [];
+  (s.notas || []).forEach(n => {
+    const text = String(n.text || '').trim();
+    const oid = String(n.order_id || '').replace(/[^\d]/g, '');
+    if (!text || !oid) return;
+    const id = 'NOTA-' + oid + '-' + (n.source === 'Vendedor' ? 'V' : 'C');
+    if (orderIdSet[id]) return;
+    orderIdSet[id] = true;
+    const vals = {
+      'Order ID': id, 'Tracking ID': '', 'Customer ID': customerID || '', 'Primary Username': primary || '',
+      'Channel': 'Nota', 'Status': status, 'Products': text, 'Price': 0, 'Created Date': nowISO(),
+      'Linked Shipment': tid, 'Shipped Date': status === 'Enviado' ? nowISO() : '',
+      'Order Date': toISOorEmpty(parseTikTokDateTime(s.created_time, dayFirst)),
+      'Nota Original': text, 'Nota Fuente': n.source === 'Vendedor' ? 'Vendedor' : 'Comprador',
+      'Nota Pedido': oid, 'Nota Productos': String(n.candidates || ''), 'Nota Asignada': '',
+    };
+    out.push(oh.map(h => (vals[h] !== undefined ? vals[h] : '')));
+  });
+  return out;
+}
+
 function importTikTokOrders(body) {
   const orders = getOrdersSheet();
   ensureHeader(orders, 'Order Date');   // real platform order time (see FIX_LOG 2.1)
+  // importar-v2: deadline from the packing slip + the Nota data slots
+  // (Nota Asignada = which product a note is about; filled by staff now,
+  // possibly by an AI suggestion later -- nothing calls an AI today).
+  ['Ship By', 'Nota Original', 'Nota Fuente', 'Nota Pedido', 'Nota Productos', 'Nota Asignada'].forEach(n => ensureHeader(orders, n));
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
 
@@ -2064,13 +2106,19 @@ function importTikTokOrders(body) {
   const allOrderData = lastRow > 1 ? orders.getRange(2, 1, lastRow - 1, oh.length).getValues() : [];
 
   const trackingSet = {};
+  const iOidO = oh.indexOf('Order ID');
+  const iShipByO = oh.indexOf('Ship By');
+  const tiktokRowByTid = {};   // importar-v2: duplicates still report customer + count
+  const orderIdSet = {};       // importar-v2: Nota rows are never created twice
   // Customer ID -> number of shipped (Enviado/Archivado) TikTok+Shopify orders.
   // Built ONCE from the rows already loaded above. It used to be recomputed
   // by re-reading the whole Orders sheet for EVERY shipment in the batch
   // (up to 200 full-sheet reads per request).
   const shippedCountMap = {};
-  allOrderData.forEach(r => {
+  allOrderData.forEach((r, ri) => {
     if (r[iTrk]) trackingSet[String(r[iTrk])] = true;
+    if (r[iTrk] && r[iChanO] === 'TikTok' && tiktokRowByTid[String(r[iTrk])] === undefined) tiktokRowByTid[String(r[iTrk])] = ri;
+    if (iOidO >= 0 && r[iOidO]) orderIdSet[String(r[iOidO])] = true;
     const cid = String(r[iCustO] || '');
     if (cid && (r[iChanO] === 'TikTok' || r[iChanO] === 'Shopify') &&
         (r[iStatO] === 'Enviado' || r[iStatO] === 'Archivado')) {
@@ -2130,6 +2178,8 @@ function importTikTokOrders(body) {
   }
 
   const rows = [], results = [], unresolved = [], allImportHistory = [];
+  const notaRows = [];          // importar-v2
+  const shipByFills = {};       // value -> [data row idx] for duplicates with an empty Ship By
   // created_time arrives raw from the VPS; decide day/month order once per batch.
   const createdDayFirst = detectDayFirst((body.shipments || []).map(s => s.created_time));
   let customersDirty = false;
@@ -2139,7 +2189,23 @@ function importTikTokOrders(body) {
     if (!tid) return;
 
     if (trackingSet[tid]) {
-      results.push({ tracking_id: tid, inserted: false, reason: 'duplicate' });
+      // importar-v2: a re-import still needs the real customer + count for
+      // the PDF (Nuevo / N env / NO POSTAL), the deadline and its Notas.
+      const ri = tiktokRowByTid[tid];
+      const dup = { tracking_id: tid, inserted: false, reason: 'duplicate' };
+      if (ri !== undefined) {
+        const er = allOrderData[ri];
+        const ecid = String(er[iCustO] || '');
+        const eShipped = er[iStatO] === 'Enviado' || er[iStatO] === 'Archivado';
+        if (ecid) {
+          dup.customer_id = ecid;
+          dup.shipment_count = (shippedCountMap[ecid] || 0) - (eShipped ? 1 : 0);
+        }
+        if (iShipByO >= 0 && s.ship_by && !er[iShipByO]) (shipByFills[s.ship_by] = shipByFills[s.ship_by] || []).push(ri);
+        buildNotaRows_(oh, s, tid, ecid, String(er[oh.indexOf('Primary Username')] || s.username || ''),
+          eShipped ? 'Enviado' : 'Anotado', createdDayFirst, orderIdSet).forEach(nr => notaRows.push(nr));
+      }
+      results.push(dup);
       return;
     }
     trackingSet[tid] = true;
@@ -2204,6 +2270,7 @@ function importTikTokOrders(body) {
     row[oh.indexOf('Price')] = Number(s.price) || 0;
     row[oh.indexOf('Created Date')] = nowISO();
     row[oh.indexOf('Linked Shipment')] = tid;
+    if (iShipByO >= 0) row[iShipByO] = s.ship_by || '';   // importar-v2
     const orderDate = parseTikTokDateTime(s.created_time, createdDayFirst);
     if (oh.indexOf('Order Date') >= 0) row[oh.indexOf('Order Date')] = toISOorEmpty(orderDate);
 
@@ -2223,6 +2290,7 @@ function importTikTokOrders(body) {
     }
 
     rows.push(row);
+    buildNotaRows_(oh, s, tid, customerID, primary, 'Anotado', createdDayFirst, orderIdSet).forEach(nr => notaRows.push(nr));
     results.push({ tracking_id: tid, inserted: true, customer_id: customerID, shipment_count: shipCount });
     logAuditEvent('import_tiktok_order', 'Order', row[oh.indexOf('Order ID')], {
       tracking_id: tid, channel: 'TikTok', requested_by: body.requested_by || '',
@@ -2242,6 +2310,16 @@ function importTikTokOrders(body) {
     forceTextFormat(orders, oh, ['Order ID', 'Tracking ID'], startRow, rows.length);
     orders.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
   }
+
+  // importar-v2: Nota rows (Buyer Message / Seller Note), already Anotado --
+  // TikTok prints them on its own slip. One write for all of them.
+  if (notaRows.length) {
+    const nStart = orders.getLastRow() + 1;
+    forceTextFormat(orders, oh, ['Order ID', 'Tracking ID', 'Nota Pedido'], nStart, notaRows.length);
+    orders.getRange(nStart, 1, notaRows.length, notaRows[0].length).setValues(notaRows);
+    notaRows.forEach(nr => logAuditEvent('import_nota', 'Order', nr[oh.indexOf('Order ID')], { channel: 'Nota' }));
+  }
+  Object.keys(shipByFills).forEach(v => setCellsToValue(orders, iShipByO, shipByFills[v], v, false));
 
   // ─── Write TikTok Import History, now AFTER duplicate filtering ───
   // Second layer of protection: even among shipments that passed the
@@ -2692,6 +2770,28 @@ function saveQC(body) {
     setCellsToValue(orders, iLink,    linkRows, body.tracking_id, true);
     setCellsToValue(orders, iStat,    shippedRows, 'Enviado', false);
     setCellsToValue(orders, iShipped, shippedRows, now, false);
+    // importar-v2: Nota rows linked to this guía leave with it. They are not
+    // add-on checkboxes in Empacar, so they are found here by Linked Shipment.
+    try {
+      if (iLink >= 0 && body.tracking_id && orders.getLastRow() > 1) {
+        const notaHits = orders.getRange(2, iLink + 1, orders.getLastRow() - 1, 1)
+          .createTextFinder(String(body.tracking_id)).matchEntireCell(true).findAll();
+        const notaRowsIdx = [];
+        notaHits.forEach(hh => {
+          const rr = hh.getRow();
+          if (String(orders.getRange(rr, iChan + 1).getValue()) !== 'Nota') return;
+          const stt = String(orders.getRange(rr, iStat + 1).getValue());
+          if (stt === 'Enviado' || stt === 'Archivado') return;
+          notaRowsIdx.push(rr - 2);
+        });
+        setCellsToValue(orders, iStat, notaRowsIdx, 'Enviado', false);
+        setCellsToValue(orders, iShipped, notaRowsIdx, now, false);
+        _timings.notas_shipped = notaRowsIdx.length;
+      }
+    } catch (notaErr) {
+      // TROUBLESHOOT: Notas stay Anotado; harmless, fix by hand in Pedidos.
+      _timings.notas_error = String(notaErr);
+    }
     _timings.set_cells_ms = Date.now() - _t2;
 
     // Shipping is what moves a customer's Shipment Count. Previously this
@@ -3767,6 +3867,9 @@ const TIKTOK_HISTORY_FIELD_MAP = {
   'Product Category':               'product_category',
   'Order Channel':                  'order_channel',
   'Creator Handle':                 'creator_handle',
+  // importar-v2: the two CSV message columns, raw per row
+  'Buyer Message':                  'buyer_message',
+  'Seller Note':                    'seller_note',
 };
 
 // Appends one row per history record (already one-per-line-item from the
@@ -3800,6 +3903,8 @@ function appendTikTokImportHistory(allHistoryRecords) {
   if (!allHistoryRecords || !allHistoryRecords.length) return;
 
   const sheet = getTikTokImportHistorySheet();
+  ensureHeader(sheet, 'Buyer Message');   // importar-v2
+  ensureHeader(sheet, 'Seller Note');
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
   const rows = allHistoryRecords.map(rec => {
@@ -6736,7 +6841,7 @@ function runHealthChecksAction(body) {
 // removes any existing triggers for these handlers first, so running it
 // again never creates duplicates.
 function installTriggers() {
-  const jobs = [['nightlyBackup', 2], ['reconcileCustomerAggregates', 3], ['runHealthChecks', 4], ['archiveOldQcPhotos', 5]];
+  const jobs = [['cleanupImportHistory', 1], ['nightlyBackup', 2], ['reconcileCustomerAggregates', 3], ['runHealthChecks', 4], ['archiveOldQcPhotos', 5]];
   const names = jobs.map(j => j[0]);
   ScriptApp.getProjectTriggers().forEach(t => {
     if (names.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
@@ -7731,4 +7836,455 @@ function mayoreoTikTokShipmentsAction(body) {
   }
   const shipments = Object.keys(by).map(k => by[k]).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   return jsonResponse({ shipments: shipments });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IMPORTAR v2 (2026-10-23) — configure step, finalize, history, settings,
+// fun facts. Used only by import.html / import.js.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const IMPORT_LOG_SHEET = 'Import Log';
+const FUN_FACTS_SHEET = 'Fun Facts';
+const IMPORT_HISTORY_DAYS = 7;
+const IMPORT_LOG_HEADERS = ['Import ID', 'Created', 'By', 'CSV Name', 'PDF Name', 'Shipments', 'Inserted',
+  'Duplicates', 'New Customers', 'Existing Customers', 'Unknown Customers', 'Postcards', 'Fun Fact ID',
+  'Fun Fact Title', 'Stickers', 'PDF Generated', 'Rebuilt', 'Basic', 'Settings', 'Linked', 'Files',
+  'Folder ID', 'Status'];
+const IMPORT_LOG_JSON = ['Settings', 'Linked', 'Files'];
+const FUN_FACT_HEADERS = ['ID', 'Order', 'Title', 'Answer', 'Status', 'Added', 'Used Date', 'Used Import'];
+const NOTA_SOURCES_CSV = ['Comprador', 'Vendedor'];
+
+function getOrCreateSheet_(ssId, name, headers) {
+  const ss = openSheetCached(ssId);
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.setFrozenRows(1);
+    return sh;
+  }
+  headers.forEach(h => ensureHeader(sh, h));
+  return sh;
+}
+
+function headerIndex_(sheet) {
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idx = {};
+  h.forEach((name, i) => { idx[String(name)] = i; });
+  return { headers: h, idx: idx };
+}
+
+// ─── Configure step: everything the browser needs after phase 1 ───────────
+// body: { tracking_ids: [...], usernames: { tid: tiktokUsername } }
+function importContextAction(body) {
+  const tids = (body.tracking_ids || []).map(String);
+  const tidSet = {};
+  tids.forEach(t => { tidSet[t] = true; });
+  const sheet = getOrdersSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return jsonResponse({ shipments: {}, candidates: [], notas: [] });
+  const h = data[0];
+  const c = name => h.indexOf(name);
+  const I = {
+    oid: c('Order ID'), tid: c('Tracking ID'), cust: c('Customer ID'), user: c('Primary Username'),
+    chan: c('Channel'), stat: c('Status'), prod: c('Products'), link: c('Linked Shipment'),
+    created: c('Created Date'), notes: c('Notes'), shipBy: c('Ship By'), sNum: c('Shopify Order Number'),
+    sId: c('Shopify Order ID'), nOrig: c('Nota Original'), nSrc: c('Nota Fuente'), nPed: c('Nota Pedido'),
+    nProd: c('Nota Productos'), nAsig: c('Nota Asignada'),
+  };
+  const val = (r, k) => (I[k] >= 0 ? r[I[k]] : '');
+  const shippedCount = {};
+  const shipments = {};
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const chan = String(val(r, 'chan'));
+    const st = String(val(r, 'stat'));
+    const cust = String(val(r, 'cust') || '');
+    const shipped = st === 'Enviado' || st === 'Archivado';
+    if (cust && (chan === 'TikTok' || chan === 'Shopify') && shipped) shippedCount[cust] = (shippedCount[cust] || 0) + 1;
+    const tid = String(val(r, 'tid') || '');
+    if (chan === 'TikTok' && tidSet[tid] && !shipments[tid]) {
+      const sb = val(r, 'shipBy');
+      shipments[tid] = {
+        customer_id: cust, primary_username: String(val(r, 'user') || ''), status: st,
+        ship_by: sb instanceof Date ? sb.toISOString() : String(sb || ''), _shipped: shipped,
+      };
+    }
+  }
+  const custSet = {};
+  const userSet = {};
+  Object.keys(shipments).forEach(t => {
+    const s = shipments[t];
+    s.shipment_count = s.customer_id ? (shippedCount[s.customer_id] || 0) - (s._shipped ? 1 : 0) : null;
+    delete s._shipped;
+    if (s.customer_id) custSet[s.customer_id] = true;
+    if (s.primary_username) userSet[normalizeUsername(String(s.primary_username))] = true;
+  });
+  Object.values(body.usernames || {}).forEach(u => { if (u) userSet[normalizeUsername(String(u))] = true; });
+
+  const candidates = [];
+  const notas = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const chan = String(val(r, 'chan'));
+    const st = String(val(r, 'stat'));
+    const link = String(val(r, 'link') || '').trim();
+    const src = String(val(r, 'nSrc') || '');
+    if (chan === 'Nota' && NOTA_SOURCES_CSV.indexOf(src) >= 0) {
+      if (tidSet[link]) {
+        notas.push({
+          order_id: String(val(r, 'oid')), linked_shipment: link, text: String(val(r, 'prod') || ''),
+          original: String(val(r, 'nOrig') || ''), source: src, nota_pedido: String(val(r, 'nPed') || ''),
+          candidates: String(val(r, 'nProd') || ''), assigned: String(val(r, 'nAsig') || ''), status: st,
+          customer_id: String(val(r, 'cust') || ''),
+        });
+      }
+      continue;
+    }
+    if (chan !== 'Shopify' && chan !== 'Manual' && chan !== 'Nota') continue;
+    const open = (st === 'No Pagado' || st === 'Pagado') && !link;
+    const ours = st === 'Anotado' && tidSet[link];
+    if (!open && !ours) continue;
+    const cust = String(val(r, 'cust') || '');
+    const byUser = !cust && userSet[normalizeUsername(String(val(r, 'user') || ''))];
+    if (!(cust && custSet[cust]) && !byUser) continue;
+    const cr = val(r, 'created');
+    candidates.push({
+      order_id: String(val(r, 'oid')), channel: chan, status: st, customer_id: cust,
+      username: String(val(r, 'user') || ''), products: String(val(r, 'prod') || ''),
+      notes: String(val(r, 'notes') || ''), linked_shipment: link,
+      shopify_order_number: String(val(r, 'sNum') || ''), shopify_order_id: String(val(r, 'sId') || ''),
+      created: cr instanceof Date ? cr.toISOString() : String(cr || ''), matched_by_username: !!byUser,
+    });
+  }
+  return jsonResponse({ shipments: shipments, candidates: candidates, notas: notas });
+}
+
+// ─── Finalize: Anotado + links for what was really printed ───────────────
+// body: { tracking_ids, links:[{order_id, tracking_id}], unlinks:[{order_id, restore_status}],
+//         nota_edits:[{order_id, text, assigned}] }
+function importFinalizeAction(body) {
+  const sheet = getOrdersSheet();
+  ['Nota Asignada'].forEach(n => ensureHeader(sheet, n));
+  const hi = headerIndex_(sheet);
+  const I = hi.idx;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return jsonResponse({ error: 'Orders vacío' });
+  const data = sheet.getRange(2, 1, lastRow - 1, hi.headers.length).getValues();
+  const tidSet = {};
+  (body.tracking_ids || []).forEach(t => { tidSet[String(t)] = true; });
+  const rowById = {};
+  const shippedTid = {};
+  data.forEach((r, i) => {
+    const id = String(r[I['Order ID']] || '');
+    if (id && rowById[id] === undefined) rowById[id] = i;
+    if (String(r[I['Channel']]) === 'TikTok') {
+      const st = String(r[I['Status']]);
+      if (st === 'Enviado' || st === 'Archivado') shippedTid[String(r[I['Tracking ID']] || '')] = true;
+    }
+  });
+  const statusGroups = {};   // value -> [rowIdx]
+  const linkGroups = {};
+  const add = (g, v, i) => { (g[v] = g[v] || []).push(i); };
+  const skipped = [];
+  let linked = 0, unlinked = 0, edited = 0;
+
+  (body.links || []).forEach(l => {
+    const i = rowById[String(l.order_id)];
+    if (i === undefined) { skipped.push({ order_id: l.order_id, reason: 'no encontrado' }); return; }
+    const r = data[i];
+    const chan = String(r[I['Channel']]);
+    const st = String(r[I['Status']]);
+    const tid = String(l.tracking_id || '');
+    if (chan === 'TikTok' || chan === 'Mayorista') { skipped.push({ order_id: l.order_id, reason: 'canal ' + chan }); return; }
+    if (['No Pagado', 'Pagado', 'Anotado'].indexOf(st) < 0) { skipped.push({ order_id: l.order_id, reason: 'estado ' + st }); return; }
+    if (shippedTid[tid]) { skipped.push({ order_id: l.order_id, reason: 'el envío ya salió' }); return; }
+    if (st === 'Anotado' && String(r[I['Linked Shipment']] || '') === tid) return;
+    add(statusGroups, 'Anotado', i);
+    add(linkGroups, tid, i);
+    logAudit('import_link', 'Order', l.order_id, 'Status', st, 'Anotado');
+    logAudit('import_link', 'Order', l.order_id, 'Linked Shipment', r[I['Linked Shipment']], tid);
+    linked++;
+  });
+  (body.unlinks || []).forEach(u => {
+    const i = rowById[String(u.order_id)];
+    if (i === undefined) return;
+    const r = data[i];
+    const link = String(r[I['Linked Shipment']] || '');
+    if (String(r[I['Status']]) !== 'Anotado' || !tidSet[link]) return;
+    const back = u.restore_status === 'No Pagado' ? 'No Pagado' : 'Pagado';
+    add(statusGroups, back, i);
+    add(linkGroups, '', i);
+    logAudit('import_unlink', 'Order', u.order_id, 'Status', 'Anotado', back);
+    unlinked++;
+  });
+  Object.keys(statusGroups).forEach(v => setCellsToValue(sheet, I['Status'], statusGroups[v], v, false));
+  Object.keys(linkGroups).forEach(v => setCellsToValue(sheet, I['Linked Shipment'], linkGroups[v], v, true));
+
+  (body.nota_edits || []).forEach(e => {
+    const i = rowById[String(e.order_id)];
+    if (i === undefined || String(data[i][I['Channel']]) !== 'Nota') return;
+    const text = String(e.text == null ? '' : e.text).trim();
+    if (text && text !== String(data[i][I['Products']] || '')) {
+      sheet.getRange(i + 2, I['Products'] + 1).setValue(text);
+      logAudit('import_nota_edit', 'Order', e.order_id, 'Products', data[i][I['Products']], text);
+      edited++;
+    }
+    if (I['Nota Asignada'] !== undefined && e.assigned !== undefined && String(e.assigned) !== String(data[i][I['Nota Asignada']] || '')) {
+      sheet.getRange(i + 2, I['Nota Asignada'] + 1).setValue(String(e.assigned));
+      logAudit('import_nota_edit', 'Order', e.order_id, 'Nota Asignada', data[i][I['Nota Asignada']], e.assigned);
+    }
+  });
+  return jsonResponse({ result: 'ok', linked: linked, unlinked: unlinked, edited: edited, skipped: skipped });
+}
+
+// ─── Import Log + files in Drive (kept 7 days) ───────────────────────────
+function getImportLogSheet_() { return getOrCreateSheet_(ORDERS_SHEET_ID, IMPORT_LOG_SHEET, IMPORT_LOG_HEADERS); }
+
+function getImportsRootFolder_() {
+  const p = PropertiesService.getScriptProperties();
+  const id = p.getProperty('IMPORT_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* deleted: make a new one */ } }
+  const f = DriveApp.createFolder('Vel Papier — Importaciones (7 días)');
+  p.setProperty('IMPORT_FOLDER_ID', f.getId());
+  return f;
+}
+
+function findImportLogRow_(sheet, idx, importId) {
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+  const hits = sheet.getRange(2, idx['Import ID'] + 1, last - 1, 1)
+    .createTextFinder(String(importId)).matchEntireCell(true).findAll();
+  return hits.length ? hits[0].getRow() : 0;
+}
+
+function importLogUpsert_(importId, fields) {
+  const sheet = getImportLogSheet_();
+  const hi = headerIndex_(sheet);
+  let row = findImportLogRow_(sheet, hi.idx, importId);
+  let vals;
+  if (row) vals = sheet.getRange(row, 1, 1, hi.headers.length).getValues()[0];
+  else {
+    vals = new Array(hi.headers.length).fill('');
+    vals[hi.idx['Import ID']] = importId;
+    vals[hi.idx['Created']] = nowISO();
+    vals[hi.idx['By']] = _currentIdentity ? _currentIdentity.name : '';
+    vals[hi.idx['Status']] = 'Activo';
+  }
+  Object.keys(fields || {}).forEach(k => {
+    if (hi.idx[k] === undefined || k === 'Import ID') return;
+    let v = fields[k];
+    if (v !== null && typeof v === 'object') v = JSON.stringify(v);
+    vals[hi.idx[k]] = v;
+  });
+  if (!row) {
+    row = sheet.getLastRow() + 1;
+    sheet.getRange(row, hi.idx['Import ID'] + 1).setNumberFormat('@');
+  }
+  sheet.getRange(row, 1, 1, vals.length).setValues([vals]);
+  return { sheet: sheet, hi: hi, row: row, vals: vals };
+}
+
+function importLogObject_(headers, r) {
+  const o = {};
+  headers.forEach((h, j) => {
+    let v = r[j];
+    if (v instanceof Date) v = v.toISOString();
+    if (IMPORT_LOG_JSON.indexOf(h) >= 0) { try { v = v ? JSON.parse(v) : {}; } catch (e) { v = {}; } }
+    o[h] = v;
+  });
+  return o;
+}
+
+function importLogSaveAction(body) {
+  if (!body.import_id) return jsonResponse({ error: 'import_id es obligatorio' });
+  const res = importLogUpsert_(String(body.import_id), body.fields || {});
+  logAuditEvent('import_log_save', 'Import', body.import_id, { fields: Object.keys(body.fields || {}) });
+  return jsonResponse({ result: 'saved', log: importLogObject_(res.hi.headers, res.vals) });
+}
+
+function importLogListAction(e) {
+  const sheet = getImportLogSheet_();
+  const last = sheet.getLastRow();
+  if (last < 2) return jsonResponse({ records: [] });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const data = sheet.getRange(2, 1, last - 1, h.length).getValues();
+  const days = Number(e.parameter.days || IMPORT_HISTORY_DAYS);
+  const cutoff = Date.now() - days * 86400000;
+  const ci = h.indexOf('Created');
+  const out = [];
+  data.forEach(r => {
+    const t = r[ci] instanceof Date ? r[ci].getTime() : new Date(r[ci]).getTime();
+    if (!isNaN(t) && t >= cutoff) out.push(importLogObject_(h, r));
+  });
+  out.sort((a, b) => String(b['Created']).localeCompare(String(a['Created'])));
+  return jsonResponse({ records: out });
+}
+
+// body: { import_id, kind, name, mime, base64 }  kind: original_csv | original_pdf | result | output_pdf | stickers_pdf
+function importFileSaveAction(body) {
+  const importId = String(body.import_id || '');
+  const kind = String(body.kind || '');
+  if (!importId || !kind || !body.base64) return jsonResponse({ error: 'import_id, kind y base64 son obligatorios' });
+  let res = importLogUpsert_(importId, {});
+  const I = res.hi.idx;
+  let folderId = String(res.vals[I['Folder ID']] || '');
+  let folder = null;
+  if (folderId) { try { folder = DriveApp.getFolderById(folderId); } catch (e) { folder = null; } }
+  if (!folder) {
+    folder = getImportsRootFolder_().createFolder(importId);
+    folderId = folder.getId();
+  }
+  let files = {};
+  try { files = JSON.parse(res.vals[I['Files']] || '{}'); } catch (e) { files = {}; }
+  if (files[kind] && files[kind].id) {
+    try { DriveApp.getFileById(files[kind].id).setTrashed(true); } catch (e) { /* already gone */ }
+  }
+  const blob = Utilities.newBlob(Utilities.base64Decode(String(body.base64)), body.mime || 'application/octet-stream', body.name || kind);
+  const file = folder.createFile(blob);
+  files[kind] = { id: file.getId(), name: body.name || kind, size: file.getSize(), mime: body.mime || '' };
+  res = importLogUpsert_(importId, { 'Files': files, 'Folder ID': folderId });
+  return jsonResponse({ result: 'saved', file: files[kind] });
+}
+
+function importFileGetAction(e) {
+  const importId = String(e.parameter.import_id || '');
+  const kind = String(e.parameter.kind || '');
+  const sheet = getImportLogSheet_();
+  const hi = headerIndex_(sheet);
+  const row = findImportLogRow_(sheet, hi.idx, importId);
+  if (!row) return jsonResponse({ error: 'Importación no encontrada' });
+  let files = {};
+  try { files = JSON.parse(sheet.getRange(row, hi.idx['Files'] + 1).getValue() || '{}'); } catch (err) { files = {}; }
+  const f = files[kind];
+  // TROUBLESHOOT: file missing = older than 7 days (cleanupImportHistory
+  // removed it) or the upload in import.js failed; check the Import Log row.
+  if (!f || !f.id) return jsonResponse({ error: 'Archivo no disponible (puede tener más de ' + IMPORT_HISTORY_DAYS + ' días)' });
+  const file = DriveApp.getFileById(f.id);
+  return jsonResponse({ name: f.name, mime: f.mime || file.getMimeType(), base64: Utilities.base64Encode(file.getBlob().getBytes()) });
+}
+
+// Nightly (installTriggers): deletes the Drive files of imports older than
+// 7 days. The Import Log row itself stays (small, useful for analytics).
+function cleanupImportHistory() {
+  const sheet = getImportLogSheet_();
+  const last = sheet.getLastRow();
+  if (last < 2) return;
+  const hi = headerIndex_(sheet);
+  const I = hi.idx;
+  const data = sheet.getRange(2, 1, last - 1, hi.headers.length).getValues();
+  const cutoff = Date.now() - IMPORT_HISTORY_DAYS * 86400000;
+  let n = 0;
+  data.forEach((r, i) => {
+    const t = r[I['Created']] instanceof Date ? r[I['Created']].getTime() : new Date(r[I['Created']]).getTime();
+    if (isNaN(t) || t >= cutoff || String(r[I['Status']]) === 'Archivos borrados') return;
+    const fid = String(r[I['Folder ID']] || '');
+    if (fid) { try { DriveApp.getFolderById(fid).setTrashed(true); } catch (e) { /* already gone */ } }
+    sheet.getRange(i + 2, I['Files'] + 1).setValue('{}');
+    sheet.getRange(i + 2, I['Status'] + 1).setValue('Archivos borrados');
+    n++;
+  });
+  if (n) logAuditEvent('cleanup_import_history', 'Import', '', { cleaned: n });
+}
+
+// ─── Importar settings (shared by every device) ──────────────────────────
+function importarSettingsGetAction() {
+  let s = {};
+  try { s = JSON.parse(PropertiesService.getScriptProperties().getProperty('IMPORTAR_SETTINGS') || '{}'); } catch (e) { s = {}; }
+  return jsonResponse({ settings: s });
+}
+
+function importarSettingsSaveAction(body) {
+  const json = JSON.stringify(body.settings || {});
+  if (json.length > 8500) return jsonResponse({ error: 'Ajustes demasiado grandes' });
+  PropertiesService.getScriptProperties().setProperty('IMPORTAR_SETTINGS', json);
+  logAuditEvent('importar_settings_save', 'Settings', 'IMPORTAR', { size: json.length });
+  return jsonResponse({ result: 'saved' });
+}
+
+// ─── Fun facts pool ──────────────────────────────────────────────────────
+function getFunFactsSheet_() { return getOrCreateSheet_(ORDERS_SHEET_ID, FUN_FACTS_SHEET, FUN_FACT_HEADERS); }
+
+function readFunFacts_(sheet) {
+  const last = sheet.getLastRow();
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  if (last < 2) return { h: h, rows: [] };
+  const data = sheet.getRange(2, 1, last - 1, h.length).getValues();
+  const rows = data.map((r, i) => {
+    const o = { _row: i + 2 };
+    h.forEach((name, j) => { o[name] = r[j] instanceof Date ? r[j].toISOString() : r[j]; });
+    return o;
+  }).filter(o => o['ID']);
+  rows.sort((a, b) => Number(a['Order']) - Number(b['Order']));
+  return { h: h, rows: rows };
+}
+
+function funFactsListAction() {
+  const f = readFunFacts_(getFunFactsSheet_());
+  return jsonResponse({ facts: f.rows.map(o => { const c = Object.assign({}, o); delete c._row; return c; }) });
+}
+
+// body.ops: [{op:'add', title, answer} | {op:'edit', id, title, answer} | {op:'delete', id}
+//            | {op:'move', id, dir:-1|1} | {op:'restore', id}]
+function funFactsSaveAction(body) {
+  const sheet = getFunFactsSheet_();
+  let f = readFunFacts_(sheet);
+  const col = name => f.h.indexOf(name) + 1;
+  let maxId = 0, maxOrder = 0;
+  f.rows.forEach(o => {
+    const n = parseInt(String(o['ID']).replace('FF-', ''), 10);
+    if (!isNaN(n) && n > maxId) maxId = n;
+    if (Number(o['Order']) > maxOrder) maxOrder = Number(o['Order']);
+  });
+  const adds = [];
+  const deletes = [];
+  (body.ops || []).forEach(op => {
+    const row = f.rows.find(o => String(o['ID']) === String(op.id));
+    if (op.op === 'add') {
+      const title = String(op.title || '').trim(), answer = String(op.answer || '').trim();
+      if (!title && !answer) return;
+      maxId++; maxOrder++;
+      const vals = f.h.map(name => ({ 'ID': 'FF-' + maxId, 'Order': maxOrder, 'Title': title, 'Answer': answer,
+        'Status': 'Pendiente', 'Added': nowISO() })[name] || '');
+      adds.push(vals);
+    } else if (op.op === 'edit' && row) {
+      sheet.getRange(row._row, col('Title')).setValue(String(op.title || '').trim());
+      sheet.getRange(row._row, col('Answer')).setValue(String(op.answer || '').trim());
+    } else if (op.op === 'delete' && row) {
+      deletes.push(row._row);
+    } else if (op.op === 'restore' && row) {
+      sheet.getRange(row._row, col('Status')).setValue('Pendiente');
+      sheet.getRange(row._row, col('Used Date')).setValue('');
+      sheet.getRange(row._row, col('Used Import')).setValue('');
+    } else if (op.op === 'move' && row) {
+      const pending = f.rows.filter(o => String(o['Status']) !== 'Usado');
+      const k = pending.indexOf(row);
+      const other = pending[k + (op.dir < 0 ? -1 : 1)];
+      if (other) {
+        const a = row['Order'], b = other['Order'];
+        sheet.getRange(row._row, col('Order')).setValue(b);
+        sheet.getRange(other._row, col('Order')).setValue(a);
+        row['Order'] = b; other['Order'] = a;
+      }
+    }
+  });
+  if (adds.length) sheet.getRange(sheet.getLastRow() + 1, 1, adds.length, f.h.length).setValues(adds);
+  deletes.sort((a, b) => b - a).forEach(r => sheet.deleteRow(r));
+  logAuditEvent('funfacts_save', 'FunFact', '', { ops: (body.ops || []).length, added: adds.length, deleted: deletes.length });
+  return funFactsListAction();
+}
+
+// body: { id, import_id } -- called when the sticker PDF is generated.
+function funFactsMarkUsedAction(body) {
+  const sheet = getFunFactsSheet_();
+  const f = readFunFacts_(sheet);
+  const row = f.rows.find(o => String(o['ID']) === String(body.id));
+  if (!row) return jsonResponse({ error: 'Dato curioso no encontrado' });
+  if (String(row['Status']) !== 'Usado') {
+    sheet.getRange(row._row, f.h.indexOf('Status') + 1).setValue('Usado');
+    sheet.getRange(row._row, f.h.indexOf('Used Date') + 1).setValue(nowISO());
+    sheet.getRange(row._row, f.h.indexOf('Used Import') + 1).setValue(String(body.import_id || ''));
+    logAudit('funfact_used', 'FunFact', body.id, 'Status', row['Status'], 'Usado');
+  }
+  return jsonResponse({ result: 'ok' });
 }
