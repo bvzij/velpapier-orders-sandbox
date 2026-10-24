@@ -5,6 +5,7 @@ service.py - Vel Papier TikTok Import FastAPI Service
 
 import base64
 import io
+import json
 import os
 import logging
 import time
@@ -121,7 +122,7 @@ async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes, requested_by: str = 
                 txt = importar_lib.clean_text(n.get(key, ""))
                 if txt:
                     notas.append({"order_id": oid, "source": source, "text": txt,
-                                  "candidates": "; ".join(n.get("products", []))})
+                                  "candidates": json.dumps(n.get("products", []), ensure_ascii=False)})
         s["notas"] = notas
 
     pdf_addresses = safe(lambda: parse_pdf_addresses(pdf_bytes, warnings), {}, "PDF address extraction", warnings)
