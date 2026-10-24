@@ -1186,7 +1186,10 @@ function renderPurgeOut() {
   const el = $('purge-out');
   if (!el) return;
   const p = S.purge || {};
-  if (p.loading) { el.innerHTML = '<div class="imp-muted">Buscando…</div>'; return; }
+  if (p.loading) {
+    el.innerHTML = `<div class="imp-muted" id="purge-busy" style="padding:10px 0">${esc(p.label || 'Trabajando…')} <span id="purge-secs"></span></div>`;
+    tickPurgeTimer(); return;
+  }
   if (p.error) { el.innerHTML = `<div class="imp-bad">${esc(p.error)}</div>`; return; }
   if (p.done) {
     const d = p.done.deleted || {};
@@ -1230,21 +1233,49 @@ function renderPurgeOut() {
       : '<div class="imp-muted">No se encontró ningún envío de TikTok con eso.</div>';
   }
 }
+// Runs one slow server call with a visible label and a seconds counter.
+// Only one of these runs at a time (double clicks are ignored).
+let purgeTimer = null;
+function tickPurgeTimer() {
+  clearInterval(purgeTimer);
+  const start = (S.purge || {}).since || Date.now();
+  const tick = () => {
+    const el = $('purge-secs');
+    if (!el) { clearInterval(purgeTimer); return; }
+    el.textContent = `· ${Math.round((Date.now() - start) / 1000)} s`;
+  };
+  tick();
+  purgeTimer = setInterval(tick, 1000);
+}
+async function purgeCall(label, body) {
+  if (S.purgeBusy) return null;
+  S.purgeBusy = true;
+  S.purge = { loading: true, label: label, since: Date.now() }; renderPurgeOut();
+  try { return await VP.post(Object.assign({ action: 'order_purge_preview' }, body)); }
+  finally { S.purgeBusy = false; clearInterval(purgeTimer); }
+}
 async function purgeSearch() {
   const q = ($('purge-q') || {}).value ? $('purge-q').value.trim() : '';
   if (q.length < 3) { showToast('Escribe al menos 3 caracteres', true); return; }
-  S.purge = { loading: true }; renderPurgeOut();
-  try { S.purge = { matches: (await VP.post({ action: 'order_purge_preview', query: q })).matches || [] }; }
-  catch (e) { S.purge = { error: e.message }; }
+  try {
+    const r = await purgeCall('Buscando el envío…', { query: q });
+    if (r) { S.purgeMatches = r.matches || []; S.purge = { matches: S.purgeMatches }; }
+  } catch (e) { S.purge = { error: e.message }; }
   renderPurgeOut();
 }
+// The search results stay in memory: selecting one never searches again.
 async function purgePick(tid) {
-  S.purge = { loading: true }; renderPurgeOut();
-  try { S.purge = { plan: (await VP.post({ action: 'order_purge_preview', tracking_id: tid })).plan }; }
-  catch (e) { S.purge = { error: e.message }; }
+  try {
+    const r = await purgeCall('Revisando el envío (puede tardar unos segundos)…', { tracking_id: tid });
+    if (r) S.purge = { plan: r.plan };
+  } catch (e) { S.purge = { error: e.message }; }
   renderPurgeOut();
 }
-function purgeBack() { purgeSearch(); }
+// Back shows the results already loaded: no new search.
+function purgeBack() {
+  S.purge = { matches: S.purgeMatches || [] };
+  renderPurgeOut();
+}
 // Prompt 1 (always): permanent. Prompt 2 (only with photos): shows them again.
 function purgeAsk() {
   const pl = (S.purge || {}).plan;
@@ -1273,15 +1304,18 @@ function purgeAskPhotos() {
 }
 async function purgeRun(withPhotos) {
   const pl = (S.purge || {}).plan;
-  if (!pl) return;
-  S.purge = { loading: true }; renderPurgeOut();
+  if (!pl || S.purgeBusy) return;
+  S.purgeBusy = true;
+  S.purge = { loading: true, label: 'Borrando… no cierres esta página', since: Date.now() }; renderPurgeOut();
   try {
     // TROUBLESHOOT: "unauthorized" = the signed-in user is not an admin; any other
     // error comes straight from Apps Script (order_purge), read its message.
     const r = await VP.post({ action: 'order_purge', tracking_id: pl.tracking_id, confirm: 'BORRAR', confirm_photos: !!withPhotos });
     S.purge = { done: r };
+    S.purgeMatches = (S.purgeMatches || []).filter(m => m.tracking_id !== pl.tracking_id);
     showToast('Envío borrado');
-  } catch (e) { S.purge = { error: e.message }; }
+  } catch (e) { S.purge = { error: e.message, plan: pl }; }
+  finally { S.purgeBusy = false; clearInterval(purgeTimer); }
   renderPurgeOut();
 }
 
