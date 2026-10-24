@@ -4,7 +4,7 @@
   <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
   <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>  <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vel Papier · Importar TikTok</title>
+  <title>Vel Papier · Importar</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
@@ -21,7 +21,7 @@
 
     .import-body {
       padding: 2rem 1.5rem;
-      max-width: 760px;
+      max-width: 900px;
       margin: 0 auto;
       width: 100%;
     }
@@ -485,6 +485,60 @@
       margin-bottom: 1rem;
       display: none;
     }
+
+    /* ── Importar v2 (2026-10-23) ───────────────────────────────── */
+    .imp-tabs { display:flex; gap:6px; margin-bottom:1.25rem; flex-wrap:wrap; }
+    .imp-tab { padding:7px 14px; border-radius:99px; border:0.5px solid var(--border-strong); background:var(--surface); font:inherit; font-size:13px; font-weight:600; color:var(--text-muted); cursor:pointer; }
+    .imp-tab.is-active { background:var(--text); color:var(--surface); border-color:var(--text); }
+    .imp-pane { display:none; }
+    .imp-pane.is-active { display:block; }
+    .imp-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-lg); padding:1rem 1.1rem; margin-bottom:1rem; }
+    .imp-card h3 { font-size:14px; font-weight:700; margin:0 0 0.6rem; }
+    .imp-card h3 small { font-weight:400; color:var(--text-muted); font-size:12px; }
+    .imp-muted { color:var(--text-muted); font-size:12px; }
+    .imp-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0; font-size:13px; }
+    .imp-row label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+    .imp-row select, .imp-row input[type=number], .imp-row input[type=text] { padding:6px 8px; border:0.5px solid var(--border-strong); border-radius:8px; font:inherit; font-size:13px; background:var(--bg); color:var(--text); }
+    .imp-row input[type=number] { width:76px; }
+    .imp-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; }
+    .imp-stat { background:var(--surface2); border-radius:10px; padding:8px 10px; text-align:center; }
+    .imp-stat b { display:block; font-size:22px; }
+    .imp-stat span { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; }
+    .imp-warn { background:var(--amber-bg); color:var(--amber-text); border-radius:10px; padding:8px 10px; font-size:12.5px; margin:6px 0; }
+    .imp-bad { background:var(--red-bg, #fdeaea); color:var(--red-text, #a32d2d); border-radius:10px; padding:8px 10px; font-size:12.5px; margin:6px 0; }
+    .imp-ok { background:var(--green-bg); color:var(--green-text); border-radius:10px; padding:8px 10px; font-size:12.5px; margin:6px 0; }
+    .imp-cust { border-top:0.5px solid var(--border); padding:10px 0; }
+    .imp-cust:first-child { border-top:none; }
+    .imp-cust-head { font-weight:700; font-size:13px; }
+    .imp-cust-head .imp-muted { font-weight:400; }
+    .imp-item { display:flex; gap:10px; align-items:flex-start; padding:6px 0 6px 4px; font-size:13px; }
+    .imp-item input[type=checkbox] { margin-top:3px; width:16px; height:16px; }
+    .imp-item select { padding:4px 6px; border:0.5px solid var(--border-strong); border-radius:7px; font:inherit; font-size:12px; background:var(--bg); color:var(--text); }
+    .imp-nopagado { color:#a32d2d; font-weight:800; text-transform:uppercase; font-size:12px; }
+    .imp-nota { background:#fbf3c9; border:0.5px solid #f1da65; border-radius:10px; padding:8px 10px; margin:6px 0; font-size:13px; color:#3d3200; }
+    .imp-nota textarea { width:100%; min-height:44px; margin-top:6px; padding:6px 8px; border:0.5px solid #d9c25a; border-radius:8px; font:inherit; font-size:13px; background:#fffdf3; color:#3d3200; box-sizing:border-box; }
+    .imp-nota select { margin-top:4px; padding:4px 6px; border:0.5px solid #d9c25a; border-radius:7px; font:inherit; font-size:12px; background:#fffdf3; max-width:100%; }
+    .nota-tag { display:inline-block; background:#f1da65; color:#5c4a00; border-radius:99px; padding:1px 8px; font-size:11px; font-weight:700; }
+    .imp-btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .imp-btn { padding:9px 14px; border-radius:10px; border:0.5px solid var(--border-strong); background:var(--surface); font:inherit; font-size:13px; font-weight:600; cursor:pointer; color:var(--text); }
+    .imp-btn.primary { background:var(--text); color:var(--surface); border-color:var(--text); }
+    .imp-btn:disabled { opacity:.5; cursor:default; }
+    .imp-list-item { padding:4px 0; font-size:13px; }
+    .imp-fallback-cust { margin:8px 0 2px; font-weight:700; font-size:13px; }
+    .imp-fallback-cust + ul { margin:2px 0 6px 18px; padding:0; font-size:13px; }
+    .imp-fact { border-top:0.5px solid var(--border); padding:8px 0; display:flex; gap:8px; align-items:flex-start; font-size:13px; }
+    .imp-fact:first-child { border-top:none; }
+    .imp-fact .grow { flex:1; min-width:0; }
+    .imp-fact .t { font-weight:700; }
+    .imp-mini { padding:3px 8px; font-size:12px; border-radius:7px; border:0.5px solid var(--border-strong); background:var(--surface); cursor:pointer; color:var(--text); font:inherit; }
+    .imp-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:6px 14px; }
+    .imp-grid label { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12.5px; }
+    .imp-grid input, .imp-grid select { width:90px; padding:5px 7px; border:0.5px solid var(--border-strong); border-radius:7px; font:inherit; font-size:12.5px; background:var(--bg); color:var(--text); }
+    .imp-grid input[type=text] { width:120px; }
+    textarea.imp-bulk { width:100%; min-height:130px; padding:8px; border:0.5px solid var(--border-strong); border-radius:10px; font:inherit; font-size:13px; background:var(--bg); color:var(--text); box-sizing:border-box; }
+    .imp-hist { border-top:0.5px solid var(--border); padding:10px 0; font-size:13px; }
+    .imp-hist:first-child { border-top:none; }
+    .imp-upload-state { font-size:11px; color:var(--text-faint); margin-top:4px; }
   </style>
 </head>
 <body>
@@ -497,68 +551,80 @@
 
   <div class="import-body">
 
-    <div class="page-title">Importar órdenes de TikTok</div>
-    <div class="page-subtitle">Sube el CSV y el PDF de guías juntos. El sistema importará las órdenes, anotará las guías y resolverá clientes automáticamente.</div>
-
-    <!-- Drop zone -->
-    <div class="drop-zone" id="drop-zone" onclick="handleZoneClick()">
-      <input type="file" id="file-input" accept=".csv,.pdf" multiple style="display:none" onchange="handleFileInput(this.files)">
-      <span class="drop-icon" id="drop-icon">📂</span>
-      <div class="drop-label" id="drop-label">Arrastra el CSV y el PDF aquí</div>
-      <div class="drop-hint" id="drop-hint">o haz clic para seleccionar — se detectan automáticamente por tipo</div>
-      <div id="drop-status" style="margin-top:10px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap"></div>
+    <div class="imp-tabs">
+      <button class="imp-tab is-active" data-tab="importar" onclick="IMP.tab('importar')">Importar</button>
+      <button class="imp-tab" data-tab="historial" onclick="IMP.tab('historial')">Historial (7 días)</button>
+      <button class="imp-tab" data-tab="datos" onclick="IMP.tab('datos')">Datos curiosos</button>
+      <button class="imp-tab" data-tab="ajustes" onclick="IMP.tab('ajustes')">Ajustes</button>
     </div>
 
-    <!-- Error -->
-    <div class="error-box" id="error-box"></div>
+    <!-- ═══ IMPORTAR ═══ -->
+    <div class="imp-pane is-active" id="pane-importar">
+      <div class="page-title">Importar órdenes de TikTok</div>
+      <div class="page-subtitle">1) Sube el CSV y el PDF juntos y pulsa Importar. 2) Revisa los ajustes de esta importación. 3) Genera el PDF.</div>
 
-    <!-- Run button -->
-    <button class="run-btn" id="run-btn" disabled onclick="runImport()">
-      Importar y anotar guías
-    </button>
-
-    <!-- Progress -->
-    <div class="progress-bar-wrap" id="progress-wrap">
-      <div class="progress-bar" id="progress-bar"></div>
-    </div>
-    <div class="progress-label" id="progress-label"></div>
-
-    <!-- Summary -->
-    <div class="summary-card" id="summary-card">
-      <div class="summary-title">Resumen de importación</div>
-      <div class="summary-stats">
-        <div class="summary-stat">
-          <div class="summary-stat-val green" id="s-inserted">—</div>
-          <div class="summary-stat-label">Insertadas</div>
-        </div>
-        <div class="summary-stat">
-          <div class="summary-stat-val" id="s-dupes">—</div>
-          <div class="summary-stat-label">Duplicadas</div>
-        </div>
-        <div class="summary-stat">
-          <div class="summary-stat-val amber" id="s-matches">—</div>
-          <div class="summary-stat-label">Posibles matches</div>
-        </div>
+      <div class="drop-zone" id="drop-zone" onclick="handleZoneClick()">
+        <input type="file" id="file-input" accept=".csv,.pdf" multiple style="display:none" onchange="handleFileInput(this.files)">
+        <span class="drop-icon" id="drop-icon">📂</span>
+        <div class="drop-label" id="drop-label">Arrastra el CSV y el PDF aquí</div>
+        <div class="drop-hint" id="drop-hint">o haz clic para seleccionar — se detectan automáticamente por tipo</div>
+        <div id="drop-status" style="margin-top:10px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap"></div>
       </div>
-      <button class="download-btn" id="download-btn" onclick="downloadPDF()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        Descargar guías anotadas
-      </button>
-    </div>
 
-    <!-- Possible matches -->
-    <div class="matches-section" id="matches-section">
-      <div class="matches-title">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-        Posibles clientes duplicados — requieren revisión
+      <div class="error-box" id="error-box"></div>
+
+      <button class="run-btn" id="run-btn" disabled onclick="runImport()">Importar</button>
+
+      <div class="progress-bar-wrap" id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="progress-label" id="progress-label"></div>
+
+      <!-- Summary -->
+      <div class="summary-card" id="summary-card">
+        <div class="summary-title">Resumen de importación <span class="imp-muted" id="s-import-id"></span></div>
+        <div class="summary-stats">
+          <div class="summary-stat"><div class="summary-stat-val green" id="s-inserted">—</div><div class="summary-stat-label">Insertadas</div></div>
+          <div class="summary-stat"><div class="summary-stat-val" id="s-dupes">—</div><div class="summary-stat-label">Duplicadas</div></div>
+          <div class="summary-stat"><div class="summary-stat-val amber" id="s-matches">—</div><div class="summary-stat-label">Posibles matches</div></div>
+        </div>
+        <div class="imp-upload-state" id="upload-state"></div>
       </div>
-      <div id="matches-list"></div>
+
+      <!-- Possible matches (unchanged flow) -->
+      <div class="matches-section" id="matches-section">
+        <div class="matches-title">⚠ Posibles clientes duplicados — resuélvelos antes de generar el PDF</div>
+        <div id="matches-list"></div>
+      </div>
+
+      <div class="new-customers-section" id="new-customers-section">
+        <div class="new-customers-title">✓ Clientes nuevos creados automáticamente</div>
+        <div id="new-customers-list"></div>
+      </div>
+
+      <!-- Configure step (filled by import.js) -->
+      <div id="configure" style="display:none"></div>
     </div>
 
-    <!-- New customers -->
-    <div class="new-customers-section" id="new-customers-section">
-      <div class="new-customers-title">✓ Clientes nuevos creados automáticamente</div>
-      <div id="new-customers-list"></div>
+    <!-- ═══ HISTORIAL ═══ -->
+    <div class="imp-pane" id="pane-historial">
+      <div class="imp-card"><h3>Importaciones de los últimos 7 días</h3><div id="hist-list" class="imp-muted">Cargando…</div></div>
+    </div>
+
+    <!-- ═══ DATOS CURIOSOS ═══ -->
+    <div class="imp-pane" id="pane-datos">
+      <div class="imp-card">
+        <h3>Agregar datos curiosos <small>· título y respuesta</small></h3>
+        <div class="imp-muted" style="margin-bottom:6px">Pega uno por bloque: primera línea = título, segunda línea = respuesta, una línea vacía entre cada dato. También funciona pegar dos columnas desde una hoja de cálculo (título ⇥ respuesta).</div>
+        <textarea class="imp-bulk" id="ff-bulk" oninput="IMP.ffPreview()" placeholder="¿Cuántos años puede durar el papel washi?&#10;Más de 1,000 años si se guarda bien.&#10;&#10;¿De qué se hace el grafito de un lápiz?&#10;De grafito mezclado con arcilla."></textarea>
+        <div id="ff-preview" class="imp-muted" style="margin-top:6px"></div>
+        <div class="imp-btns"><button class="imp-btn primary" id="ff-add-btn" onclick="IMP.ffAdd()" disabled>Agregar al pool</button></div>
+      </div>
+      <div class="imp-card"><h3>Pool <small id="ff-count"></small></h3><div id="ff-list" class="imp-muted">Cargando…</div></div>
+      <div class="imp-card"><h3>Usados</h3><div id="ff-used" class="imp-muted">—</div></div>
+    </div>
+
+    <!-- ═══ AJUSTES ═══ -->
+    <div class="imp-pane" id="pane-ajustes">
+      <div id="settings-form" class="imp-muted">Cargando…</div>
     </div>
 
   </div>
@@ -569,48 +635,22 @@
   <div class="modal-box">
     <div class="modal-header">
       <div class="modal-title" id="modal-username"></div>
-      <button class="modal-close" onclick="closeModal()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-      </button>
+      <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-
     <div class="summary-stat" style="margin-bottom:1rem;text-align:center;background:var(--amber-bg)">
       <div class="summary-stat-val amber" id="modal-score">—</div>
       <div class="summary-stat-label">Score de similitud</div>
     </div>
-
-    <div class="modal-field">
-      <div class="modal-field-label">Posible match con</div>
-      <div class="modal-field-value" id="modal-matched-to"></div>
-    </div>
-
+    <div class="modal-field"><div class="modal-field-label">Posible match con</div><div class="modal-field-value" id="modal-matched-to"></div></div>
     <hr class="modal-divider">
     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:0.75rem">DATOS EXTRAÍDOS DEL PDF</div>
-
-    <div class="modal-field">
-      <div class="modal-field-label">Nombre completo</div>
-      <div class="modal-field-value" id="modal-name"></div>
-    </div>
-    <div class="modal-field">
-      <div class="modal-field-label">Dirección</div>
-      <div class="modal-field-value" id="modal-address"></div>
-    </div>
-    <div class="modal-field">
-      <div class="modal-field-label">Ciudad / Estado / CP</div>
-      <div class="modal-field-value" id="modal-location"></div>
-    </div>
-    <div class="modal-field">
-      <div class="modal-field-label">Teléfono parcial</div>
-      <div class="modal-field-value" id="modal-phone"></div>
-    </div>
-
+    <div class="modal-field"><div class="modal-field-label">Nombre completo</div><div class="modal-field-value" id="modal-name"></div></div>
+    <div class="modal-field"><div class="modal-field-label">Dirección</div><div class="modal-field-value" id="modal-address"></div></div>
+    <div class="modal-field"><div class="modal-field-label">Ciudad / Estado / CP</div><div class="modal-field-value" id="modal-location"></div></div>
+    <div class="modal-field"><div class="modal-field-label">Teléfono parcial</div><div class="modal-field-value" id="modal-phone"></div></div>
     <hr class="modal-divider">
     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:0.5rem">ASIGNAR COMO ALIAS DE:</div>
-
-    <select class="modal-select" id="modal-customer-select">
-      <option value="">— Seleccionar cliente existente —</option>
-    </select>
-
+    <select class="modal-select" id="modal-customer-select"><option value="">— Seleccionar cliente existente —</option></select>
     <div class="modal-actions">
       <button class="modal-btn" onclick="closeModal()">Cerrar</button>
       <button class="modal-btn confirm" onclick="confirmModalAssign()">Asignar alias</button>
