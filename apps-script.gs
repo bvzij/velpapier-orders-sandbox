@@ -966,6 +966,7 @@ function dispatchPostAction(action, body, role) {
     // importar-v2
     if (action === 'import_context') return importContextAction(body);
     if (action === 'import_finalize') return importFinalizeAction(body);
+    if (action === 'nota_duplicate') return notaDuplicateAction(body);
     if (action === 'import_log_save') return importLogSaveAction(body);
     if (action === 'import_file_save') return importFileSaveAction(body);
     if (action === 'importar_settings_save') return importarSettingsSaveAction(body);
@@ -8594,4 +8595,29 @@ function orderPurgeAction(body) {
     unlinked: plan.unlink.map(u => ({ order_id: u.order_id, channel: u.channel, to_status: u.to_status })),
     warnings: plan.warnings, customers: customers,
   });
+}
+
+
+// ─── Nota duplicate (2026-10-24): one note piece -> another piece ────────
+// Copies a Nota row (same text, same order, same shipment) under a new ID
+// (NOTA-<order>-C2, -C3, ... or -V2, -V3, ...) with no product linked yet.
+function notaDuplicateAction(body) {
+  const oid = String(body.order_id || '').trim();
+  if (!oid) return jsonResponse({ error: 'order_id es obligatorio' });
+  const sheet = getOrdersSheet();
+  const row = findOrderRow(sheet, oid);
+  if (!row) return jsonResponse({ error: 'Nota no encontrada' });
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const vals = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+  const iCh = headers.indexOf('Channel'), iOid = headers.indexOf('Order ID'), iAsig = headers.indexOf('Nota Asignada');
+  if (String(vals[iCh]) !== 'Nota') return jsonResponse({ error: 'Solo se pueden duplicar notas' });
+  let n = 2, newId = '';
+  do { newId = oid + n; n++; } while (findOrderRow(sheet, newId));
+  vals[iOid] = newId;
+  if (iAsig >= 0) vals[iAsig] = '';
+  const startRow = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, headers, ['Order ID'], startRow, 1);
+  sheet.getRange(startRow, 1, 1, headers.length).setValues([vals]);
+  logAuditEvent('nota_duplicate', 'Order', newId, { from: oid });
+  return jsonResponse({ result: 'duplicated', order_id: newId, from: oid });
 }
