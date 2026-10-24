@@ -69,6 +69,12 @@ let hasFullOrdersLoaded = false; // set once the actual action=orders payload (n
 // need to be cached, same slimming pattern as home.js's slimOrders.
 const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date', 'Notes',
   'Channel', 'Linked Shipment', 'Nota Fuente', 'Nota Asignada'];   // importar-v2: Notas per guía
+function notaAsignadaTxt(n) {
+  const raw = String(n['Nota Asignada'] || '').trim();
+  if (!raw) return '';
+  try { const a = JSON.parse(raw); if (Array.isArray(a)) return a.join(', '); } catch (e) { /* plain text */ }
+  return raw;
+}
 let NOTAS_BY_TID = {};
 
 // Page-1 snapshot in localStorage so returning to Calidad paints instantly
@@ -849,7 +855,7 @@ function showOrderDetailModal(r) {
           ${r['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span></div>` : ''}
         </div>
         ${(NOTAS_BY_TID[String(r['Tracking ID'] || '').trim()] || []).length ? `<div class="cal-detail-section-title">Notas</div>
-        ${NOTAS_BY_TID[String(r['Tracking ID'] || '').trim()].map(n => `<div style="background:#fbf3c9;border:0.5px solid #f1da65;border-radius:8px;padding:6px 9px;margin-bottom:6px;font-size:13px;color:#3d3200"><span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700;font-size:11px">Nota</span> ${n['Nota Fuente'] ? VP.esc(n['Nota Fuente']) + ': ' : ''}${VP.esc(n['Products'] || '')}${n['Nota Asignada'] ? ` <span style="color:#7a6a20">→ ${VP.esc(n['Nota Asignada'])}</span>` : ''}</div>`).join('')}` : ''}
+        ${NOTAS_BY_TID[String(r['Tracking ID'] || '').trim()].map(n => `<div style="background:#fbf3c9;border:0.5px solid #f1da65;border-radius:8px;padding:6px 9px;margin-bottom:6px;font-size:13px;color:#3d3200"><span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700;font-size:11px">Nota</span> ${n['Nota Fuente'] ? VP.esc(n['Nota Fuente']) + ': ' : ''}${VP.esc(n['Products'] || '')}${n['Nota Asignada'] ? ` <span style="color:#7a6a20">→ ${VP.esc(notaAsignadaTxt(n))}</span>` : ''}</div>`).join('')}` : ''}
         <div class="cal-detail-section-title">Pedidos</div>
         ${orderBlocksHtml}
         <div class="cal-detail-section-title">Fotos</div>
