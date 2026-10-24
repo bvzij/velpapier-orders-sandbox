@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.2';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.3';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -8310,26 +8310,48 @@ function funFactsMarkUsedAction(body) {
 
 function purgeNorm_(v) { return String(v == null ? '' : v).trim(); }
 
+// ─── Fast lookups (2026-10-24.3) ────────────────────────────────────────
+// The first version read whole sheets to find a few rows, which took 30-40 s
+// on the real data. These helpers read ONE column, or ask the sheet directly
+// (TextFinder) for the matching rows, and then read only those rows.
+function purgeColVals_(sheet, col) {
+  const n = sheet.getLastRow();
+  if (col < 0 || n < 2) return [];
+  return sheet.getRange(2, col + 1, n - 1, 1).getValues().map(r => r[0]);
+}
+// 1-based sheet rows whose column equals value exactly.
+function purgeRows_(sheet, col, value) {
+  if (col < 0 || sheet.getLastRow() < 2 || !purgeNorm_(value)) return [];
+  return sheet.getRange(2, col + 1, sheet.getLastRow() - 1, 1)
+    .createTextFinder(purgeNorm_(value)).matchEntireCell(true).findAll()
+    .map(f => f.getRow());
+}
 // Search TikTok shipments by guía, TikTok order ID or username (newest first).
+// Reads only the 8 columns it shows or matches on.
 function orderPurgeFind_(query) {
   const q = purgeNorm_(query).toLowerCase();
   if (q.length < 3) return [];
-  const data = getOrdersSheet().getDataRange().getValues();
-  if (data.length < 2) return [];
-  const h = data[0];
-  const iCh = h.indexOf('Channel'), iTid = h.indexOf('Tracking ID'), iOid = h.indexOf('Order ID');
-  const iUser = h.indexOf('Primary Username'), iCust = h.indexOf('Customer ID'), iSt = h.indexOf('Status');
-  const iProd = h.indexOf('Products'), iBy = h.indexOf('Ship By');
+  const sh = getOrdersSheet();
+  if (sh.getLastRow() < 2) return [];
+  const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const col = n => h.indexOf(n);
+  const ch = purgeColVals_(sh, col('Channel'));
+  const tids = purgeColVals_(sh, col('Tracking ID'));
+  const oids = purgeColVals_(sh, col('Order ID'));
+  const users = purgeColVals_(sh, col('Primary Username'));
+  const custs = purgeColVals_(sh, col('Customer ID'));
+  const sts = purgeColVals_(sh, col('Status'));
+  const prods = purgeColVals_(sh, col('Products'));
+  const bys = purgeColVals_(sh, col('Ship By'));
   const out = [];
-  for (let r = data.length - 1; r >= 1 && out.length < 15; r--) {
-    const row = data[r];
-    if (purgeNorm_(row[iCh]) !== 'TikTok') continue;
-    const tid = purgeNorm_(row[iTid]), oid = purgeNorm_(row[iOid]), user = purgeNorm_(row[iUser]);
+  for (let i = ch.length - 1; i >= 0 && out.length < 15; i--) {
+    if (purgeNorm_(ch[i]) !== 'TikTok') continue;
+    const tid = purgeNorm_(tids[i]), oid = purgeNorm_(oids[i]), user = purgeNorm_(users[i]);
     if (tid.toLowerCase().indexOf(q) < 0 && oid.toLowerCase().indexOf(q) < 0 && user.toLowerCase().indexOf(q) < 0) continue;
-    const by = iBy >= 0 ? row[iBy] : '';
+    const by = bys[i];
     out.push({
-      tracking_id: tid, order_ids: oid, username: user, customer_id: purgeNorm_(row[iCust]),
-      status: purgeNorm_(row[iSt]), products: purgeNorm_(row[iProd]).slice(0, 160),
+      tracking_id: tid, order_ids: oid, username: user, customer_id: purgeNorm_(custs[i]),
+      status: purgeNorm_(sts[i]), products: purgeNorm_(prods[i]).slice(0, 160),
       ship_by: by instanceof Date ? by.toISOString() : purgeNorm_(by),
     });
   }
@@ -8357,10 +8379,9 @@ function orderPurgePlan_(trackingId) {
   const tid = purgeNorm_(trackingId);
   if (!tid) throw new Error('Falta la guía (Tracking ID).');
   const sheet = getOrdersSheet();
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) throw new Error('La hoja de pedidos está vacía.');
-  const h = data[0];
-  const ix = n => h.indexOf(n);
+  const n = sheet.getLastColumn();
+  const h = sheet.getRange(1, 1, 1, n).getValues()[0];
+  const ix = name => h.indexOf(name);
   const iCh = ix('Channel'), iTid = ix('Tracking ID'), iOid = ix('Order ID'), iLink = ix('Linked Shipment');
   const iSt = ix('Status'), iUser = ix('Primary Username'), iCust = ix('Customer ID'), iProd = ix('Products');
   const iBy = ix('Ship By'), iSrc = ix('Nota Fuente');
@@ -8369,24 +8390,30 @@ function orderPurgePlan_(trackingId) {
                  warnings: [], order_ids: [], customer_ids: [], history_rows: [], qc_rows: [], photo_urls: [], photo_items: [] };
   const addCust = c => { c = purgeNorm_(c); if (c && plan.customer_ids.indexOf(c) < 0) plan.customer_ids.push(c); };
 
-  for (let r = 1; r < data.length; r++) {
-    const row = data[r];
+  // Only the rows that matter: the TikTok row(s) for this guía and every row linked to it.
+  const rowNums = {};
+  purgeRows_(sheet, iTid, tid).forEach(r => { rowNums[r] = true; });
+  purgeRows_(sheet, iLink, tid).forEach(r => { rowNums[r] = true; });
+  const rows = Object.keys(rowNums).map(Number).sort((a, b) => a - b);
+
+  rows.forEach(r => {
+    const row = sheet.getRange(r, 1, 1, n).getValues()[0];
     const ch = purgeNorm_(row[iCh]), st = purgeNorm_(row[iSt]);
     const own = purgeNorm_(row[iTid]) === tid && ch === 'TikTok';
     const linked = purgeNorm_(row[iLink]) === tid && ch !== 'TikTok';
-    if (!own && !linked) continue;
+    if (!own && !linked) return;
     const snap = {};
     h.forEach((name, k) => { snap[name] = row[k] instanceof Date ? row[k].toISOString() : row[k]; });
     const id = purgeNorm_(row[iOid]);
     if (own) {
       const by = iBy >= 0 ? row[iBy] : '';
-      plan.tiktok.push({ row: r + 1, order_id: id, status: st, username: purgeNorm_(row[iUser]), customer_id: purgeNorm_(row[iCust]),
+      plan.tiktok.push({ row: r, order_id: id, status: st, username: purgeNorm_(row[iUser]), customer_id: purgeNorm_(row[iCust]),
                          products: purgeNorm_(row[iProd]), ship_by: by instanceof Date ? by.toISOString() : purgeNorm_(by), snapshot: snap });
       addCust(row[iCust]);
       id.split('+').map(s => s.replace(/[^0-9]/g, '')).filter(Boolean).forEach(o => { if (plan.order_ids.indexOf(o) < 0) plan.order_ids.push(o); });
       if (st === 'Enviado' || st === 'Archivado') plan.warnings.push('Este envío ya figura como ' + st + '. Al borrarlo, el cliente pierde ese envío en su conteo.');
     } else if (ch === 'Nota' && id.indexOf('NOTA-') === 0 && NOTA_SOURCES_CSV.indexOf(purgeNorm_(row[iSrc])) >= 0) {
-      plan.notas_csv.push({ row: r + 1, order_id: id, text: purgeNorm_(row[iProd]), snapshot: snap });
+      plan.notas_csv.push({ row: r, order_id: id, text: purgeNorm_(row[iProd]), snapshot: snap });
     } else if (ch === 'Mayorista') {
       plan.blockers.push({ order_id: id, reason: 'Hay un pedido de Mayoreo (' + id + ') ligado a este envío. Desvincúlalo primero en Mayoristas (cambia su envío) y vuelve a intentar.' });
     } else if (st === 'Enviado' || st === 'Archivado') {
@@ -8394,10 +8421,10 @@ function orderPurgePlan_(trackingId) {
     } else {
       const was = prev[id] && purgeNorm_(prev[id].tid) === tid ? purgeNorm_(prev[id].prev) : '';
       const back = was === 'No Pagado' ? 'No Pagado' : (st === 'Anotado' ? 'Pagado' : st);
-      plan.unlink.push({ idx: r - 1, order_id: id, channel: ch, products: purgeNorm_(row[iProd]).slice(0, 120),
+      plan.unlink.push({ idx: r - 2, order_id: id, channel: ch, products: purgeNorm_(row[iProd]).slice(0, 120),
                          from_status: st, to_status: back });
     }
-  }
+  });
   if (!plan.tiktok.length) throw new Error('No se encontró ningún envío de TikTok con la guía ' + tid + '.');
   if (plan.shipped_addons.length) plan.warnings.push(plan.shipped_addons.length + ' producto(s) extra ya se enviaron con esta guía; no se tocan.');
 
@@ -8406,13 +8433,10 @@ function orderPurgePlan_(trackingId) {
   if (hs && hs.getLastRow() > 1) {
     const hh = hs.getRange(1, 1, 1, hs.getLastColumn()).getValues()[0];
     const cT = hh.indexOf('Tracking ID'), cO = hh.indexOf('Order ID');
-    const tCol = cT >= 0 ? readColumn(hs, cT) : [], oCol = cO >= 0 ? readColumn(hs, cO) : [];
-    const n = Math.max(tCol.length, oCol.length);
-    for (let i = 0; i < n; i++) {
-      const byT = cT >= 0 && purgeNorm_(tCol[i]) === tid;
-      const byO = cO >= 0 && plan.order_ids.indexOf(purgeNorm_(oCol[i]).replace(/[^0-9]/g, '')) >= 0;
-      if (byT || byO) plan.history_rows.push(i + 2);
-    }
+    const hist = {};
+    purgeRows_(hs, cT, tid).forEach(r => { hist[r] = true; });
+    plan.order_ids.forEach(o => purgeRows_(hs, cO, o).forEach(r => { hist[r] = true; }));
+    plan.history_rows = Object.keys(hist).map(Number);
   }
 
   // Empacar / QC record + its photos.
@@ -8420,17 +8444,14 @@ function orderPurgePlan_(trackingId) {
   if (qs && qs.getLastRow() > 1) {
     const qh = qs.getRange(1, 1, 1, qs.getLastColumn()).getValues()[0];
     const cQ = qh.indexOf('Tracking ID');
-    const qCol = cQ >= 0 ? readColumn(qs, cQ) : [];
     const photoCols = QC_PHOTO_COLS.map(c => qh.indexOf(c));
-    const photoVals = photoCols.map(c => (c >= 0 ? readColumn(qs, c) : []));
-    qCol.forEach((v, i) => {
-      if (purgeNorm_(v) !== tid) return;
+    purgeRows_(qs, cQ, tid).forEach(r => {
+      const rowVals = qs.getRange(r, 1, 1, qh.length).getValues()[0];
       const snap = {};
-      const rowVals = qs.getRange(i + 2, 1, 1, qh.length).getValues()[0];
       qh.forEach((name, k) => { snap[name] = rowVals[k] instanceof Date ? rowVals[k].toISOString() : rowVals[k]; });
-      plan.qc_rows.push({ row: i + 2, snapshot: snap });
-      photoVals.forEach((pv, k) => {
-        const u = purgeNorm_(pv[i]);
+      plan.qc_rows.push({ row: r, snapshot: snap });
+      photoCols.forEach((c, k) => {
+        const u = c >= 0 ? purgeNorm_(rowVals[c]) : '';
         if (u && u.indexOf(QC_PLACEHOLDER_ID) < 0) {
           plan.photo_urls.push(u);
           const col = QC_PHOTO_COLS[k];
@@ -8536,12 +8557,20 @@ function orderPurgeAction(body) {
   const orderRows = plan.tiktok.map(t => t.row).concat(plan.notas_csv.map(n => n.row)).sort((a, b) => b - a);
   orderRows.forEach(r => sheet.deleteRow(r));
 
-  // 4) Customer totals (Shipment Count, First Order Date).
+  // 4) Customer totals: only a SHIPPED TikTok row was counted, so only that
+  // customer loses one. A targeted -1 (no full-sheet recalculation: that was
+  // the slow part). First Order Date is corrected by the nightly reconcile.
   let customers = 'ok';
-  try { reconcileCustomerAggregates(); } catch (err) {
-    // TROUBLESHOOT: the order is already deleted; run reconcileCustomerAggregates
-    // from the Apps Script dropdown (it also runs every night).
-    customers = 'No se pudo recalcular al momento (se corrige solo en la noche): ' + err.message;
+  try {
+    const delta = {};
+    plan.tiktok.forEach(t => {
+      if ((t.status === 'Enviado' || t.status === 'Archivado') && t.customer_id) delta[t.customer_id] = (delta[t.customer_id] || 0) - 1;
+    });
+    if (Object.keys(delta).length) incrementShipmentCounts(delta);
+  } catch (err) {
+    // TROUBLESHOOT: the order is already deleted. Run reconcileCustomerAggregates
+    // from the Apps Script dropdown to fix the customer's Shipment Count.
+    customers = 'No se pudo ajustar el conteo del cliente (ejecuta reconcileCustomerAggregates): ' + err.message;
   }
 
   // 5) Snapshot of everything that was deleted, for manual recovery.
