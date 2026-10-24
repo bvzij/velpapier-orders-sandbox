@@ -12,7 +12,8 @@ const N8N_IMPORTAR_URL = 'https://n8n.srv2017849.hstgr.cloud/webhook/importar-ap
 const DEFAULTS = {
   slip: { font: 'atkinson', name_size: 7.5, sku_size: 8.5, seller_size: 8.5, qty_size: 11, header_size: 7,
           total_size: 12, note_size: 9, order_size: 7.5, extras_size: 8.5, lapiz_size: 26,
-          lapiz_text: 'Lápiz Infinito', deadline_size: 15, footer_id_size: 9, user_size: 12 },
+          lapiz_text: 'Lápiz Infinito', deadline_size: 15, footer_id_size: 9, user_size: 12,
+          item_line_width: 0.8, item_line_style: 'solid' },
   sticker: { font: 'roboto', width_mm: 50, height_mm: 25, margin_top: 2, margin_right: 2.5, margin_bottom: 2,
              margin_left: 2.5, title_size: 9, answer_size: 7.5, align: 'center', gap_mm: 0.8 },
   // invert: TikTok's printer stacks the first printed page at the bottom, so the
@@ -483,6 +484,15 @@ function extraTitle(c) {
   if (c.channel === 'Nota') return 'Nota';
   return `Manual · ${plural(n, 'producto', 'productos')}`;
 }
+// Lines for the slip: one item per product; a note sits under the order's last product.
+function extraItems(c) {
+  if (c.channel === 'Nota') return [{ text: c.products, note: '' }];
+  const items = VP.parseProducts(c.products).map(p => ({ text: `${p.qty}× ${p.name}`, note: '' }));
+  if (c.notes && !/^https?:\/\//.test(c.notes.trim()) && items.length) {
+    items[items.length - 1].note = 'Nota: ' + c.notes;
+  }
+  return items;
+}
 function extraLines(c) {
   if (c.channel === 'Nota') return [c.products];
   const lines = VP.parseProducts(c.products).map(p => `${p.qty}× ${p.name}`);
@@ -684,12 +694,12 @@ function buildPlan(mode) {
   Object.entries(S.extraSel).forEach(([oid, s]) => {
     if (!s.checked || !s.tid) return;
     const c = candidateById(oid);
-    if (c) (extrasByTid[s.tid] = extrasByTid[s.tid] || []).push({ title: extraTitle(c), lines: extraLines(c), order_id: oid });
+    if (c) (extrasByTid[s.tid] = extrasByTid[s.tid] || []).push({ title: extraTitle(c), channel: c.channel || 'Manual', items: extraItems(c), order_id: oid });
   });
   groups.forEach(g => g.items.forEach(i => {
     ships[i.tid] = {
       username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
-      extras: (extrasByTid[i.tid] || []).map(x => ({ title: x.title, lines: x.lines })),
+      extras: (extrasByTid[i.tid] || []).map(x => ({ channel: x.channel, items: x.items })),
       note_edits: notaByTid[i.tid] || {},
     };
   }));
@@ -1105,6 +1115,7 @@ const SLIP_FIELDS = [
   ['order_size', 'Order ID (notas)'], ['extras_size', 'Productos extra'], ['lapiz_size', 'Lápiz Infinito'],
   ['deadline_size', 'Fecha límite (pie)'], ['footer_id_size', 'Order ID (pie)'], ['user_size', 'Usuario (rojo)'],
   ['header_size', 'Encabezados'],
+  ['item_line_width', 'Línea entre productos (grosor, pt)'],
 ];
 const STICKER_FIELDS = [
   ['width_mm', 'Ancho (mm)'], ['height_mm', 'Alto (mm)'], ['margin_top', 'Margen arriba (mm)'],
@@ -1125,7 +1136,21 @@ async function renderSettings() {
         <label>Fuente ${fontSel('set-slip-font', s.slip.font)}</label>
         <label>Texto Lápiz <input type="text" id="set-slip-lapiz_text" value="${esc(s.slip.lapiz_text)}"></label>
         ${SLIP_FIELDS.map(([k, l]) => num('slip', k, l)).join('')}
+        <label>Línea entre productos (tipo) <select id="set-slip-item_line_style">
+          <option value="solid"${s.slip.item_line_style === 'solid' ? ' selected' : ''}>Continua</option>
+          <option value="dashed"${s.slip.item_line_style === 'dashed' ? ' selected' : ''}>- - - - (guiones)</option>
+        </select></label>
       </div></div>
+    <div class="imp-card"><h3>Hoja de prueba <small>· para revisar cómo se ve; no se guarda ni se sube</small></h3>
+      <div class="imp-row">
+        <select id="set-test-mode">
+          <option value="single">Una hoja (pedido normal)</option>
+          <option value="large">Dos hojas (pedido muy grande)</option>
+        </select>
+        <button class="imp-btn" onclick="IMP.testSlip()">Generar PDF de prueba</button>
+      </div>
+      <div class="imp-muted">Usa los ajustes de esta pantalla, también los que aún no has guardado. Para ver los cambios en una importación real, guarda primero.</div>
+    </div>
     <div class="imp-card"><h3>Stickers de datos curiosos</h3>
       <div class="imp-grid">
         <label>Fuente ${fontSel('set-sticker-font', s.sticker.font)}</label>
@@ -1147,6 +1172,7 @@ function readSettingsForm() {
   s.slip.font = $('set-slip-font').value;
   s.slip.lapiz_text = $('set-slip-lapiz_text').value.trim() || DEFAULTS.slip.lapiz_text;
   SLIP_FIELDS.forEach(([k]) => { const v = parseFloat($('set-slip-' + k).value); if (!isNaN(v)) s.slip[k] = v; });
+  s.slip.item_line_style = $('set-slip-item_line_style').value;
   s.sticker.font = $('set-sticker-font').value;
   s.sticker.align = $('set-sticker-align').value;
   STICKER_FIELDS.forEach(([k]) => { const v = parseFloat($('set-sticker-' + k).value); if (!isNaN(v)) s.sticker[k] = v; });
@@ -1166,6 +1192,16 @@ function resetSettings() {
   if (!confirm('¿Restaurar todos los ajustes de Importar a los valores de fábrica? (Se guardan al pulsar "Guardar ajustes".)')) return;
   S.settings = JSON.parse(JSON.stringify(DEFAULTS));
   renderSettings();
+}
+async function testSlip() {
+  const mode = $('set-test-mode').value;
+  const s = readSettingsForm();
+  try {
+    setProgress(true, 'Generando hoja de prueba…', 50);
+    const r = await callImporter({ op: 'test_slip', mode, settings: { slip: s.slip } });
+    setProgress(false);
+    openPdf(r.pdf_base64, `hoja_prueba_${mode}.pdf`);
+  } catch (e) { setProgress(false); showToast('Error: ' + e.message, true); }
 }
 async function testSticker() {
   const s = readSettingsForm();
@@ -1439,7 +1475,7 @@ window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
-  purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged,
+  purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
 };
 
 (async function init() {
