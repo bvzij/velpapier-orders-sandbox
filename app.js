@@ -104,6 +104,8 @@ function statusPillClass(status) {
 }
 
 function channelTag(channel) {
+  // importar-v2: Nota = Buyer Message / Seller Note from TikTok, or a note typed in Pedidos
+  if (channel === 'Nota') return '<span class="channel-tag channel-manual" style="background:#f1da65;color:#5c4a00">Nota</span>';
   if (channel === 'Mayorista') return '<span class="channel-tag channel-manual" style="background:#ecebfa;color:#534ab7">Mayorista</span>';
   const cls = channel === 'TikTok' ? 'channel-tiktok' : channel === 'Shopify' ? 'channel-shopify' : 'channel-manual';
   return `<span class="channel-tag ${cls}">${escapeHtml(channel || 'Manual')}</span>`;
@@ -149,6 +151,8 @@ function mapFromApi(r) {
     ArchiveDate: r['Archive Date'] || '',
     ShippedDate: r['Shipped Date'] || '',
     OrderDate: r['Order Date'] || '',
+    ShipBy: r['Ship By'] || '',          // importar-v2: TikTok "In transit by" deadline
+    NotaFuente: r['Nota Fuente'] || '',
     'Fecha Creación': r['Created Date']
   };
 }
@@ -666,6 +670,7 @@ function showNewOrderModal(prefillUsername, opts) {
       <option value="Manual" selected>Manual</option>
       <option value="TikTok">TikTok</option>
       <option value="Shopify">Shopify</option>
+      <option value="Nota">Nota</option>
     </select>
     <select id="no-status">${statusOptions.map(s => `<option value="${s}"${s === defaultStatus ? ' selected' : ''}>${s}</option>`).join('')}
     </select>
@@ -2353,7 +2358,7 @@ function renderTikTokTab() {
     return;
   }
 
-  const sortMode = ['paid', 'paidold', 'az', 'za'].includes(tiktokSort) ? tiktokSort : 'paid';
+  const sortMode = ['paid', 'paidold', 'az', 'za', 'deadline'].includes(tiktokSort) ? tiktokSort : 'paid';
   const byLetters = (a, b) => String(a).localeCompare(String(b), 'es');
   const itemsOf = p => Array.isArray(p) ? p : VP.parseProducts(p || '');
 
@@ -2397,7 +2402,23 @@ function renderTikTokTab() {
         ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeHtml(x.ShopifyOrderId)}" target="_blank" rel="noopener noreferrer" class="notas-link">${escapeHtml(label)}</a>`
         : escapeHtml(label);
     }
+    if (x.Channel === 'Nota') return '<span style="background:#f1da65;color:#5c4a00;border-radius:99px;padding:0 6px">Nota</span>' + (x.NotaFuente ? ' · ' + escapeHtml(x.NotaFuente) : '');
     return x.Channel === 'Mayorista' ? mayoristaLine(x) : 'Manual';
+  };
+  // importar-v2: a Nota is text, not a product list
+  const notaSectionHtml = x => `
+    <div style="margin-top:10px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:var(--text-muted);margin-bottom:2px">${linkedTitle(x)}${x.Status ? ` <span style="font-weight:400;text-transform:none">· ${escapeHtml(x.Status)}</span>` : ''}</div>
+      <div style="font-size:12px;background:#fbf3c9;border-radius:6px;padding:4px 8px;color:#3d3200">${escapeHtml(x.Producto)}</div>
+    </div>`;
+  // "LUN 26 OCT" from the stored ISO deadline (Mexico City)
+  const deadlineTxt = r => {
+    if (!r.ShipBy) return '';
+    const d = new Date(r.ShipBy);
+    if (isNaN(d)) return '';
+    const parts = new Intl.DateTimeFormat('es-MX', { timeZone: 'America/Mexico_City', weekday: 'short', day: 'numeric', month: 'short' }).formatToParts(d);
+    const g = t => ((parts.find(p => p.type === t) || {}).value || '').replace('.', '').toUpperCase();
+    return `${g('weekday')} ${g('day')} ${g('month')}`;
   };
 
   const rowHtml = r => {
@@ -2408,6 +2429,8 @@ function renderTikTokTab() {
     const tracking = escapeHtml(r.TrackingId || '');
     const linked = linkedFor(r);
     const dateTxt = ` <span style="font-weight:400;font-size:11px;color:var(--text-faint)">· ${escapeHtml(formatDateTime(r.OrderDate || r['Fecha Creación']))}</span>`;
+    const dl = deadlineTxt(r);
+    const dlTxt = dl ? ` <span style="font-weight:700;font-size:11px;color:var(--amber-text);background:var(--amber-bg);border-radius:99px;padding:0 6px">Límite ${escapeHtml(dl)}</span>` : '';
     const linkedTxt = linked.length
       ? ` <span style="font-weight:400;font-size:11px;color:var(--green-text)">· +${linked.length} vinculado${linked.length !== 1 ? 's' : ''}</span>`
       : '';
@@ -2415,14 +2438,14 @@ function renderTikTokTab() {
     if (open) {
       body = `<div style="padding:4px 12px 12px 30px;background:var(--surface2);border-top:0.5px solid var(--border)">`
         + tiktokSections(r)
-        + linked.map(x => sectionHtml(linkedTitle(x), x.Producto, x.Status)).join('')
+        + linked.map(x => x.Channel === 'Nota' ? notaSectionHtml(x) : sectionHtml(linkedTitle(x), x.Producto, x.Status)).join('')
         + `</div>`;
     }
     return `
       <div style="border-bottom:0.5px solid var(--border)">
         <div data-id="${escapeHtml(key)}" onclick="if(!event.target.closest('a,button'))toggleTikTokOrder(this.dataset.id)" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:10px 12px;gap:12px">
           <div style="min-width:0">
-            <div style="font-weight:600;font-size:13px;margin-bottom:2px">${open ? '▾' : '▸'} ${username}${dateTxt}${linkedTxt}</div>
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">${open ? '▾' : '▸'} ${username}${dateTxt}${dlTxt}${linkedTxt}</div>
             <div style="font-size:12px;color:var(--text-muted)">${shopifyOrderLine(r)}</div>
             ${tracking ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px">Guía ${tracking}</div>` : ''}
           </div>
@@ -2443,6 +2466,7 @@ function renderTikTokTab() {
   let sorted;
   if (sortMode === 'paid') sorted = [...tikTokOrders].sort((a, b) => ts(b) - ts(a));
   else if (sortMode === 'paidold') sorted = [...tikTokOrders].sort((a, b) => ts(a) - ts(b));
+  else if (sortMode === 'deadline') sorted = [...tikTokOrders].sort((a, b) => String(a.ShipBy || '9999').localeCompare(String(b.ShipBy || '9999')) || byName(a, b));
   else { sorted = [...tikTokOrders].sort(byName); if (sortMode === 'za') sorted.reverse(); }
 
   const summary = `
@@ -2453,6 +2477,7 @@ function renderTikTokTab() {
         ${opt('paidold', 'Fecha de pago: más antigua')}
         ${opt('az', 'Nombre: A → Z')}
         ${opt('za', 'Nombre: Z → A')}
+        ${opt('deadline', 'Fecha límite: la más próxima')}
       </select>
     </div>`;
 
