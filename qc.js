@@ -529,10 +529,44 @@ function renderHistoryList() {
     : '');
 }
 
+// importar-v2: Notas (Buyer Message / Seller Note / notes from Pedidos) per guía
+function notasByTracking() {
+  const out = {};
+  allActiveOrders.forEach(r => {
+    if (r['Channel'] !== 'Nota') return;
+    const tid = String(r['Linked Shipment'] || '').trim();
+    if (!tid) return;
+    (out[tid] = out[tid] || []).push(r);
+  });
+  return out;
+}
+function notasHtml(tid, compact) {
+  const notas = notasByTracking()[tid] || [];
+  if (!notas.length) return '';
+  if (compact) return `<div class="pending-progress" style="color:#5c4a00"><span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700">Nota</span> ${notas.length} mensaje${notas.length !== 1 ? 's' : ''}</div>`;
+  return notas.map(n => `<div style="background:#fbf3c9;border:0.5px solid #f1da65;border-radius:10px;padding:8px 10px;margin-top:8px;font-size:14px;color:#3d3200">
+    <span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700;font-size:11px">Nota</span>
+    <span style="font-size:11px;color:#7a6a20">${escapeHtml(n['Nota Fuente'] === 'Vendedor' ? 'del vendedor' : n['Nota Fuente'] === 'Comprador' ? 'del cliente' : '')}</span>
+    <div style="margin-top:4px">${escapeHtml(n['Products'] || '')}</div>
+    ${n['Nota Asignada'] ? `<div style="font-size:12px;margin-top:2px">→ ${escapeHtml(n['Nota Asignada'])}</div>` : ''}
+  </div>`).join('');
+}
+// "LUN 26 OCT" from the stored ISO deadline (Mexico City)
+function shipByLabel(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (isNaN(d)) return '';
+  const parts = new Intl.DateTimeFormat('es-MX', { timeZone: 'America/Mexico_City', weekday: 'short', day: 'numeric', month: 'short' }).formatToParts(d);
+  const g = t => ((parts.find(p => p.type === t) || {}).value || '').replace('.', '').toUpperCase();
+  return `${g('weekday')} ${g('day')} ${g('month')}`;
+}
+
 function anotadoOrdersByTracking() {
   const out = {};
   allActiveOrders.forEach(r => {
-    if (r['Channel'] === 'TikTok' || r['Status'] !== 'Anotado') return;
+    // importar-v2: Nota rows are not products to tick; they show as a yellow
+    // box instead and the server ships them with the guía (saveQC finalize).
+    if (r['Channel'] === 'TikTok' || r['Channel'] === 'Nota' || r['Status'] !== 'Anotado') return;
     const tid = String(r['Linked Shipment'] || '').trim();
     if (!tid) return;
     (out[tid] = out[tid] || []).push(r);
@@ -666,7 +700,9 @@ function renderPendingList() {
   const sortMode = sortSelect ? sortSelect.value : 'az';
   const userOfE = e => (e.orders[0]['Username'] || e.orders[0]['Primary Username'] || '').toLowerCase();
   const dateOfE = e => new Date(e.orders[0]['Created Date'] || e.orders[0]['Created Time'] || 0).getTime();
+  const shipByOfE = e => String(e.orders[0]['Ship By'] || '9999');
   entries.sort((a, b) => {
+    if (sortMode === 'deadline') return shipByOfE(a).localeCompare(shipByOfE(b)) || userOfE(a).localeCompare(userOfE(b));
     if (sortMode === 'old-new') return dateOfE(a) - dateOfE(b);
     if (sortMode === 'az') return userOfE(a).localeCompare(userOfE(b));
     if (sortMode === 'za') return userOfE(b).localeCompare(userOfE(a));
@@ -742,7 +778,8 @@ function renderPendingList() {
           <span class="pending-username">${escapeHtml(username)}${ttIdHtml}</span>
           <span class="pending-count">${orders.length} pedido${orders.length !== 1 ? 's' : ''}${extrasText}</span>
         </div>
-        ${first['Tracking ID'] ? `<div class="pending-tracking">${extras.some(o => o['Channel'] === 'Mayorista') ? '<span class="may-pack-badge">+ Mayoreo</span>' : ''}${escapeHtml(first['Tracking ID'])}</div>` : ''}
+        ${first['Tracking ID'] ? `<div class="pending-tracking">${extras.some(o => o['Channel'] === 'Mayorista') ? '<span class="may-pack-badge">+ Mayoreo</span>' : ''}${escapeHtml(first['Tracking ID'])}${shipByLabel(first['Ship By']) ? ` · <b>Límite ${escapeHtml(shipByLabel(first['Ship By']))}</b>` : ''}</div>` : ''}
+        ${notasHtml(tid, true)}
         ${owing.length ? `<div class="may-pack-warn">⚠ Mayoreo con saldo pendiente: ${owing.map(o => escapeHtml(o['Order ID'] + ' ' + mayoristaNoteInfo(o).saldo)).join(', ')}</div>` : ''}
         ${photoBadge(tid)}
       </div>`;
@@ -837,6 +874,7 @@ function openCapture(shipment, opts) {
     ${idsHtml}
     ${shipment.tracking_id && !/^MAY-\d+$/.test(shipment.tracking_id) ? `<div class="ship-summary-tracking">${escapeHtml(shipment.tracking_id)}</div>` : ''}
     ${mayHtml}
+    ${shipment.tracking_id ? notasHtml(shipment.tracking_id, false) : ''}
   `;
 
   let restored = false;
@@ -998,7 +1036,7 @@ function renderAddonOrders() {
   const tid = selected ? selected.tracking_id : '';
   const savedIds = new Set(selectedAddons.map(a => String(a.id)));
   const addons = allActiveOrders.filter(r =>
-    r['Channel'] !== 'TikTok' && (
+    r['Channel'] !== 'TikTok' && r['Channel'] !== 'Nota' && (
       savedIds.has(String(r['Order ID'])) ||
       (tid && r['Status'] === 'Anotado' && String(r['Linked Shipment'] || '').trim() === tid)
     )
