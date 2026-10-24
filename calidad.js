@@ -67,7 +67,9 @@ let hasFullOrdersLoaded = false; // set once the actual action=orders payload (n
 // slow uncached fetch on every load -- which is also what made the modal
 // timing bug so easy to hit. Only the few fields this page actually reads
 // need to be cached, same slimming pattern as home.js's slimOrders.
-const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date', 'Notes'];
+const SLIM_ORDER_FIELDS = ['Order ID', 'Products', 'Price', 'Shopify Order ID', 'Shopify Order Number', 'Shipped Date', 'Notes',
+  'Channel', 'Linked Shipment', 'Nota Fuente', 'Nota Asignada'];   // importar-v2: Notas per guía
+let NOTAS_BY_TID = {};
 
 // Page-1 snapshot in localStorage so returning to Calidad paints instantly
 // instead of a blank/empty state while the (uncacheable) full QC loads.
@@ -76,7 +78,12 @@ let showingSnapshot = false;
 
 function indexOrders(records) {
   ORDERS_BY_ID = {};
+  NOTAS_BY_TID = {};
   (records || []).forEach(r => {
+    if (r['Channel'] === 'Nota' && r['Linked Shipment']) {
+      (NOTAS_BY_TID[String(r['Linked Shipment']).trim()] = NOTAS_BY_TID[String(r['Linked Shipment']).trim()] || []).push(r);
+      return;
+    }
     String(r['Order ID'] || '').split(' + ').map(s => s.trim()).filter(Boolean).forEach(id => {
       ORDERS_BY_ID[id] = r;
     });
@@ -841,6 +848,8 @@ function showOrderDetailModal(r) {
           ${r['Packer'] ? `<div><span class="cal-detail-label">Empacador</span>${VP.esc(r['Packer'])}</div>` : ''}
           ${r['Notes'] ? `<div><span class="cal-detail-label">Notas</span><span style="color:var(--amber-text)">${VP.esc(r['Notes'])}</span></div>` : ''}
         </div>
+        ${(NOTAS_BY_TID[String(r['Tracking ID'] || '').trim()] || []).length ? `<div class="cal-detail-section-title">Notas</div>
+        ${NOTAS_BY_TID[String(r['Tracking ID'] || '').trim()].map(n => `<div style="background:#fbf3c9;border:0.5px solid #f1da65;border-radius:8px;padding:6px 9px;margin-bottom:6px;font-size:13px;color:#3d3200"><span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700;font-size:11px">Nota</span> ${n['Nota Fuente'] ? VP.esc(n['Nota Fuente']) + ': ' : ''}${VP.esc(n['Products'] || '')}${n['Nota Asignada'] ? ` <span style="color:#7a6a20">→ ${VP.esc(n['Nota Asignada'])}</span>` : ''}</div>`).join('')}` : ''}
         <div class="cal-detail-section-title">Pedidos</div>
         ${orderBlocksHtml}
         <div class="cal-detail-section-title">Fotos</div>
