@@ -1,181 +1,214 @@
-// import.js — Vel Papier TikTok Import Page
+// import.js — Vel Papier · Importar v2 (2026-10-23)
+// Flow: 1) Importar (CSV + PDF -> n8n "tiktok-import" -> VPS /process -> Apps Script)
+//       2) Configure this import (sort, Lápiz, NO POSTAL, extras, Notas, fun fact)
+//       3) Generar PDF (n8n "importar-api" -> VPS /importar op=render), then the
+//          printed extras are marked Anotado + linked (Apps Script import_finalize).
+// History (7 days) keeps the original files, the import result and the outputs
+// in Drive, so any import can be re-opened and re-generated without re-importing.
 
-const API         = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
-const N8N_URL     = 'https://n8n.srv2017849.hstgr.cloud/webhook/tiktok-import';
-// ── n8n webhook authentication (FIX_LOG 1.1) ───────────────────────────
-// The old fixed token '0924' is public in this repo, so anyone could push
-// fake imports. New scheme: send the person's own session token in
-// X-VP-Session; the n8n workflow checks it with Apps Script (action=whoami)
-// and forwards the name as X-Requested-By.
-// STEP 1 (now): both headers are sent, so imports keep working while the
-//         n8n workflow is updated.
-// STEP 2: once n8n validates X-VP-Session, set this to false, then change
-//         the n8n webhook path so the old URL stops working.
-const N8N_SEND_LEGACY_TOKEN = false;
-const N8N_LEGACY_TOKEN = '0924';
+const N8N_URL          = 'https://n8n.srv2017849.hstgr.cloud/webhook/tiktok-import';
+const N8N_IMPORTAR_URL = 'https://n8n.srv2017849.hstgr.cloud/webhook/importar-api';
 
-let API_TOKEN = localStorage.getItem('vp_token') || '';
+const DEFAULTS = {
+  slip: { font: 'atkinson', name_size: 7.5, sku_size: 8.5, seller_size: 8.5, qty_size: 11, header_size: 7,
+          total_size: 12, note_size: 9, order_size: 7.5, extras_size: 8.5, lapiz_size: 26,
+          lapiz_text: 'Lápiz Infinito', deadline_size: 15, footer_id_size: 9, user_size: 12 },
+  sticker: { font: 'roboto', width_mm: 50, height_mm: 25, margin_top: 2, margin_right: 2.5, margin_bottom: 2,
+             margin_left: 2.5, title_size: 9, answer_size: 7.5, align: 'center', gap_mm: 0.8 },
+  // invert: TikTok's printer stacks the first printed page at the bottom, so the
+  // file is written in reverse to get the chosen order from the top (same as before).
+  print: { sort: 'az', group: 'none', group_first: 'a', blank_between: false, invert: true, lapiz: true },
+};
 
-// Files selected by user
 let csvFile = null;
 let pdfFile = null;
 
-// Result data (kept for PDF re-download + modal)
-let lastPdfBase64   = null;
-let lastCsvBase64   = null;
-let lastMatches     = [];
-let allCustomers    = [];   // fetched from Apps Script for modal dropdown
-let activeMatchIdx  = null; // which match card is being resolved
+const S = {
+  settings: JSON.parse(JSON.stringify(DEFAULTS)),
+  settingsLoaded: false,
+  importId: '',
+  csvName: '', pdfName: '',
+  csvB64: '', pdfB64: '',
+  result: null,        // phase-1 response (without the big base64 fields once stored)
+  legacyPdf: '',       // old-style annotated PDF from phase 1 (emergency only)
+  combinedCsv: '',
+  meta: [],            // shipments_meta
+  ctx: null,           // import_context
+  log: {},             // Import Log row
+  opts: null,          // print options for THIS import
+  extraSel: {},        // order_id -> {checked, tid}
+  notaEdit: {},        // NOTA-... -> {text, assigned}
+  render: null,        // {report, pdf, plan, at, manual}
+  facts: null,
+  factId: '',
+  copies: null,
+  busy: false,
+};
 
+// ── small helpers ─────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const esc = s => VP.esc(s == null ? '' : s);
+const plural = (n, a, b) => `${n} ${n === 1 ? a : b}`;
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-
-async function ensureAuth() {
-  await VP.ensureToken();
-  API_TOKEN = VP.token;
+function fileToB64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1] || '');
+    r.onerror = () => rej(new Error('No se pudo leer ' + file.name));
+    r.readAsDataURL(file);
+  });
+}
+function textToB64(t) { return btoa(unescape(encodeURIComponent(t))); }
+function b64ToText(b) { return decodeURIComponent(escape(atob(b))); }
+function b64ToBlob(b64, mime) {
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  return new Blob([bytes], { type: mime });
+}
+function openPdf(b64, filename) {
+  const url = URL.createObjectURL(b64ToBlob(b64, 'application/pdf'));
+  window.open(url, '_blank');
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+function downloadB64(b64, mime, filename) {
+  const url = URL.createObjectURL(b64ToBlob(b64, mime));
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function mxStamp() {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(new Date());
+  const g = t => (p.find(x => x.type === t) || {}).value || '00';
+  return `${g('year')}${g('month')}${g('day')}-${g('hour')}${g('minute')}${g('second')}`;
+}
+function normUser(u) { return String(u || '').trim().replace(/^@/, '').toLowerCase(); }
+function showToast(msg, isError = false) { VP.toast ? VP.toast(msg, isError) : alert(msg); }
+function showError(msg) { const b = $('error-box'); b.innerHTML = esc(msg); b.style.display = 'block'; }
+function hideError() { $('error-box').style.display = 'none'; }
+function setProgress(visible, label = '', pct = 0) {
+  $('progress-wrap').style.display = visible ? 'block' : 'none';
+  $('progress-label').style.display = visible ? 'block' : 'none';
+  $('progress-bar').style.width = `${pct}%`;
+  $('progress-label').textContent = label;
+}
+function extractErrorMessage(rawText) {
+  try {
+    const j = JSON.parse(rawText);
+    if (j.detail && j.detail.error_message) return j.detail.error_message + (j.detail.where ? ` (${j.detail.where})` : '');
+    if (typeof j.detail === 'string') return j.detail;
+    if (j.error) return j.error;
+    if (j.message) return j.message;
+  } catch (e) { /* not JSON */ }
+  return String(rawText || '').slice(0, 300) || 'respuesta vacía';
 }
 
-
-// ── File handling ─────────────────────────────────────────────────────────────
-
-function handleZoneClick() {
-  document.getElementById('file-input').click();
+// The new n8n workflow "importar-api" forwards JSON to the VPS (/importar).
+async function callImporter(body) {
+  const r = await fetch(N8N_IMPORTAR_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-VP-Session': VP.token },
+    body: JSON.stringify(body),
+  });
+  const txt = await r.text();
+  // TROUBLESHOOT: 404 = the n8n workflow "Importar API" is not published;
+  // 401 = session expired (reload); 500 = open the n8n execution log.
+  if (!r.ok) throw new Error(`Servidor de PDF (${r.status}): ${extractErrorMessage(txt)}`);
+  let j;
+  try { j = JSON.parse(txt); } catch (e) { throw new Error('Respuesta inválida del servidor de PDF'); }
+  if (j && j.error) throw new Error(j.error);
+  return j;
 }
 
+// ── tabs ──────────────────────────────────────────────────────────────────
+function tab(name) {
+  document.querySelectorAll('.imp-tab').forEach(b => b.classList.toggle('is-active', b.dataset.tab === name));
+  document.querySelectorAll('.imp-pane').forEach(p => p.classList.toggle('is-active', p.id === 'pane-' + name));
+  if (name === 'historial') loadHistory();
+  if (name === 'datos') loadFacts().then(renderFactsPane);
+  if (name === 'ajustes') renderSettings();
+}
+
+// ── settings (server-side, shared by every device) ───────────────────────
+async function loadSettings() {
+  try {
+    const r = await VP.get('action=importar_settings_get');
+    const s = r.settings || {};
+    ['slip', 'sticker', 'print'].forEach(k => { S.settings[k] = Object.assign({}, DEFAULTS[k], s[k] || {}); });
+  } catch (e) {
+    console.warn('[importar] settings load failed', e);
+  }
+  S.settingsLoaded = true;
+}
+
+// ── file handling ─────────────────────────────────────────────────────────
+function handleZoneClick() { $('file-input').click(); }
 function handleFileInput(files) {
   Array.from(files).forEach(file => {
-    if (file.name.toLowerCase().endsWith('.csv')) handleFile('csv', file);
-    else if (file.name.toLowerCase().endsWith('.pdf')) handleFile('pdf', file);
+    const n = file.name.toLowerCase();
+    if (n.endsWith('.csv')) handleFile('csv', file);
+    else if (n.endsWith('.pdf')) handleFile('pdf', file);
   });
 }
-
 function handleFile(type, file) {
   if (!file) return;
-  if (type === 'csv') {
-    csvFile = file;
-  } else {
-    pdfFile = file;
-  }
+  if (type === 'csv') csvFile = file; else pdfFile = file;
   updateDropZone();
   hideError();
-  document.getElementById('run-btn').disabled = !(csvFile && pdfFile);
+  $('run-btn').disabled = !(csvFile && pdfFile);
 }
-
 function updateDropZone() {
-  const zone   = document.getElementById('drop-zone');
-  const status = document.getElementById('drop-status');
-  const label  = document.getElementById('drop-label');
-  const hint   = document.getElementById('drop-hint');
-  const icon   = document.getElementById('drop-icon');
-
+  const zone = $('drop-zone'), label = $('drop-label'), hint = $('drop-hint'), icon = $('drop-icon');
   const chips = [];
-  if (csvFile) chips.push(`<span class="drop-file-chip csv">📋 ${escHtml(csvFile.name)}</span>`);
-  if (pdfFile) chips.push(`<span class="drop-file-chip pdf">📦 ${escHtml(pdfFile.name)}</span>`);
-  status.innerHTML = chips.join('');
-
+  if (csvFile) chips.push(`<span class="drop-file-chip csv">📄 ${esc(csvFile.name)}</span>`);
+  if (pdfFile) chips.push(`<span class="drop-file-chip pdf">📦 ${esc(pdfFile.name)}</span>`);
+  $('drop-status').innerHTML = chips.join('');
   if (csvFile && pdfFile) {
-    zone.classList.add('ready');
-    icon.textContent  = '✓';
-    label.textContent = 'Archivos listos';
-    hint.textContent  = 'Haz clic para cambiar alguno';
+    zone.classList.add('ready'); icon.textContent = '✅';
+    label.textContent = 'Archivos listos'; hint.textContent = 'Haz clic para cambiarlos';
   } else if (csvFile || pdfFile) {
-    icon.textContent  = '📂';
+    zone.classList.remove('ready'); icon.textContent = '📂';
     label.textContent = csvFile ? 'CSV listo — falta el PDF' : 'PDF listo — falta el CSV';
-    hint.textContent  = 'Haz clic para agregar el archivo que falta';
+    hint.textContent = 'Arrastra o haz clic para agregar el archivo que falta';
   }
 }
+(function wireDrop() {
+  const zone = $('drop-zone');
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('drag-over'); handleFileInput(e.dataTransfer.files); });
+})();
 
-// Drag-and-drop on single zone
-const zone = document.getElementById('drop-zone');
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-zone.addEventListener('drop', e => {
-  e.preventDefault();
-  zone.classList.remove('drag-over');
-  Array.from(e.dataTransfer.files).forEach(file => {
-    if (file.name.endsWith('.csv')) handleFile('csv', file);
-    if (file.name.endsWith('.pdf')) handleFile('pdf', file);
-  });
+window.addEventListener('beforeunload', e => {
+  if (S.result && !S.render) { e.preventDefault(); e.returnValue = ''; }
 });
 
-
-// ── Main import ───────────────────────────────────────────────────────────────
-
-// Best-effort unwrap of an error response body into a short, human-readable
-// message. The raw body may be plain text, JSON from our FastAPI service
-// ({"detail": {"error_message": "...", ...}}), or JSON reshaped by N8N's
-// HTTP Request node error passthrough ({"errorMessage": "...", ...}). Falls
-// back to the raw text (truncated) if none of these shapes match, so a
-// future/unknown format still shows *something* useful rather than silently
-// failing again.
-function extractErrorMessage(rawText) {
-  if (!rawText) return '(sin detalles del servidor)';
-
-  let parsed;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch (e) {
-    return rawText.slice(0, 300);
-  }
-
-  // FastAPI HTTPException(detail={...}) shape from service.py
-  if (parsed.detail && typeof parsed.detail === 'object') {
-    const d = parsed.detail;
-    return `${d.error_type || 'Error'}: ${d.error_message || JSON.stringify(d)}`;
-  }
-  if (typeof parsed.detail === 'string') return parsed.detail;
-
-  // N8N HTTP Request node error passthrough shape
-  if (parsed.errorMessage) {
-    const raw = parsed.errorDetails && parsed.errorDetails.rawErrorMessage;
-    return raw ? `${parsed.errorMessage} (${[].concat(raw).join('; ')})` : parsed.errorMessage;
-  }
-
-  // Plain {"error": "..."} shape
-  if (parsed.error) return typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error);
-
-  return JSON.stringify(parsed).slice(0, 300);
-}
-
+// ── 1) IMPORT ─────────────────────────────────────────────────────────────
 async function runImport() {
-  await ensureAuth();
+  await VP.ensureToken();
   hideError();
-  hideSummary();
-
-  const btn = document.getElementById('run-btn');
+  resetImportUi();
+  const btn = $('run-btn');
   btn.disabled = true;
-
-  setProgress(true, 'Enviando archivos…', 15);
-
   try {
+    if (!S.settingsLoaded) await loadSettings();
+    S.importId = 'IMP-' + mxStamp();
+    S.csvName = csvFile.name; S.pdfName = pdfFile.name;
+    setProgress(true, 'Leyendo archivos…', 8);
+    S.csvB64 = await fileToB64(csvFile);
+    S.pdfB64 = await fileToB64(pdfFile);
     const fd = new FormData();
     fd.append('csv', csvFile);
     fd.append('pdf', pdfFile);
-
-    setProgress(true, 'Procesando… esto puede tardar 30–90 segundos', 40);
-
-    const resp = await fetch(N8N_URL, {
-      method:  'POST',
-      headers: Object.assign(
-        { 'X-VP-Session': VP.token },
-        N8N_SEND_LEGACY_TOKEN ? { 'X-VP-Token': N8N_LEGACY_TOKEN } : {}
-      ),
-      body:    fd,
-    });
-
-    setProgress(true, 'Recibiendo resultados…', 85);
-
-    if (!resp.ok) {
-     const txt = await resp.text();
-     throw new Error(`Error ${resp.status}: ${extractErrorMessage(txt)}`);
-    }
-
+    setProgress(true, 'Importando… esto puede tardar 30–90 segundos', 35);
+    const resp = await fetch(N8N_URL, { method: 'POST', headers: { 'X-VP-Session': VP.token }, body: fd });
+    setProgress(true, 'Recibiendo resultados…', 80);
+    if (!resp.ok) throw new Error(`Error ${resp.status}: ${extractErrorMessage(await resp.text())}`);
     const data = await resp.json();
-    setProgress(true, 'Listo', 100);
-    setTimeout(() => setProgress(false), 600);
-
-    handleResult(data);
-
+    setProgress(true, 'Cargando pedidos pendientes de los clientes…', 90);
+    await startImport(data, { reopen: false });
+    setProgress(false);
   } catch (err) {
     setProgress(false);
     showError(err.message || 'Error desconocido');
@@ -183,341 +216,942 @@ async function runImport() {
   }
 }
 
+function resetImportUi() {
+  ['summary-card', 'matches-section', 'new-customers-section', 'configure'].forEach(id => { $(id).style.display = 'none'; });
+  Object.assign(S, { result: null, legacyPdf: '', combinedCsv: '', meta: [], ctx: null, log: {}, opts: null,
+    extraSel: {}, notaEdit: {}, render: null, factId: '', copies: null });
+}
 
-// ── Handle result ─────────────────────────────────────────────────────────────
+async function startImport(data, opts) {
+  S.legacyPdf = data.pdf_base64 || '';
+  S.combinedCsv = data.csv_base64 || '';
+  const slim = Object.assign({}, data);
+  delete slim.pdf_base64; delete slim.csv_base64;
+  S.result = slim;
+  S.meta = (data.shipments_meta || []);
+  S.opts = Object.assign({}, S.settings.print, (S.log && S.log['Settings'] && S.log['Settings'].print) || {});
 
-function handleResult(data) {
   const s = data.summary || {};
+  $('s-import-id').textContent = '· ' + S.importId;
+  $('s-inserted').textContent = s.inserted ?? 0;
+  $('s-dupes').textContent = s.duplicates ?? 0;
+  $('s-matches').textContent = s.possible_matches ?? 0;
+  $('summary-card').style.display = 'block';
 
-    // Store for re-download + modal
-  lastPdfBase64 = data.pdf_base64 || null;
-  lastCsvBase64 = data.csv_base64 || null;
-  lastMatches   = data.possible_matches || [];
-
-  // Some processing steps (PDF annotation, address extraction, CSV export)
-  // fail soft on the VPS -- the import still completes, but the step's
-  // result silently falls back to empty/unmodified rather than crashing
-  // the whole import. Surface those here so a failure is never invisible.
-  const warnings = data.warnings || [];
-  if (warnings.length > 0) {
-    showError('⚠ ' + warnings.join(' · '));
-  }
-
-  // Summary card
-  document.getElementById('s-inserted').textContent = s.inserted ?? 0;
-  document.getElementById('s-dupes').textContent    = s.duplicates ?? 0;
-  document.getElementById('s-matches').textContent  = s.possible_matches ?? 0;
-  document.getElementById('summary-card').style.display = 'block';
-
-  // Auto-open PDF immediately
-  if (lastPdfBase64) {
-    openAndDownloadPDF();
-  }
-
-  // Possible matches
-  if (lastMatches.length > 0) {
-    document.getElementById('matches-section').style.display = 'block';
+  const matches = data.possible_matches || [];
+  if (matches.length) {
+    lastMatches = matches;
+    $('matches-section').style.display = 'block';
     fetchCustomersForModal().then(() => renderMatches(lastMatches));
   }
-
-  // New customers created
   const newC = data.new_customers || [];
-  if (newC.length > 0) {
-    const list = document.getElementById('new-customers-list');
-    list.innerHTML = newC.map(c =>
-      `<span class="new-customer-chip">✓ ${escHtml(c.username)}</span>`
-    ).join('');
-    document.getElementById('new-customers-section').style.display = 'block';
+  if (newC.length) {
+    $('new-customers-list').innerHTML = newC.map(c => `<span class="new-customer-chip">✓ ${esc(c.username)}</span>`).join('');
+    $('new-customers-section').style.display = 'block';
   }
 
-  showToast(`Importación completa — ${s.inserted} órden(es) insertada(s)`);
+  if (!data.shipments_meta) {
+    // TROUBLESHOOT: the VPS still runs the old service.py (no shipments_meta).
+    // Redo the VPS step of the deploy guide. Meanwhile the old PDF works.
+    showError('El servidor (VPS) aún no tiene la versión nueva. Puedes descargar el PDF anotado como antes.');
+    $('configure').style.display = 'block';
+    $('configure').innerHTML = legacyButtonsHtml();
+    return;
+  }
+  if (data.warnings && data.warnings.length) showError('⚠ ' + data.warnings.join(' · '));
+
+  await loadContext();
+  initSelections();
+  renderConfigure();
+  if (!opts.reopen) saveImportToHistory();
 }
 
-
-// ── PDF open + download ───────────────────────────────────────────────────────
-
-function openAndDownloadPDF() {
-  if (!lastPdfBase64) return;
-  const bytes = Uint8Array.from(atob(lastPdfBase64), c => c.charCodeAt(0));
-  const blob  = new Blob([bytes], { type: 'application/pdf' });
-  const url   = URL.createObjectURL(blob);
-
-  // Open in browser (Chrome opens PDF natively; also triggers OS default viewer)
-  window.open(url, '_blank');
-
-  // Also trigger a download
-  const a = Object.assign(document.createElement('a'), {
-    href:     url,
-    download: `guias_anotadas_${new Date().toISOString().slice(0,10)}.pdf`,
+// Phase-1 results + original files go to the 7-day history in the background.
+let uploadChain = Promise.resolve();
+function setUploadState(t) { const el = $('upload-state'); if (el) el.textContent = t; }
+function queueUpload(kind, name, mime, b64) {
+  uploadChain = uploadChain.then(async () => {
+    setUploadState(`Guardando en historial: ${name}…`);
+    try {
+      await VP.post({ action: 'import_file_save', import_id: S.importId, kind, name, mime, base64: b64 });
+      setUploadState('✓ Guardado en historial');
+    } catch (e) {
+      // TROUBLESHOOT: Drive upload failed (Apps Script import_file_save). The
+      // import itself is fine; only "Reabrir" from Historial won't have this file.
+      setUploadState(`⚠ No se guardó ${name} en el historial: ${e.message}`);
+    }
   });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  // Don't revoke immediately — keep blob alive for the opened tab
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
-
-  downloadCombinedCSV();
+  return uploadChain;
 }
-
-function downloadCombinedCSV() {
-  if (!lastCsvBase64) return;
-  const bytes = Uint8Array.from(atob(lastCsvBase64), c => c.charCodeAt(0));
-  const blob  = new Blob([bytes], { type: 'text/csv' });
-  const url   = URL.createObjectURL(blob);
-
-  const a = Object.assign(document.createElement('a'), {
-    href:     url,
-    download: `Combined_Orders_To_Ship_${new Date().toISOString().slice(0,10)}.csv`,
+function logFields(fields) {
+  return VP.post({ action: 'import_log_save', import_id: S.importId, fields })
+    .then(r => { if (r && r.log) S.log = r.log; })
+    .catch(e => console.warn('[importar] log save failed', e));
+}
+function saveImportToHistory() {
+  const c = counts();
+  logFields({
+    'CSV Name': S.csvName, 'PDF Name': S.pdfName, 'Shipments': c.shipments,
+    'Inserted': (S.result.summary || {}).inserted || 0, 'Duplicates': (S.result.summary || {}).duplicates || 0,
+    'New Customers': c.newC, 'Existing Customers': c.existingC, 'Unknown Customers': c.unknownC, 'Postcards': c.postcards,
   });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  queueUpload('original_csv', S.csvName, 'text/csv', S.csvB64);
+  queueUpload('original_pdf', S.pdfName, 'application/pdf', S.pdfB64);
+  queueUpload('result', 'resultado.json', 'application/json', textToB64(JSON.stringify(S.result)));
 }
 
-function downloadPDF() {
-  openAndDownloadPDF();
+async function loadContext() {
+  const ships = S.meta.filter(m => m.in_pdf);
+  const usernames = {};
+  ships.forEach(m => { usernames[m.tracking_id] = m.username; });
+  try {
+    S.ctx = await VP.post({ action: 'import_context', tracking_ids: ships.map(m => m.tracking_id), usernames });
+  } catch (e) {
+    S.ctx = { shipments: {}, candidates: [], notas: [] };
+    showError('No se pudieron cargar los pedidos pendientes: ' + e.message);
+  }
 }
 
+// ── model ─────────────────────────────────────────────────────────────────
+function infos() {
+  return S.meta.filter(m => m.in_pdf).map(m => {
+    const c = (S.ctx && S.ctx.shipments && S.ctx.shipments[m.tracking_id]) || {};
+    const cust = c.customer_id || m.customer_id || '';
+    let count = (c.shipment_count !== undefined && c.shipment_count !== null) ? c.shipment_count : m.shipment_count;
+    if (!cust || count === undefined) count = null;
+    return {
+      tid: m.tracking_id, username: m.username || '', cust, count,
+      kind: count === null ? 'unknown' : count === 0 ? 'new' : 'existing',
+      ship_by: c.ship_by || m.ship_by || '', deadline: m.deadline, slip: m.slip || {}, order_ids: m.order_ids || [],
+      primary_username: c.primary_username || '',
+    };
+  });
+}
+function countLabel(i) { return i.count === null ? '? env' : i.count === 0 ? 'Nuevo' : `${i.count} env`; }
 
-// ── Possible matches ──────────────────────────────────────────────────────────
+function custTids(list) {
+  const m = {};
+  list.forEach(i => { if (i.cust) (m[i.cust] = m[i.cust] || []).push(i.tid); });
+  return m;
+}
+
+// candidate -> customer of this import (Customer ID, or username for unlinked Manual rows)
+function candidateCust(c, list) {
+  if (c.customer_id) return c.customer_id;
+  const u = normUser(c.username);
+  const hit = list.find(i => normUser(i.username) === u || normUser(i.primary_username) === u);
+  return hit ? (hit.cust || 'USER:' + hit.tid) : '';
+}
+
+function initSelections() {
+  const list = infos();
+  const ct = custTids(list);
+  const tids = new Set(list.map(i => i.tid));
+  S.extraSel = {};
+  (S.ctx.candidates || []).forEach(c => {
+    const cust = candidateCust(c, list);
+    const options = cust.startsWith('USER:') ? [cust.slice(5)] : (ct[cust] || []);
+    const prelinked = c.status === 'Anotado' && tids.has(c.linked_shipment);
+    S.extraSel[c.order_id] = {
+      checked: prelinked,
+      tid: prelinked ? c.linked_shipment : (options.length === 1 ? options[0] : ''),
+      prelinked,
+    };
+  });
+  S.notaEdit = {};
+  (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, assigned: n.assigned || '' }; });
+  S.factId = (S.log && S.log['Fun Fact ID']) || '';
+}
+
+function extrasCountByTid() {
+  const m = {};
+  Object.entries(S.extraSel).forEach(([oid, s]) => { if (s.checked && s.tid) m[s.tid] = (m[s.tid] || 0) + 1; });
+  return m;
+}
+
+// Stack order = order of the printed pile, top first.
+function stack() {
+  const o = S.opts;
+  const list = infos();
+  const byName = (a, b) => a.username.localeCompare(b.username, 'es', { sensitivity: 'base' }) || a.tid.localeCompare(b.tid);
+  let cmp = byName;
+  if (o.sort === 'za') cmp = (a, b) => -byName(a, b);
+  if (o.sort === 'deadline') cmp = (a, b) => (a.ship_by || '9999').localeCompare(b.ship_by || '9999') || byName(a, b);
+  const sorted = [...list].sort(cmp);
+  let groups = [{ label: '', items: sorted }];
+  if (o.group === 'newexist') {
+    const A = sorted.filter(i => i.kind === 'new'), B = sorted.filter(i => i.kind !== 'new');
+    groups = o.group_first === 'a' ? [{ label: 'Nuevos', items: A }, { label: 'Existentes', items: B }]
+                                   : [{ label: 'Existentes', items: B }, { label: 'Nuevos', items: A }];
+  } else if (o.group === 'extras') {
+    const ex = extrasCountByTid();
+    const A = sorted.filter(i => ex[i.tid]), B = sorted.filter(i => !ex[i.tid]);
+    groups = o.group_first === 'a' ? [{ label: 'Con productos extra', items: A }, { label: 'Sin extras', items: B }]
+                                   : [{ label: 'Sin extras', items: B }, { label: 'Con productos extra', items: A }];
+  }
+  groups = groups.filter(g => g.items.length);
+  // One postcard / one Lápiz per CUSTOMER: the first of their shipments in the pile.
+  const seen = {};
+  groups.forEach(g => g.items.forEach(i => {
+    i.primary = !i.cust || !seen[i.cust];
+    if (i.cust) seen[i.cust] = true;
+    i.no_postal = i.kind === 'existing' && !i.primary;
+    i.lapiz = !!o.lapiz && i.kind === 'new' && i.primary;
+  }));
+  return groups;
+}
+
+function counts() {
+  const list = infos();
+  const custKind = {};
+  list.forEach(i => { if (i.cust) custKind[i.cust] = i.kind; });
+  const kinds = Object.values(custKind);
+  return {
+    shipments: list.length,
+    newC: kinds.filter(k => k === 'new').length,
+    existingC: kinds.filter(k => k === 'existing').length,
+    unknownC: list.filter(i => !i.cust).length,
+    postcards: kinds.filter(k => k === 'existing').length,
+  };
+}
+
+function candidateById(oid) { return (S.ctx.candidates || []).find(c => c.order_id === oid); }
+
+function extraTitle(c) {
+  const n = VP.itemCount(c.products);
+  if (c.channel === 'Shopify') {
+    const num = String(c.shopify_order_number || '').replace(/^#/, '');
+    return `Shopify ${num ? '#' + num : ''} · ${plural(n, 'producto', 'productos')}`.replace('  ', ' ');
+  }
+  if (c.channel === 'Nota') return 'Nota';
+  return `Manual · ${plural(n, 'producto', 'productos')}`;
+}
+function extraLines(c) {
+  if (c.channel === 'Nota') return [c.products];
+  const lines = VP.parseProducts(c.products).map(p => `${p.qty}× ${p.name}`);
+  if (c.notes && !/^https?:\/\//.test(c.notes.trim())) lines.push('Nota: ' + c.notes);
+  return lines;
+}
+
+// ── configure UI ──────────────────────────────────────────────────────────
+function renderConfigure() {
+  const el = $('configure');
+  el.style.display = 'block';
+  const list = infos();
+  const c = counts();
+  const groups = stack();
+  const flat = groups.flatMap(g => g.items);
+  const fallbacks = list.filter(i => i.slip && i.slip.ok === false);
+  const noDeadline = list.filter(i => !i.ship_by);
+  const ct = custTids(list);
+
+  const statsHtml = `
+    <div class="imp-card">
+      <h3>Esta importación <small>· ${esc(S.importId)}</small></h3>
+      <div class="imp-stats">
+        <div class="imp-stat"><b>${c.shipments}</b><span>Envíos</span></div>
+        <div class="imp-stat"><b>${c.newC}</b><span>Clientes nuevos</span></div>
+        <div class="imp-stat"><b>${c.existingC}</b><span>Clientes existentes</span></div>
+        <div class="imp-stat"><b>${c.postcards}</b><span>Postales</span></div>
+        ${c.unknownC ? `<div class="imp-stat" style="background:var(--amber-bg)"><b>${c.unknownC}</b><span>Sin cliente</span></div>` : ''}
+      </div>
+      ${c.unknownC ? `<div class="imp-warn">⚠ ${plural(c.unknownC, 'envío no tiene', 'envíos no tienen')} cliente asignado (se imprimen con "? env", sin Lápiz ni postal). Resuelve los posibles duplicados de arriba para corregirlo.</div>` : ''}
+      ${noDeadline.length ? `<div class="imp-warn">⚠ ${plural(noDeadline.length, 'envío sin', 'envíos sin')} fecha límite leída: ${noDeadline.map(i => esc('@' + i.username)).join(', ')}</div>` : ''}
+    </div>`;
+
+  const fbHtml = fallbacks.length ? `
+    <div class="imp-card">
+      <h3>Hojas en formato básico <small>· se imprimen como antes (solo usuario y envíos)</small></h3>
+      ${fallbacks.map(i => `<div class="imp-bad"><b>@${esc(i.username)}</b> · ${esc(i.tid)} — ${esc(i.slip.reason || '')}${i.slip.detail ? ': ' + esc(i.slip.detail) : ''}</div>`).join('')}
+      <div class="imp-muted">Los productos extra de estos envíos no se imprimen; al generar el PDF verás la lista para anotarlos a mano.</div>
+    </div>` : '';
+
+  // Notas (CSV messages): visual warning + edit + product assignment slot
+  const notas = S.ctx.notas || [];
+  const notaHtml = notas.length ? `
+    <div class="imp-card">
+      <h3><span class="nota-tag">Nota</span> Mensajes en esta importación <small>· ${notas.length}</small></h3>
+      <div class="imp-muted" style="margin-bottom:6px">Ya están en Pedidos como Anotado. Puedes acortar o aclarar el texto que se imprime en la hoja, y marcar a qué producto se refiere.</div>
+      ${notas.map(n => {
+        const i = list.find(x => x.tid === n.linked_shipment) || {};
+        const ed = S.notaEdit[n.order_id] || { text: n.text, assigned: '' };
+        const cands = String(n.candidates || '').split(';').map(x => x.trim()).filter(Boolean);
+        return `<div class="imp-nota">
+          <b>@${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
+          ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
+          <textarea data-nota="${esc(n.order_id)}" oninput="IMP.editNota(this.dataset.nota, this.value)">${esc(ed.text)}</textarea>
+          ${cands.length > 1 ? `<select data-nota="${esc(n.order_id)}" onchange="IMP.assignNota(this.dataset.nota, this.value)">
+            <option value="">¿A qué producto se refiere? (opcional)</option>
+            ${cands.map(p => `<option value="${esc(p)}"${ed.assigned === p ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+          </select>` : ''}
+        </div>`;
+      }).join('')}
+    </div>` : '';
+
+  // Extras per customer
+  const byCust = {};
+  (S.ctx.candidates || []).forEach(cd => {
+    const cust = candidateCust(cd, list);
+    if (cust) (byCust[cust] = byCust[cust] || []).push(cd);
+  });
+  const custName = cust => {
+    if (cust.startsWith('USER:')) return '@' + ((list.find(i => i.tid === cust.slice(5)) || {}).username || '');
+    const tids = ct[cust] || [];
+    return tids.map(t => '@' + (list.find(i => i.tid === t) || {}).username).join(' / ');
+  };
+  const extrasHtml = Object.keys(byCust).length ? `
+    <div class="imp-card">
+      <h3>Pedidos pendientes de Shopify / Manual <small>· marca lo que va en el paquete</small></h3>
+      <div class="imp-muted" style="margin-bottom:4px">Solo lo marcado se imprime en la hoja. Al generar el PDF quedan como Anotado y vinculados al pedido de TikTok.</div>
+      ${Object.entries(byCust).map(([cust, cds]) => {
+        const tids = cust.startsWith('USER:') ? [cust.slice(5)] : (ct[cust] || []);
+        return `<div class="imp-cust">
+          <div class="imp-cust-head">${esc(custName(cust))} <span class="imp-muted">${cust.startsWith('USER:') ? '(sin Customer ID, por usuario)' : esc(cust)}</span>
+            <button class="imp-mini" style="margin-left:6px" data-cust="${esc(cust)}" onclick="IMP.markAll(this.dataset.cust)">Marcar todos</button></div>
+          ${cds.map(cd => {
+            const sel = S.extraSel[cd.order_id] || {};
+            return `<div class="imp-item">
+              <input type="checkbox" ${sel.checked ? 'checked' : ''} data-oid="${esc(cd.order_id)}" onchange="IMP.toggleExtra(this.dataset.oid, this.checked)">
+              <div style="flex:1;min-width:0">
+                <div><b>${cd.channel === 'Nota' ? '<span class="nota-tag">Nota</span>' : esc(extraTitle(cd))}</b>
+                  ${cd.status === 'No Pagado' ? ' <span class="imp-nopagado">⚠ No pagado</span>' : ''}
+                  ${sel.prelinked ? ' <span class="imp-muted">(ya estaba anotado)</span>' : ''}</div>
+                <div class="imp-muted">${esc(extraLines(cd).join(' · '))}</div>
+                ${tids.length > 1 ? `<div style="margin-top:4px">Va con:
+                  <select data-oid="${esc(cd.order_id)}" onchange="IMP.setExtraTid(this.dataset.oid, this.value)">
+                    <option value="">— elegir pedido —</option>
+                    ${tids.map(t => { const ii = list.find(x => x.tid === t) || {}; return `<option value="${esc(t)}"${sel.tid === t ? ' selected' : ''}>@${esc(ii.username)} · ${esc(t)}</option>`; }).join('')}
+                  </select></div>` : ''}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('')}
+    </div>` : `<div class="imp-card"><h3>Pedidos pendientes de Shopify / Manual</h3><div class="imp-muted">Ningún cliente de esta importación tiene pedidos pendientes.</div></div>`;
+
+  // Multiple shipments of one customer -> NO POSTAL
+  const multi = Object.entries(ct).filter(([cust, tids]) => tids.length > 1);
+  const multiHtml = multi.length ? `
+    <div class="imp-card">
+      <h3>Clientes con varios envíos <small>· una sola postal / un solo Lápiz</small></h3>
+      ${multi.map(([cust, tids]) => {
+        const items = flat.filter(i => i.cust === cust);
+        return `<div class="imp-list-item"><b>${esc(cust)}</b>: ${items.map(i => `@${esc(i.username)}${i.no_postal ? ' <b>NO POSTAL</b>' : i.primary ? ' ✓' : ''}`).join(' · ')}</div>`;
+      }).join('')}
+    </div>` : '';
+
+  const o = S.opts;
+  const optHtml = `
+    <div class="imp-card">
+      <h3>Orden de impresión</h3>
+      <div class="imp-row">
+        <select onchange="IMP.setOpt('sort', this.value)">
+          <option value="az"${o.sort === 'az' ? ' selected' : ''}>A → Z (usuario TikTok)</option>
+          <option value="za"${o.sort === 'za' ? ' selected' : ''}>Z → A (usuario TikTok)</option>
+          <option value="deadline"${o.sort === 'deadline' ? ' selected' : ''}>Fecha límite (la más próxima primero)</option>
+        </select>
+        <select onchange="IMP.setOpt('group', this.value)">
+          <option value="none"${o.group === 'none' ? ' selected' : ''}>Sin agrupar</option>
+          <option value="newexist"${o.group === 'newexist' ? ' selected' : ''}>Agrupar: nuevos / existentes</option>
+          <option value="extras"${o.group === 'extras' ? ' selected' : ''}>Agrupar: con extras / sin extras</option>
+        </select>
+        ${o.group !== 'none' ? `<select onchange="IMP.setOpt('group_first', this.value)">
+          <option value="a"${o.group_first === 'a' ? ' selected' : ''}>${o.group === 'newexist' ? 'Nuevos' : 'Con extras'} primero</option>
+          <option value="b"${o.group_first === 'b' ? ' selected' : ''}>${o.group === 'newexist' ? 'Existentes' : 'Sin extras'} primero</option>
+        </select>
+        <label><input type="checkbox" ${o.blank_between ? 'checked' : ''} onchange="IMP.setOpt('blank_between', this.checked)"> Hoja en blanco entre grupos</label>` : ''}
+      </div>
+      <div class="imp-row">
+        <label><input type="checkbox" ${o.lapiz ? 'checked' : ''} onchange="IMP.setOpt('lapiz', this.checked)"> "${esc(S.settings.slip.lapiz_text)}" en clientes nuevos</label>
+        <label><input type="checkbox" ${o.invert ? 'checked' : ''} onchange="IMP.setOpt('invert', this.checked)"> Invertir para la impresora (la primera hoja impresa queda abajo)</label>
+      </div>
+      <div class="imp-muted">Orden de la pila (de arriba hacia abajo): ${groups.map(g => (g.label ? `<b>${esc(g.label)}</b>: ` : '') + g.items.slice(0, 6).map(i => esc('@' + i.username)).join(', ') + (g.items.length > 6 ? ` … (+${g.items.length - 6})` : '')).join(' | ')}</div>
+    </div>`;
+
+  const genHtml = `
+    <div class="imp-card">
+      <h3>Generar PDF de guías</h3>
+      <div class="imp-btns">
+        <button class="imp-btn primary" id="gen-btn" onclick="IMP.generate('full')" ${S.busy ? 'disabled' : ''}>${S.render ? 'Volver a generar PDF' : 'Generar PDF'}</button>
+        <button class="imp-btn" onclick="IMP.generate('basic')" ${S.busy ? 'disabled' : ''}>Generar en formato básico</button>
+        ${S.combinedCsv ? '<button class="imp-btn" onclick="IMP.downloadCombinedCsv()">CSV combinado</button>' : ''}
+      </div>
+      ${S.render ? renderReportHtml() : ''}
+    </div>`;
+
+  el.innerHTML = statsHtml + fbHtml + notaHtml + extrasHtml + multiHtml + optHtml + genHtml + funFactCardHtml();
+  if (!S.facts) loadFacts().then(() => { const f = $('ff-card'); if (f) f.outerHTML = funFactCardHtml(); });
+}
+
+function legacyButtonsHtml() {
+  return `<div class="imp-card"><h3>PDF anotado (como antes)</h3><div class="imp-btns">
+    ${S.legacyPdf ? '<button class="imp-btn primary" onclick="IMP.downloadLegacy()">Descargar PDF anotado</button>' : ''}
+    ${S.combinedCsv ? '<button class="imp-btn" onclick="IMP.downloadCombinedCsv()">CSV combinado</button>' : ''}</div></div>`;
+}
+
+function setOpt(k, v) { S.opts[k] = v; renderConfigure(); }
+function toggleExtra(oid, on) {
+  const s = S.extraSel[oid];
+  if (s) s.checked = on;
+  renderConfigure();
+}
+function setExtraTid(oid, tid) { const s = S.extraSel[oid]; if (s) s.tid = tid; renderConfigure(); }
+function markAll(cust) {
+  const list = infos();
+  (S.ctx.candidates || []).forEach(c => { if (candidateCust(c, list) === cust && S.extraSel[c.order_id]) S.extraSel[c.order_id].checked = true; });
+  renderConfigure();
+}
+function editNota(id, text) { (S.notaEdit[id] = S.notaEdit[id] || {}).text = text; }
+function assignNota(id, v) { (S.notaEdit[id] = S.notaEdit[id] || {}).assigned = v; }
+
+// ── 3) GENERATE ───────────────────────────────────────────────────────────
+function buildPlan(mode) {
+  const groups = stack();
+  const ships = {};
+  const notaByTid = {};
+  (S.ctx.notas || []).forEach(n => {
+    const ed = S.notaEdit[n.order_id] || {};
+    const text = String(ed.text == null ? n.text : ed.text).trim();
+    if (text === String(n.original || n.text).trim()) return;    // unchanged -> slip prints the CSV text
+    const key = n.source === 'Vendedor' ? 'seller' : 'buyer';
+    const t = (notaByTid[n.linked_shipment] = notaByTid[n.linked_shipment] || {});
+    (t[n.nota_pedido] = t[n.nota_pedido] || {})[key] = text;
+  });
+  const extrasByTid = {};
+  Object.entries(S.extraSel).forEach(([oid, s]) => {
+    if (!s.checked || !s.tid) return;
+    const c = candidateById(oid);
+    if (c) (extrasByTid[s.tid] = extrasByTid[s.tid] || []).push({ title: extraTitle(c), lines: extraLines(c), order_id: oid });
+  });
+  groups.forEach(g => g.items.forEach(i => {
+    ships[i.tid] = {
+      username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
+      extras: (extrasByTid[i.tid] || []).map(x => ({ title: x.title, lines: x.lines })),
+      note_edits: notaByTid[i.tid] || {},
+    };
+  }));
+  let seq = [];
+  groups.forEach((g, k) => {
+    if (k > 0 && S.opts.blank_between) seq.push({ type: 'blank' });
+    g.items.forEach(i => seq.push({ type: 'shipment', tracking_id: i.tid }));
+  });
+  if (S.opts.invert) seq = seq.reverse();
+  return { mode, sequence: seq, shipments: ships, extrasByTid };
+}
+
+async function generate(mode) {
+  if (S.busy) return;
+  hideError();
+  const missing = Object.entries(S.extraSel).filter(([oid, s]) => s.checked && !s.tid);
+  if (missing.length) {
+    showError(`Elige a qué pedido de TikTok va ${plural(missing.length, 'el producto extra marcado', 'cada uno de los productos extra marcados')} (clientes con varios envíos).`);
+    return;
+  }
+  S.busy = true;
+  renderConfigure();
+  setProgress(true, 'Generando PDF…', 40);
+  try {
+    if (!S.pdfB64 || !S.csvB64) throw new Error('Faltan los archivos originales. Reabre la importación desde Historial.');
+    const plan = buildPlan(mode);
+    const sendPlan = Object.assign({}, plan);
+    delete sendPlan.extrasByTid;
+    const res = await callImporter({ op: 'render', csv_base64: S.csvB64, pdf_base64: S.pdfB64, plan: sendPlan,
+                                     settings: { slip: S.settings.slip } });
+    setProgress(true, 'Marcando productos como Anotado…', 80);
+    S.render = { report: res.report || {}, pdf: res.pdf_base64, plan, at: new Date(), mode };
+    openPdf(res.pdf_base64, `guias_${S.importId}.pdf`);
+    await finalizeLinks();
+    S.render.manual = manualList();
+    setProgress(false);
+    S.busy = false;
+    renderConfigure();
+    const rep = S.render.report;
+    logFields({ 'PDF Generated': new Date().toISOString(), 'Rebuilt': rep.rebuilt || 0, 'Basic': rep.basic || 0,
+                'Settings': { print: S.opts, slip: S.settings.slip }, 'Linked': S.log['Linked'] || {} });
+    queueUpload('output_pdf', `guias_${S.importId}.pdf`, 'application/pdf', res.pdf_base64);
+    showToast(`PDF listo: ${rep.rebuilt || 0} hojas nuevas, ${rep.basic || 0} en formato básico`);
+  } catch (e) {
+    setProgress(false);
+    S.busy = false;
+    renderConfigure();
+    showError('No se pudo generar el PDF: ' + e.message + (S.legacyPdf ? ' — Mientras tanto puedes usar el PDF anotado de la importación (botón abajo).' : ''));
+    if (S.legacyPdf) $('configure').insertAdjacentHTML('afterbegin', legacyButtonsHtml());
+  }
+}
+
+// Only what is REALLY printed becomes Anotado. Unprinted items stay as they were.
+async function finalizeLinks() {
+  const rep = (S.render && S.render.report && S.render.report.shipments) || {};
+  const rebuilt = new Set(Object.keys(rep).filter(t => rep[t].mode === 'rebuilt'));
+  const prev = (S.log && S.log['Linked']) || {};
+  const links = [];
+  const newLinked = {};
+  Object.entries(S.extraSel).forEach(([oid, s]) => {
+    if (!s.checked || !s.tid || !rebuilt.has(s.tid)) return;
+    const c = candidateById(oid) || {};
+    const prevStatus = prev[oid] ? prev[oid].prev : (c.status === 'Anotado' ? 'Pagado' : c.status);
+    if (s.prelinked && !prev[oid] && c.linked_shipment === s.tid) return;   // human link, already right
+    links.push({ order_id: oid, tracking_id: s.tid });
+    newLinked[oid] = { tid: s.tid, prev: prevStatus || 'Pagado' };
+  });
+  const unlinks = [];
+  Object.entries(prev).forEach(([oid, p]) => {
+    if (!newLinked[oid]) unlinks.push({ order_id: oid, restore_status: p.prev || 'Pagado' });
+  });
+  Object.entries(S.extraSel).forEach(([oid, s]) => {
+    if (s.prelinked && !s.checked && !prev[oid]) unlinks.push({ order_id: oid, restore_status: 'Pagado' });
+  });
+  const nota_edits = [];
+  (S.ctx.notas || []).forEach(n => {
+    const ed = S.notaEdit[n.order_id] || {};
+    const text = String(ed.text == null ? n.text : ed.text).trim();
+    const assigned = ed.assigned || '';
+    if (text !== String(n.text).trim() || assigned !== (n.assigned || '')) nota_edits.push({ order_id: n.order_id, text, assigned });
+  });
+  if (!links.length && !unlinks.length && !nota_edits.length) return;
+  try {
+    const r = await VP.post({ action: 'import_finalize', tracking_ids: infos().map(i => i.tid), links, unlinks, nota_edits });
+    S.log['Linked'] = newLinked;
+    S.render.finalize = r;
+    await loadContext();
+    initSelectionsKeep();
+  } catch (e) {
+    // TROUBLESHOOT: Apps Script import_finalize failed. The PDF is fine, but
+    // the extras were NOT marked Anotado -- mark them by hand in Pedidos.
+    S.render.finalizeError = e.message;
+  }
+}
+// After finalize the context is reloaded; keep the user's choices.
+function initSelectionsKeep() {
+  const keep = S.extraSel;
+  const keepNota = S.notaEdit;
+  initSelections();
+  Object.keys(S.extraSel).forEach(oid => { if (keep[oid]) S.extraSel[oid] = Object.assign(S.extraSel[oid], { checked: keep[oid].checked, tid: keep[oid].tid || S.extraSel[oid].tid }); });
+  Object.keys(keepNota).forEach(id => { if (S.notaEdit[id]) S.notaEdit[id] = keepNota[id]; });
+}
+
+// Per CUST: what must be added by hand because the slip fell back to basic.
+function manualList() {
+  const rep = (S.render.report && S.render.report.shipments) || {};
+  const plan = S.render.plan;
+  const list = infos();
+  const out = {};
+  Object.entries(rep).forEach(([tid, r]) => {
+    if (r.mode === 'rebuilt') return;
+    const ship = plan.shipments[tid] || {};
+    const i = list.find(x => x.tid === tid) || { username: '', cust: '' };
+    const items = [];
+    if (ship.lapiz) items.push(`Agregar: ${S.settings.slip.lapiz_text}`);
+    (plan.extrasByTid[tid] || []).forEach(x => {
+      const c = candidateById(x.order_id) || {};
+      items.push(c.channel === 'Nota' ? `Nota: ${c.products}` : x.title.replace(' · ', ' - ').replace('productos', 'Productos').replace('producto', 'Producto'));
+    });
+    if (!items.length) return;
+    const key = i.cust || ('@' + i.username);
+    (out[key] = out[key] || { name: '@' + i.username, items: [] }).items.push(...items);
+  });
+  return out;
+}
+
+function renderReportHtml() {
+  const r = S.render;
+  const rep = r.report || {};
+  const list = infos();
+  const basics = Object.entries(rep.shipments || {}).filter(([t, x]) => x.mode !== 'rebuilt' && x.code !== 'BASIC_REQUESTED');
+  const manual = r.manual || {};
+  return `
+    <div class="${basics.length ? 'imp-warn' : 'imp-ok'}" style="margin-top:10px">
+      ${r.mode === 'basic' ? 'PDF en formato básico.' : `✓ ${rep.rebuilt || 0} hojas nuevas · ${rep.basic || 0} en formato básico`} · ${rep.pages || 0} páginas · ${VP.fmtDateTime(r.at)}
+    </div>
+    ${basics.map(([t, x]) => { const i = list.find(z => z.tid === t) || {}; return `<div class="imp-bad">@${esc(i.username || '')} · ${esc(t)} — ${esc(x.reason)}${x.detail ? ': ' + esc(x.detail) : ''}</div>`; }).join('')}
+    ${(rep.warnings || []).map(w => `<div class="imp-warn">${esc(w)}</div>`).join('')}
+    ${Object.keys(manual).length ? `<div class="imp-bad"><b>Anotar a mano (no se imprimió en la hoja):</b>
+      ${Object.entries(manual).map(([k, m]) => `<div class="imp-fallback-cust">${esc(k)} · ${esc(m.name)}</div><ul>${m.items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`).join('')}
+      <div class="imp-muted">Estos productos NO se marcaron como Anotado.</div></div>` : ''}
+    ${r.finalize ? `<div class="imp-muted">Pedidos: ${r.finalize.linked || 0} anotados, ${r.finalize.unlinked || 0} desvinculados, ${r.finalize.edited || 0} notas editadas${(r.finalize.skipped || []).length ? ' · ⚠ ' + r.finalize.skipped.map(s => esc(s.order_id + ' (' + s.reason + ')')).join(', ') : ''}</div>` : ''}
+    ${r.finalizeError ? `<div class="imp-bad">⚠ No se pudieron marcar los productos extra como Anotado: ${esc(r.finalizeError)}. Márcalos a mano en Pedidos.</div>` : ''}
+    <div class="imp-btns"><button class="imp-btn" onclick="IMP.reopenPdf()">Abrir PDF otra vez</button></div>`;
+}
+
+function reopenPdf() { if (S.render && S.render.pdf) openPdf(S.render.pdf, `guias_${S.importId}.pdf`); }
+function downloadLegacy() { if (S.legacyPdf) openPdf(S.legacyPdf, `guias_anotadas_${S.importId}.pdf`); }
+function downloadCombinedCsv() { if (S.combinedCsv) downloadB64(S.combinedCsv, 'text/csv', `Combined_Orders_To_Ship_${S.importId}.csv`); }
+
+// ── fun facts (postcard stickers) ─────────────────────────────────────────
+async function loadFacts() {
+  try { S.facts = (await VP.get('action=funfacts_list')).facts || []; }
+  catch (e) { S.facts = S.facts || []; console.warn('[importar] fun facts load failed', e); }
+  return S.facts;
+}
+function pendingFacts() { return (S.facts || []).filter(f => f['Status'] !== 'Usado'); }
+function currentFact() {
+  const all = S.facts || [];
+  if (S.factId) return all.find(f => f['ID'] === S.factId) || null;
+  return pendingFacts()[0] || null;
+}
+function funFactCardHtml() {
+  if (!S.result) return '';
+  const c = counts();
+  const f = currentFact();
+  const copies = S.copies == null ? c.postcards : S.copies;
+  const pend = pendingFacts();
+  return `<div class="imp-card" id="ff-card">
+    <h3>Dato curioso para las postales <small>· ${plural(c.postcards, 'cliente existente', 'clientes existentes')}</small></h3>
+    ${S.facts == null ? '<div class="imp-muted">Cargando…</div>' : f ? `
+      <div class="imp-fact"><div class="grow"><div class="t">${esc(f['Title'])}</div><div>${esc(f['Answer'])}</div>
+        ${f['Status'] === 'Usado' ? `<div class="imp-muted">Usado en ${esc(f['Used Import'] || '')}</div>` : ''}</div></div>
+      <div class="imp-row">
+        ${pend.length > 1 && !(S.log && S.log['Fun Fact ID']) ? `<select onchange="IMP.pickFact(this.value)">${pend.map(p => `<option value="${esc(p['ID'])}"${p['ID'] === (f && f['ID']) ? ' selected' : ''}>${esc(p['Title']).slice(0, 60)}</option>`).join('')}</select>` : ''}
+        <label>Copias <input type="number" min="0" step="1" value="${copies}" onchange="IMP.setCopies(this.value)"></label>
+      </div>
+      <div class="imp-btns"><button class="imp-btn primary" onclick="IMP.generateStickers()">Generar stickers (${copies})</button></div>
+      ${pend.length <= 3 ? `<div class="imp-warn">Quedan ${pend.length} datos curiosos en el pool. Agrega más en la pestaña "Datos curiosos".</div>` : ''}`
+    : '<div class="imp-warn">No hay datos curiosos en el pool. Agrégalos en la pestaña "Datos curiosos".</div>'}
+  </div>`;
+}
+function pickFact(id) { S.factId = id; refreshFactCard(); }
+function setCopies(v) { S.copies = Math.max(0, parseInt(v, 10) || 0); refreshFactCard(); }
+function refreshFactCard() { const el = $('ff-card'); if (el) el.outerHTML = funFactCardHtml(); }
+
+async function generateStickers() {
+  const f = currentFact();
+  if (!f) return;
+  const copies = S.copies == null ? counts().postcards : S.copies;
+  try {
+    setProgress(true, 'Generando stickers…', 50);
+    const r = await callImporter({ op: 'funfacts', fact: { title: f['Title'], answer: f['Answer'] }, copies,
+                                   settings: { sticker: S.settings.sticker } });
+    setProgress(false);
+    openPdf(r.pdf_base64, `stickers_${S.importId}.pdf`);
+    if (r.info && r.info.warning) showError('⚠ ' + r.info.warning);
+    S.factId = f['ID'];
+    await VP.post({ action: 'funfacts_mark_used', id: f['ID'], import_id: S.importId });
+    logFields({ 'Fun Fact ID': f['ID'], 'Fun Fact Title': f['Title'], 'Stickers': copies });
+    S.log['Fun Fact ID'] = f['ID'];
+    queueUpload('stickers_pdf', `stickers_${S.importId}.pdf`, 'application/pdf', r.pdf_base64);
+    await loadFacts();
+    refreshFactCard();
+  } catch (e) {
+    setProgress(false);
+    showError('No se pudieron generar los stickers: ' + e.message);
+  }
+}
+
+// ── Historial ─────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const el = $('hist-list');
+  el.innerHTML = 'Cargando…';
+  try {
+    const recs = (await VP.get('action=import_log_list&days=7')).records || [];
+    if (!recs.length) { el.innerHTML = 'Sin importaciones en los últimos 7 días.'; return; }
+    el.innerHTML = recs.map(r => {
+      const files = r['Files'] || {};
+      const btn = (kind, label) => files[kind] ? `<button class="imp-mini" onclick="IMP.histFile('${esc(r['Import ID'])}','${kind}')">${label}</button>` : '';
+      return `<div class="imp-hist">
+        <div><b>${esc(VP.fmtDateTime(r['Created']))}</b> · ${esc(r['By'] || '')} · <span class="imp-muted">${esc(r['Import ID'])}</span></div>
+        <div class="imp-muted">${r['Shipments'] || 0} envíos · ${r['New Customers'] || 0} nuevos · ${r['Existing Customers'] || 0} existentes
+          ${r['PDF Generated'] ? ` · PDF: ${r['Rebuilt'] || 0} nuevas / ${r['Basic'] || 0} básicas` : ' · <b>PDF sin generar</b>'}
+          ${r['Fun Fact Title'] ? ` · Dato: ${esc(r['Fun Fact Title'])} (${r['Stickers'] || 0})` : ''}</div>
+        <div class="imp-btns" style="margin-top:6px">
+          ${btn('output_pdf', 'PDF guías')}${btn('stickers_pdf', 'Stickers')}${btn('original_pdf', 'PDF original')}${btn('original_csv', 'CSV original')}
+          ${files.original_pdf && files.original_csv && files.result ? `<button class="imp-mini" onclick="IMP.reopen('${esc(r['Import ID'])}')"><b>Reabrir</b></button>` : ''}
+          ${r['Status'] === 'Archivos borrados' ? '<span class="imp-muted">archivos borrados (más de 7 días)</span>' : ''}
+        </div></div>`;
+    }).join('');
+    S.histRecords = recs;
+  } catch (e) {
+    el.innerHTML = `<div class="imp-bad">No se pudo cargar el historial: ${esc(e.message)}</div>`;
+  }
+}
+async function fetchHistFile(id, kind) {
+  return VP.get(`action=import_file_get&import_id=${encodeURIComponent(id)}&kind=${encodeURIComponent(kind)}`);
+}
+async function histFile(id, kind) {
+  try {
+    showToast('Descargando…');
+    const f = await fetchHistFile(id, kind);
+    if (/pdf/.test(f.mime || '') || /\.pdf$/i.test(f.name)) openPdf(f.base64, f.name);
+    else downloadB64(f.base64, f.mime || 'application/octet-stream', f.name);
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+// Re-open: no re-import, nothing written again -- only the configure step.
+async function reopen(id) {
+  const rec = (S.histRecords || []).find(r => r['Import ID'] === id);
+  if (!rec) return;
+  if (S.result && !S.render && !confirm('Hay una importación abierta sin PDF generado. ¿Reabrir otra de todos modos?')) return;
+  tab('importar');
+  hideError();
+  resetImportUi();
+  setProgress(true, 'Cargando archivos del historial…', 30);
+  try {
+    if (!S.settingsLoaded) await loadSettings();
+    const [csvF, pdfF, resF] = await Promise.all([fetchHistFile(id, 'original_csv'), fetchHistFile(id, 'original_pdf'), fetchHistFile(id, 'result')]);
+    S.importId = id;
+    S.csvName = rec['CSV Name']; S.pdfName = rec['PDF Name'];
+    S.csvB64 = csvF.base64; S.pdfB64 = pdfF.base64;
+    S.log = rec;
+    setProgress(true, 'Cargando pedidos pendientes…', 70);
+    await startImport(JSON.parse(b64ToText(resF.base64)), { reopen: true });
+    setProgress(false);
+    showToast('Importación reabierta: ' + id);
+  } catch (e) {
+    setProgress(false);
+    showError('No se pudo reabrir: ' + e.message);
+  }
+}
+
+// ── Datos curiosos pane ───────────────────────────────────────────────────
+function parseBulk(text) {
+  const t = String(text || '').replace(/\r/g, '').trim();
+  if (!t) return [];
+  const lines = t.split('\n');
+  if (lines.some(l => l.includes('\t'))) {
+    return lines.map(l => l.split('\t')).filter(p => p[0] && p[0].trim())
+      .map(p => ({ title: p[0].trim(), answer: (p.slice(1).join(' ') || '').trim() }));
+  }
+  return t.split(/\n\s*\n/).map(b => b.split('\n').map(x => x.trim()).filter(Boolean))
+    .filter(b => b.length).map(b => ({ title: b[0], answer: b.slice(1).join(' ') }));
+}
+function ffPreview() {
+  const items = parseBulk($('ff-bulk').value);
+  const bad = items.filter(i => !i.answer);
+  $('ff-preview').innerHTML = items.length
+    ? `${plural(items.length, 'dato listo', 'datos listos')} para agregar${bad.length ? ` · <b style="color:#a32d2d">${plural(bad.length, 'sin respuesta', 'sin respuesta')}</b>` : ''}`
+    : '';
+  $('ff-add-btn').disabled = !items.length;
+}
+async function ffAdd() {
+  const items = parseBulk($('ff-bulk').value);
+  if (!items.length) return;
+  try {
+    const r = await VP.post({ action: 'funfacts_save', ops: items.map(i => ({ op: 'add', title: i.title, answer: i.answer })) });
+    S.facts = r.facts || [];
+    $('ff-bulk').value = '';
+    ffPreview();
+    renderFactsPane();
+    showToast(`✓ ${plural(items.length, 'dato agregado', 'datos agregados')}`);
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+async function ffOp(op) {
+  if (op.op === 'delete' && !confirm('¿Borrar este dato curioso?')) return;
+  if (op.op === 'edit') {
+    const f = (S.facts || []).find(x => x['ID'] === op.id) || {};
+    const title = prompt('Título:', f['Title'] || '');
+    if (title === null) return;
+    const answer = prompt('Respuesta:', f['Answer'] || '');
+    if (answer === null) return;
+    op.title = title; op.answer = answer;
+  }
+  try {
+    const r = await VP.post({ action: 'funfacts_save', ops: [op] });
+    S.facts = r.facts || [];
+    renderFactsPane();
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+function renderFactsPane() {
+  const pend = pendingFacts();
+  const used = (S.facts || []).filter(f => f['Status'] === 'Usado').slice().reverse();
+  $('ff-count').textContent = `· ${pend.length} pendientes (el primero se usa en la próxima importación)`;
+  $('ff-list').innerHTML = pend.length ? pend.map((f, k) => `
+    <div class="imp-fact"><div class="grow"><div class="t">${k + 1}. ${esc(f['Title'])}</div><div>${esc(f['Answer'])}</div></div>
+      <button class="imp-mini" title="Subir" onclick="IMP.ffOp({op:'move',id:'${esc(f['ID'])}',dir:-1})">↑</button>
+      <button class="imp-mini" title="Bajar" onclick="IMP.ffOp({op:'move',id:'${esc(f['ID'])}',dir:1})">↓</button>
+      <button class="imp-mini" onclick="IMP.ffOp({op:'edit',id:'${esc(f['ID'])}'})">Editar</button>
+      <button class="imp-mini" onclick="IMP.ffOp({op:'delete',id:'${esc(f['ID'])}'})">Borrar</button></div>`).join('')
+    : 'El pool está vacío.';
+  $('ff-used').innerHTML = used.length ? used.map(f => `
+    <div class="imp-fact"><div class="grow"><div class="t">${esc(f['Title'])}</div><div>${esc(f['Answer'])}</div>
+      <div class="imp-muted">${esc(VP.fmtDateTime(f['Used Date']))} · ${esc(f['Used Import'] || '')}</div></div>
+      <button class="imp-mini" onclick="IMP.ffOp({op:'restore',id:'${esc(f['ID'])}'})">Devolver al pool</button></div>`).join('')
+    : '—';
+}
+
+// ── Ajustes pane ──────────────────────────────────────────────────────────
+const SLIP_FIELDS = [
+  ['name_size', 'Nombre del producto'], ['sku_size', 'SKU (variación)'], ['seller_size', 'Seller SKU'],
+  ['qty_size', 'Cantidad (Qty)'], ['total_size', 'Qty Total'], ['note_size', 'Mensajes / notas'],
+  ['order_size', 'Order ID (notas)'], ['extras_size', 'Productos extra'], ['lapiz_size', 'Lápiz Infinito'],
+  ['deadline_size', 'Fecha límite (pie)'], ['footer_id_size', 'Order ID (pie)'], ['user_size', 'Usuario (rojo)'],
+  ['header_size', 'Encabezados'],
+];
+const STICKER_FIELDS = [
+  ['width_mm', 'Ancho (mm)'], ['height_mm', 'Alto (mm)'], ['margin_top', 'Margen arriba (mm)'],
+  ['margin_right', 'Margen derecha (mm)'], ['margin_bottom', 'Margen abajo (mm)'], ['margin_left', 'Margen izquierda (mm)'],
+  ['title_size', 'Título (pt, máx.)'], ['answer_size', 'Respuesta (pt, máx.)'], ['gap_mm', 'Espacio título-respuesta (mm)'],
+];
+const FONT_OPTS = [['atkinson', 'Atkinson Hyperlegible'], ['roboto', 'Roboto'], ['helvetica', 'Helvetica']];
+
+async function renderSettings() {
+  if (!S.settingsLoaded) await loadSettings();
+  const s = S.settings;
+  const fontSel = (id, v) => `<select id="${id}">${FONT_OPTS.map(([k, l]) => `<option value="${k}"${v === k ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+  const num = (grp, k, l) => `<label>${l}<input type="number" step="0.5" id="set-${grp}-${k}" value="${esc(s[grp][k])}"></label>`;
+  const p = s.print;
+  $('settings-form').innerHTML = `
+    <div class="imp-card"><h3>Hoja de empaque <small>· tamaños en puntos (pt)</small></h3>
+      <div class="imp-grid">
+        <label>Fuente ${fontSel('set-slip-font', s.slip.font)}</label>
+        <label>Texto Lápiz <input type="text" id="set-slip-lapiz_text" value="${esc(s.slip.lapiz_text)}"></label>
+        ${SLIP_FIELDS.map(([k, l]) => num('slip', k, l)).join('')}
+      </div></div>
+    <div class="imp-card"><h3>Stickers de datos curiosos</h3>
+      <div class="imp-grid">
+        <label>Fuente ${fontSel('set-sticker-font', s.sticker.font)}</label>
+        <label>Alineación <select id="set-sticker-align"><option value="center"${s.sticker.align === 'center' ? ' selected' : ''}>Centrado</option><option value="left"${s.sticker.align === 'left' ? ' selected' : ''}>Izquierda</option></select></label>
+        ${STICKER_FIELDS.map(([k, l]) => num('sticker', k, l)).join('')}
+      </div>
+      <div class="imp-btns"><button class="imp-btn" onclick="IMP.testSticker()">Imprimir página de prueba</button></div>
+      <div class="imp-muted">La página de prueba dibuja un rectángulo en los márgenes. Ajusta hasta que quede centrado en el sticker.</div></div>
+    <div class="imp-card"><h3>Orden de impresión por defecto</h3>
+      <div class="imp-grid">
+        <label>Orden <select id="set-print-sort"><option value="az"${p.sort === 'az' ? ' selected' : ''}>A → Z</option><option value="za"${p.sort === 'za' ? ' selected' : ''}>Z → A</option><option value="deadline"${p.sort === 'deadline' ? ' selected' : ''}>Fecha límite</option></select></label>
+        <label>Agrupar <select id="set-print-group"><option value="none"${p.group === 'none' ? ' selected' : ''}>No</option><option value="newexist"${p.group === 'newexist' ? ' selected' : ''}>Nuevos / existentes</option><option value="extras"${p.group === 'extras' ? ' selected' : ''}>Con / sin extras</option></select></label>
+        <label>Primer grupo <select id="set-print-group_first"><option value="a"${p.group_first === 'a' ? ' selected' : ''}>Nuevos / con extras</option><option value="b"${p.group_first === 'b' ? ' selected' : ''}>Existentes / sin extras</option></select></label>
+        <label>Hoja en blanco entre grupos <input type="checkbox" id="set-print-blank_between" ${p.blank_between ? 'checked' : ''} style="width:auto"></label>
+        <label>Invertir para la impresora <input type="checkbox" id="set-print-invert" ${p.invert ? 'checked' : ''} style="width:auto"></label>
+        <label>Lápiz Infinito a nuevos <input type="checkbox" id="set-print-lapiz" ${p.lapiz ? 'checked' : ''} style="width:auto"></label>
+      </div></div>
+    <div class="imp-btns"><button class="imp-btn primary" onclick="IMP.saveSettings()">Guardar ajustes</button>
+      <button class="imp-btn" onclick="IMP.resetSettings()">Restaurar valores de fábrica</button></div>
+    <div class="imp-muted" style="margin-top:6px">Se guardan en el servidor: valen para todos los dispositivos.</div>`;
+}
+function readSettingsForm() {
+  const s = JSON.parse(JSON.stringify(S.settings));
+  s.slip.font = $('set-slip-font').value;
+  s.slip.lapiz_text = $('set-slip-lapiz_text').value.trim() || DEFAULTS.slip.lapiz_text;
+  SLIP_FIELDS.forEach(([k]) => { const v = parseFloat($('set-slip-' + k).value); if (!isNaN(v)) s.slip[k] = v; });
+  s.sticker.font = $('set-sticker-font').value;
+  s.sticker.align = $('set-sticker-align').value;
+  STICKER_FIELDS.forEach(([k]) => { const v = parseFloat($('set-sticker-' + k).value); if (!isNaN(v)) s.sticker[k] = v; });
+  ['sort', 'group', 'group_first'].forEach(k => { s.print[k] = $('set-print-' + k).value; });
+  ['blank_between', 'invert', 'lapiz'].forEach(k => { s.print[k] = $('set-print-' + k).checked; });
+  return s;
+}
+async function saveSettings() {
+  const s = readSettingsForm();
+  try {
+    await VP.post({ action: 'importar_settings_save', settings: s });
+    S.settings = s;
+    showToast('✓ Ajustes guardados');
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+function resetSettings() {
+  if (!confirm('¿Restaurar todos los ajustes de Importar a los valores de fábrica? (Se guardan al pulsar "Guardar ajustes".)')) return;
+  S.settings = JSON.parse(JSON.stringify(DEFAULTS));
+  renderSettings();
+}
+async function testSticker() {
+  const s = readSettingsForm();
+  try {
+    const r = await callImporter({ op: 'funfacts', test: true, copies: 1, fact: {}, settings: { sticker: s.sticker } });
+    openPdf(r.pdf_base64, 'stickers_prueba.pdf');
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+
+// ── possible matches (same flow as before; refreshes the configure step) ──
+let lastMatches = [];
+let allCustomers = [];
+let activeMatchIdx = null;
 
 function renderMatches(matches) {
-  const list = document.getElementById('matches-list');
-  list.innerHTML = matches.map((m, i) => `
+  $('matches-list').innerHTML = matches.map((m, i) => `
     <div class="match-card" id="match-card-${i}">
-      <div class="match-card-top">
-        <div class="match-username">@${escHtml(m.username)}</div>
-        <div class="match-score">${m.score}% similitud</div>
-      </div>
-      <div class="match-row">Posible match: <strong>${escHtml(m.matched_to)}</strong></div>
-      <div class="match-row">Tracking: <strong>${escHtml(m.tracking_id)}</strong></div>
-     <div class="match-actions">
-        <button class="match-btn primary" onclick="quickConfirm(${i})" style="flex:1.4">✓ Confirmar: ${escHtml(m.matched_to)}</button>
+      <div class="match-card-top"><div class="match-username">@${esc(m.username)}</div><div class="match-score">${m.score}% similitud</div></div>
+      <div class="match-row">Posible match: <strong>${esc(m.matched_to)}</strong></div>
+      <div class="match-row">Tracking: <strong>${esc(m.tracking_id)}</strong></div>
+      <div class="match-actions">
+        <button class="match-btn primary" onclick="quickConfirm(${i})" style="flex:1.4">✓ Confirmar: ${esc(m.matched_to)}</button>
         <button class="match-btn" onclick="openMatchModal(${i})">Ver detalle</button>
         <button class="match-btn" onclick="toggleAssignDropdown(${i})">Otro ▾</button>
       </div>
       <div class="match-assign-wrap" id="match-assign-${i}">
-        <select id="match-select-${i}">
-          <option value="">— Cargando clientes… —</option>
-        </select>
+        <select id="match-select-${i}"><option value="">— Cargando clientes… —</option></select>
         <button class="match-assign-confirm" onclick="confirmAssign(${i})">Confirmar asignación</button>
       </div>
       <div class="match-assigned" id="match-assigned-${i}">✓ Alias asignado</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
-
 function toggleAssignDropdown(i) {
-  const wrap = document.getElementById(`match-assign-${i}`);
-  const isOpen = wrap.style.display === 'block';
-  wrap.style.display = isOpen ? 'none' : 'block';
-  if (!isOpen) populateSelectDropdown(`match-select-${i}`);
+  const wrap = $(`match-assign-${i}`);
+  const open = wrap.style.display === 'block';
+  wrap.style.display = open ? 'none' : 'block';
+  if (!open) populateSelectDropdown(`match-select-${i}`);
 }
-
 async function fetchCustomersForModal() {
-  try {
-    const r = await fetch(`${API}?action=customers&token=${encodeURIComponent(API_TOKEN)}`);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    // Apps Script answers HTTP 200 even for its own errors -- see the
-    // matching fix in VP.get() (common.js).
-    if (data && data.error) throw new Error(data.error);
-    allCustomers = data.records || [];
-  } catch (e) {
-    allCustomers = [];
-  }
+  try { allCustomers = (await VP.get('action=customers')).records || []; } catch (e) { allCustomers = []; }
 }
-
-function populateSelectDropdown(selectId) {
-  const sel = document.getElementById(selectId);
-  if (!sel) return;
-  sel.innerHTML = '<option value="">— Seleccionar cliente —</option>' +
-    allCustomers.map(c =>
-      `<option value="${escHtml(c['Customer ID'])}">${escHtml(c['Primary Username'])} (${escHtml(c['Customer ID'])})</option>`
-    ).join('');
+function customerOptions() {
+  return '<option value="">— Seleccionar cliente —</option>' + allCustomers
+    .filter(c => String(c['Primary Username'] || '').indexOf('(merged→') < 0)
+    .map(c => `<option value="${esc(c['Customer ID'])}">${esc(c['Primary Username'])} (${esc(c['Customer ID'])})</option>`).join('');
 }
-
+function populateSelectDropdown(id) { const s = $(id); if (s) s.innerHTML = customerOptions(); }
 async function confirmAssign(i) {
-  const btn = document.querySelector(`#match-assign-${i} .match-assign-confirm`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
-  const sel   = document.getElementById(`match-select-${i}`);
-  const custId = sel ? sel.value : '';
-  if (!custId) {
-    showToast('Selecciona un cliente primero', true);
-    if (btn) { btn.disabled = false; btn.textContent = 'Confirmar asignación'; }
-    return;
-  }
-  const match = lastMatches[i];
-  await doAddAlias(match.username, custId, i);
+  const custId = ($(`match-select-${i}`) || {}).value;
+  if (!custId) { showToast('Selecciona un cliente primero', true); return; }
+  await doAddAlias(lastMatches[i].username, custId, i);
 }
-
 async function quickConfirm(i) {
-  const match = lastMatches[i];
-  const found = allCustomers.find(c => c['Primary Username'] === match.matched_to);
-  if (!found) {
-    showToast('No se encontró el cliente sugerido, usa "Otro" para buscar manualmente', true);
-    return;
-  }
-  const btn = document.querySelector(`#match-card-${i} .match-btn.primary`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
-  await doAddAlias(match.username, found['Customer ID'], i);
+  const m = lastMatches[i];
+  const found = allCustomers.find(c => c['Primary Username'] === m.matched_to);
+  if (!found) { showToast('No se encontró el cliente sugerido, usa "Otro"', true); return; }
+  await doAddAlias(m.username, found['Customer ID'], i);
 }
-
 async function confirmModalAssign() {
-  const btn = document.querySelector('.modal-actions .confirm');
-  if (btn) { btn.disabled = true; btn.textContent = 'Asignando…'; }
-  const custId = document.getElementById('modal-customer-select').value;
-  if (!custId) {
-    showToast('Selecciona un cliente primero', true);
-    if (btn) { btn.disabled = false; btn.textContent = 'Asignar alias'; }
-    return;
-  }
-  const match = lastMatches[activeMatchIdx];
-  await doAddAlias(match.username, custId, activeMatchIdx);
+  const custId = $('modal-customer-select').value;
+  if (!custId) { showToast('Selecciona un cliente primero', true); return; }
+  await doAddAlias(lastMatches[activeMatchIdx].username, custId, activeMatchIdx);
   closeModal();
 }
-
 async function doAddAlias(username, customerId, cardIdx) {
   try {
-    const r = await fetch(API, {
-      method:  'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body:    JSON.stringify({
-        action:      'add_alias',
-        token:       API_TOKEN,
-        customer_id: customerId,
-        alias:       username,
-      }),
-    });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    if (data.error) throw new Error(data.error);
-
-    // Stamp the customer ID on the unresolved orders
-    const stampR = await fetch(API, {
-      method:  'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body:    JSON.stringify({
-        action: 'stamp_customer_ids',
-        token:  API_TOKEN,
-      }),
-    });
-    if (!stampR.ok) throw new Error('HTTP ' + stampR.status);
-    const stampData = await stampR.json();
-    if (stampData && stampData.error) throw new Error(stampData.error);
-
-    // Mark card as done
-    const assigned = document.getElementById(`match-assigned-${cardIdx}`);
-    if (assigned) assigned.style.display = 'block';
-    const wrap = document.getElementById(`match-assign-${cardIdx}`);
-    if (wrap) wrap.style.display = 'none';
-
+    await VP.post({ action: 'add_alias', customer_id: customerId, alias: username });
+    await VP.post({ action: 'stamp_customer_ids' });
+    const a = $(`match-assigned-${cardIdx}`); if (a) a.style.display = 'block';
+    const w = $(`match-assign-${cardIdx}`); if (w) w.style.display = 'none';
     showToast(`@${username} asignado como alias`);
-  } catch (err) {
-    showToast(`Error al asignar: ${err.message}`, true);
-  }
+    if (S.result && S.result.shipments_meta) {
+      await loadContext();
+      initSelectionsKeep();
+      renderConfigure();
+    }
+  } catch (err) { showToast(`Error al asignar: ${err.message}`, true); }
 }
-
-
-// ── Match modal ───────────────────────────────────────────────────────────────
-
 function openMatchModal(i) {
   activeMatchIdx = i;
   const m = lastMatches[i];
   const e = m.enriched || {};
-
-  document.getElementById('modal-username').textContent  = `@${m.username}`;
-  document.getElementById('modal-score').textContent     = `${m.score}%`;
-  document.getElementById('modal-matched-to').textContent = m.matched_to || '—';
-
-  const name = [e['First Name'], e['Surname']].filter(Boolean).join(' ');
-  setModalField('modal-name',    name);
+  $('modal-username').textContent = `@${m.username}`;
+  $('modal-score').textContent = `${m.score}%`;
+  $('modal-matched-to').textContent = m.matched_to || '—';
+  setModalField('modal-name', [e['First Name'], e['Surname']].filter(Boolean).join(' '));
   setModalField('modal-address', e['Street + Number']);
-  setModalField('modal-location',
-    [e['City'], e['State'], e['ZIP']].filter(Boolean).join(' / ')
-  );
+  setModalField('modal-location', [e['City'], e['State'], e['ZIP']].filter(Boolean).join(' / '));
   setModalField('modal-phone', e['Phone Partial']);
-
-  // Populate dropdown
-  const sel = document.getElementById('modal-customer-select');
-  sel.innerHTML = '<option value="">— Seleccionar cliente —</option>' +
-    allCustomers.map(c =>
-      `<option value="${escHtml(c['Customer ID'])}">${escHtml(c['Primary Username'])} (${escHtml(c['Customer ID'])})</option>`
-    ).join('');
-
-  // Pre-select the suggested match
-  if (m.matched_to) {
-    const found = allCustomers.find(c => c['Primary Username'] === m.matched_to);
-    if (found) sel.value = found['Customer ID'];
-  }
-
-  document.getElementById('match-modal').classList.add('open');
+  const sel = $('modal-customer-select');
+  sel.innerHTML = customerOptions();
+  const found = allCustomers.find(c => c['Primary Username'] === m.matched_to);
+  if (found) sel.value = found['Customer ID'];
+  $('match-modal').classList.add('open');
 }
-
-function closeModal() {
-  document.getElementById('match-modal').classList.remove('open');
-  activeMatchIdx = null;
-}
-
+function closeModal() { $('match-modal').classList.remove('open'); activeMatchIdx = null; }
 function setModalField(id, val) {
-  const el = document.getElementById(id);
+  const el = $(id);
   if (!el) return;
-  if (val) {
-    el.textContent = val;
-    el.classList.remove('empty');
-  } else {
-    el.textContent = 'No disponible';
-    el.classList.add('empty');
-  }
+  el.textContent = val || 'No disponible';
+  el.classList.toggle('empty', !val);
 }
+$('match-modal').addEventListener('click', function (e) { if (e.target === this) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
-// Close modal on overlay click
-document.getElementById('match-modal').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
-});
+// ── public handlers for inline onclick ────────────────────────────────────
+window.IMP = {
+  tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
+  downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
+  ffPreview, ffAdd, ffOp, saveSettings, resetSettings, testSticker,
+};
 
-// Close modal on Esc
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
-});
-
-
-// ── UI helpers ────────────────────────────────────────────────────────────────
-
-function setProgress(visible, label = '', pct = 0) {
-  document.getElementById('progress-wrap').style.display  = visible ? 'block' : 'none';
-  document.getElementById('progress-label').style.display = visible ? 'block' : 'none';
-  document.getElementById('progress-bar').style.width     = `${pct}%`;
-  document.getElementById('progress-label').textContent   = label;
-}
-
-function hideSummary() {
-  document.getElementById('summary-card').style.display         = 'none';
-  document.getElementById('matches-section').style.display      = 'none';
-  document.getElementById('new-customers-section').style.display = 'none';
-}
-
-function showError(msg) {
-  const box = document.getElementById('error-box');
-  box.textContent = `Error: ${msg}`;
-  box.style.display = 'block';
-}
-
-function hideError() {
-  document.getElementById('error-box').style.display = 'none';
-}
-
-function showToast(msg, isError = false) {
-  const t = document.getElementById('toast');
-  t.textContent  = msg;
-  t.style.background = isError ? 'var(--red-text)' : '';
-  t.classList.add('show');
-  setTimeout(() => { t.classList.remove('show'); t.style.background = ''; }, 3000);
-}
-
-function escHtml(s) {
-  return VP.esc(s);   // one shared helper (FIX_LOG 4.2)
-}
+(async function init() {
+  try { await VP.ensureToken(); } catch (e) { return; }
+  loadSettings();
+})();
