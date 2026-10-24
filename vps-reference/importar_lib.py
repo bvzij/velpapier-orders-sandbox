@@ -649,6 +649,7 @@ DEFAULT_SLIP = {
     "header_size": 7, "total_size": 12, "note_size": 9, "order_size": 7.5,
     "extras_size": 8.5, "lapiz_size": 26, "lapiz_text": "Lápiz Infinito",
     "deadline_size": 15, "footer_id_size": 9, "user_size": 12,
+    "item_line_width": 0.8, "item_line_style": "solid",   # line between TikTok items
 }
 
 
@@ -657,13 +658,38 @@ def slip_style(settings):
     for k, v in (settings or {}).items():
         if k in s and v not in (None, ""):
             try:
-                s[k] = float(v) if k not in ("font", "lapiz_text") else str(v)
+                s[k] = float(v) if k not in ("font", "lapiz_text", "item_line_style") else str(v)
             except (TypeError, ValueError):
                 pass
     for k in s:
         if k.endswith("_size"):
             s[k] = max(4.0, min(60.0, float(s[k])))
+    s["item_line_width"] = max(0.1, min(4.0, float(s["item_line_width"])))
+    if s["item_line_style"] not in ("solid", "dashed"):
+        s["item_line_style"] = "solid"
     return s
+
+
+# ─── Product names on the slip (2026-10-24) ─────────────────────────────
+# Only the title is printed for the picker: everything before the first
+# " - " (a dash with a space on both sides). The features after it stay in
+# TikTok and in Pedidos. A hyphen inside a word ("B6-Gustav") is kept.
+_TITLE_SPLIT = re.compile(r"\s+[-\u2013\u2014]\s+")
+
+
+def short_title(name):
+    s = str(name or "").strip()
+    m = _TITLE_SPLIT.search(s)
+    return (s[:m.start()] if m else s).strip()
+
+
+def _rule(page, x0, x1, yy, width, style, color=(0, 0, 0)):
+    """A horizontal line; style 'dashed' gives '- - - -'."""
+    sh = page.new_shape()
+    sh.draw_line(fitz.Point(x0, yy), fitz.Point(x1, yy))
+    kw = {"dashes": "[4 3] 0"} if style == "dashed" else {}
+    sh.finish(width=width, color=color, **kw)
+    sh.commit()
 
 
 def user_label_parts(ship):
@@ -775,21 +801,25 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
             if state["combo"]:
                 # a combo continues from the previous page: say which one
                 ns = st["name_size"]
-                label = "Combine listing (continúa): " + clean_text(state["combo"], fonts.reg)
+                label = "Combine listing (continúa): " + clean_text(short_title(state["combo"]), fonts.reg)
                 for ln in _wrap(fonts, label, ns * 0.9, W - 2 * M, True)[:2]:
                     _text(pg.page, fonts, M, y + ns, ln, ns * 0.9, True, (0.35, 0.35, 0.35))
                     y += ns * 1.15
                 y += 2
 
-    def draw_row(name, variation, seller, qty, indent=0, combo_label=False, qty_light=False, dot=False):
+    def draw_row(name, variation, seller, qty, indent=0, combo_label=False, qty_light=False, dot=False,
+                 boxes=True, light=False):
         nonlocal y
+        name = short_title(name)                 # warehouse sees the title only
         ns, ss, ls, qs = st["name_size"], st["sku_size"], st["seller_size"], st["qty_size"]
         name_c = clean_text(name, fonts.reg)
         var_c = clean_text(variation, fonts.reg)
         sel_c = clean_text(seller, fonts.reg)
+        # room for the check boxes: SKU/Seller boxes sit at the right of their column,
+        # the qty box at the left of the number
         n_lines = _wrap(fonts, name_c, ns, cx["name_w"] - indent)
-        v_lines = _wrap(fonts, var_c, ss, cx["sku_w"] - 3) if var_c else []
-        s_lines = _wrap(fonts, sel_c, ls, cx["seller_w"] - 3) if sel_c else []
+        v_lines = _wrap(fonts, var_c, ss, cx["sku_w"] - ss - 8) if var_c else []
+        s_lines = _wrap(fonts, sel_c, ls, cx["seller_w"] - ls - 8) if sel_c else []
         lab_h = (ns * 1.15) if combo_label else 0
         h = max(lab_h + len(n_lines) * ns * 1.18, len(v_lines) * ss * 1.18, len(s_lines) * ls * 1.18, qs * 1.15) + 4
         fit(h)
@@ -815,8 +845,17 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         qx = cx["qty_r"] - _width(fonts, qt, qs, True)
         _text(p, fonts, qx, top + 1 + qs * 0.95, qt, qs, True, (0.45, 0.45, 0.45) if qty_light else (0, 0, 0))
         if dot:
-            p.draw_circle(fitz.Point(qx - 6, top + 1 + qs * 0.6), 3.2, color=(1, 0, 0), fill=(1, 0, 0))
-        p.draw_line(fitz.Point(M + indent, top + h), fitz.Point(W - M, top + h), color=(0.6, 0.6, 0.6), width=0.4)
+            # red dot = more than one unit; sits just left of the qty box, clear of the Seller SKU box
+            p.draw_circle(fitz.Point(qx - 4 - qs - 5, top + 1 + qs * 0.6), 2.2, color=(1, 0, 0), fill=(1, 0, 0))
+        if boxes:
+            # empty square, same height as the text, for a pen tick when picked
+            b_sku = fitz.Rect(cx["sku"] + cx["sku_w"] - ss - 2, top + 1 + ss * 0.28, cx["sku"] + cx["sku_w"] - 2, top + 1 + ss * 1.28)
+            b_sel = fitz.Rect(cx["seller"] + cx["seller_w"] - ls - 2, top + 1 + ls * 0.28, cx["seller"] + cx["seller_w"] - 2, top + 1 + ls * 1.28)
+            b_qty = fitz.Rect(qx - 4 - qs, top + 1 + qs * 0.23, qx - 4, top + 1 + qs * 1.23)
+            for rct in (b_sku, b_sel, b_qty):
+                p.draw_rect(rct, color=(0, 0, 0), width=0.7)
+        if light:
+            p.draw_line(fitz.Point(M + indent, top + h), fitz.Point(W - M, top + h), color=(0.6, 0.6, 0.6), width=0.4)
         # read-back expectations (compared against the ORIGINAL text, so a
         # glyph the font could not draw is caught, not silently dropped)
         prefix = "combinelisting" if combo_label else ""
@@ -826,13 +865,29 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         pg.checks.append((fitz.Rect(cx["seller"] + cx["seller_w"], top, W, top + h - 1), norm(qt), "Qty"))
         y = top + h + 2
 
-    for it in data["items"]:
+    item_w, item_style = st["item_line_width"], st["item_line_style"]
+
+    def item_sep():
+        """Configurable line between two TikTok items (not after the last one)."""
+        nonlocal y
+        if y + item_w + 4 > limit:
+            return                               # the next item starts a new page instead
+        _rule(pg.page, M, W - M, y + 1, item_w, item_style)
+        y += item_w + 3
+
+    for k, it in enumerate(data["items"]):
+        if k > 0:
+            item_sep()
         if it["kind"] == "combo":
+            draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], combo_label=True, qty_light=True,
+                     boxes=False, light=True)
+            # only once the parent row is placed: if the children run onto the next
+            # page, that page gets the "(continúa)" line; the parent is not repeated
             state["combo"] = it["name"]
-            draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], combo_label=True, qty_light=True)
-            for ch in it["children"]:
+            kids = it["children"]
+            for j, ch in enumerate(kids):
                 draw_row("• " + ch["name"], ch["variation"], ch["seller_sku"], ch["eff_qty"], indent=10,
-                         dot=ch["eff_qty"] > 1)
+                         dot=ch["eff_qty"] > 1, light=j < len(kids) - 1)
             state["combo"] = ""
         else:
             draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], dot=it["qty"] > 1)
@@ -876,26 +931,48 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                 y += ns * 1.25
         y += 3
 
-    # Extras approved in the browser (Shopify / Manual / Nota items)
-    extras = ship.get("extras") or []
-    if extras:
+    # Extras approved in the browser, grouped by channel: one header per
+    # channel, every item listed under it. Lines only separate the channels.
+    # A note sits under its product, 2 pt smaller (never under 6 pt), no bullet.
+    cats = {}
+    for ex in (ship.get("extras") or []):
+        cats.setdefault(str(ex.get("channel") or "Manual"), []).extend(ex.get("items") or [])
+    order = [c for c in ("Manual", "Shopify", "Nota") if cats.get(c)]
+    order += [c for c in cats if c not in ("Manual", "Shopify", "Nota") and cats[c]]
+    if order:
         es = st["extras_size"]
-        fit(es * 1.4 * 3)
-        pg.page.draw_line(fitz.Point(M, y), fitz.Point(W - M, y), color=(0, 0, 0), width=0.6)
-        y += 3
-        _text(pg.page, fonts, M, y + es + 1, "AGREGAR AL PAQUETE", es + 1, True)
-        y += (es + 1) * 1.4
-        for ex in extras:
-            title = clean_text(ex.get("title", ""), fonts.bold)
-            for k, ln in enumerate(_wrap(fonts, title, es, W - 2 * M - 4, True)):
-                fit(es * 1.3)
-                _text(pg.page, fonts, M + 2, y + es, ln, es, True)
-                y += es * 1.3
-            for item in ex.get("lines") or []:
-                for k, ln in enumerate(_wrap(fonts, clean_text(item, fonts.reg), es, W - 2 * M - 16)):
+        ns_note = max(6.0, es - 2)
+        for idx, cat in enumerate(order):
+            # the title and the first category travel together: never a heading alone at the bottom
+            first_txt = next((clean_text(i.get("text", ""), fonts.reg) for i in cats[cat] if clean_text(i.get("text", ""), fonts.reg)), "")
+            need = es * 1.5 + es * 1.25 * (2 if first_txt else 0)
+            if idx == 0:
+                need += es * 1.4 + 3
+            fit(need)
+            if idx == 0:
+                pg.page.draw_line(fitz.Point(M, y), fitz.Point(W - M, y), color=(0, 0, 0), width=0.6)
+                y += 3
+                _text(pg.page, fonts, M, y + es + 1, "AGREGAR AL PAQUETE", es + 1, True)
+                y += (es + 1) * 1.4
+            else:
+                pg.page.draw_line(fitz.Point(M, y), fitz.Point(W - M, y), color=(0.45, 0.45, 0.45), width=0.5)
+                y += 4
+            _text(pg.page, fonts, M, y + es, cat.upper(), es, True)
+            y += es * 1.5
+            for it in cats[cat]:
+                text = clean_text(it.get("text", ""), fonts.reg)
+                if not text:
+                    continue
+                for k, ln in enumerate(_wrap(fonts, text, es, W - 2 * M - 12)):
                     fit(es * 1.25)
-                    _text(pg.page, fonts, M + 10, y + es, ("• " if k == 0 else "  ") + ln, es)
+                    _text(pg.page, fonts, M + 6, y + es, ("• " if k == 0 else "   ") + ln, es)
                     y += es * 1.25
+                note = clean_text(it.get("note", ""), fonts.reg)
+                if note:
+                    for ln in _wrap(fonts, note, ns_note, W - 2 * M - 24):
+                        fit(ns_note * 1.25)
+                        _text(pg.page, fonts, M + 18, y + ns_note, ln, ns_note)
+                        y += ns_note * 1.25
             y += 2
 
     # Lápiz Infinito: centred in the free space between the content and the footer
@@ -1125,3 +1202,62 @@ def funfact_pdf(fact, copies, settings, test=False):
     out.save(buf, garbage=4, deflate=True)
     out.close()
     return buf.getvalue(), {"pages": n, "scale": round(scale, 2), "warning": warning}
+
+
+# ─── Test slip for Ajustes (look and feel only; nothing is stored) ───────
+# mode 'single': one page, a normal order. mode 'large': two pages, a big order.
+# Uses the same drawing code as a real slip; no CSV or TikTok PDF is needed.
+def _test_items(n_plain, n_combo):
+    items = []
+    for k in range(n_plain):
+        items.append({"kind": "item", "name": "Cuaderno A5 Van Gogh 100 Hojas 75 Gramos Raya - Cierre Elástico - Acentos Dorados",
+                      "variation": "Alendros %d" % (k + 1), "seller_sku": "A2101-%d" % (k + 1), "qty": 1 + (k % 3), "children": []})
+    for k in range(n_combo):
+        kids = [{"kind": "child", "name": "Sticker en Libro de 24 Hojas - Varias Tematicas", "variation": "Estilo %d" % (j + 1),
+                 "seller_sku": "JMHH-4-0%d" % (j + 1), "qty": 1, "eff_qty": 1} for j in range(4)]
+        items.append({"kind": "combo", "name": "Sticker en Libro de 24 Hojas - Varias Tematicas", "variation": "Los 4 Estilos",
+                      "seller_sku": "", "qty": 1, "children": kids})
+    return items
+
+
+def test_slip_pdf(mode, settings):
+    st = slip_style(settings or {})
+    fonts = Fonts(st["font"])
+    mode = "large" if mode == "large" else "single"
+    W, H = 298.0, 420.0
+    n_plain, n_combo = (2, 1) if mode == "single" else (14, 3)
+    out = None
+    for _ in range(12):                                   # large: grow until it really is 2 pages
+        items = _test_items(n_plain, n_combo)
+        data = {"items": items, "total": sum(
+            (it["qty"] if it["kind"] != "combo" else sum(c["eff_qty"] for c in it["children"])) for it in items),
+            "notes": {"586724685448053923": {"buyer": "Para la comunidad de mi parte, gracias por la paciencia.",
+                                             "seller": "NO mandar; es GA de mesversario"}},
+            "order_ids": ["586724685448053923"], "deadline": {"label": "LUN 26 OCT", "time": "23:59"},
+            "page_size": (W, H)}
+        ship = {"username": "usuario.prueba", "count_label": "Nuevo", "no_postal": False, "lapiz": True,
+                "extras": [
+                    {"channel": "Manual", "items": [{"text": "2× Libreta A5 - Cobre", "note": "Nota: envolver para regalo"},
+                                                    {"text": "1× Washi Monet", "note": ""}]},
+                    {"channel": "Shopify", "items": [{"text": "1× Libreta Pride & Prejudice", "note": ""}]},
+                    {"channel": "Nota", "items": [{"text": "Entregar en recepción del edificio", "note": ""}]}],
+                "note_edits": {}}
+        out = fitz.open()
+        pages = render_rebuilt_slip(out, data, ship, st, fonts, "PRUEBA-NO-ES-ENVIO")
+        if mode == "single" and len(pages) == 1:
+            break
+        if mode == "large" and len(pages) == 2:
+            break
+        too_many = len(pages) > (1 if mode == "single" else 2)
+        out.close()
+        out = None                                        # closed: a retry opens a fresh one
+        if mode == "single":
+            n_plain = max(1, n_plain - 1)
+        else:
+            n_plain = max(4, n_plain - 2) if too_many else n_plain + 2
+    if out is None:
+        raise SlipError("INTERNAL_ERROR", "no se pudo generar la hoja de prueba")
+    n = len(out)
+    buf = out.tobytes(garbage=4, deflate=True)
+    out.close()
+    return buf, {"pages": n, "mode": mode}
