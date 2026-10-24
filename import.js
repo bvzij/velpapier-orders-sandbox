@@ -1119,7 +1119,9 @@ async function renderSettings() {
       </div></div>
     <div class="imp-btns"><button class="imp-btn primary" onclick="IMP.saveSettings()">Guardar ajustes</button>
       <button class="imp-btn" onclick="IMP.resetSettings()">Restaurar valores de fábrica</button></div>
-    <div class="imp-muted" style="margin-top:6px">Se guardan en el servidor: valen para todos los dispositivos.</div>`;
+    <div class="imp-muted" style="margin-top:6px">Se guardan en el servidor: valen para todos los dispositivos.</div>
+    ${purgeCardHtml()}`;
+  renderPurgeOut();
 }
 function readSettingsForm() {
   const s = JSON.parse(JSON.stringify(S.settings));
@@ -1152,6 +1154,135 @@ async function testSticker() {
     const r = await callImporter({ op: 'funfacts', test: true, copies: 1, fact: {}, settings: { sticker: s.sticker } });
     openPdf(r.pdf_base64, 'stickers_prueba.pdf');
   } catch (e) { showToast('Error: ' + e.message, true); }
+}
+
+// ── Borrar un pedido de TikTok (admin) ────────────────────────────────────
+// Search -> see exactly what goes -> confirm (+ a second confirmation with the
+// photos if the shipment has quality photos). The server enforces both.
+S.purge = {};
+function isAdmin() { try { return VP.getRole() === 'admin'; } catch (e) { return false; } }
+function thumbUrl(u) {
+  return /res\.cloudinary\.com\/.+\/upload\//.test(u) ? u.replace('/upload/', '/upload/w_240,h_240,c_fill,q_auto,f_auto/') : u;
+}
+function photoGridHtml(items) {
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0">${(items || []).map(p => `
+    <div style="text-align:center;font-size:11px;color:var(--text-muted)">
+      <img src="${esc(thumbUrl(p.url))}" data-u="${esc(p.url)}" onclick="VP.lightbox(this.dataset.u)" alt=""
+           style="width:96px;height:96px;object-fit:cover;border-radius:8px;cursor:zoom-in;display:block;background:var(--surface2)">
+      ${esc(p.label || '')}</div>`).join('')}</div>`;
+}
+function purgeCardHtml() {
+  if (!isAdmin()) return '';
+  return `<div class="imp-card" style="border-color:#d99;margin-top:1rem">
+    <h3 style="color:#a32d2d">Zona peligrosa · Borrar un pedido de TikTok</h3>
+    <div class="imp-muted" style="margin-bottom:8px">Borra el envío por completo: pedido, mensajes importados, historial de importación y registro de Empacar con sus fotos. Los productos de Shopify / Manual y las notas anotadas en ese envío no se borran: quedan sin vincular. Después se puede volver a importar.</div>
+    <div class="imp-row">
+      <input type="text" id="purge-q" placeholder="Guía (JMX…), ID de pedido o usuario" style="min-width:260px" onkeydown="if(event.key==='Enter')IMP.purgeSearch()">
+      <button class="imp-btn" onclick="IMP.purgeSearch()">Buscar</button>
+    </div>
+    <div id="purge-out"></div></div>`;
+}
+function renderPurgeOut() {
+  const el = $('purge-out');
+  if (!el) return;
+  const p = S.purge || {};
+  if (p.loading) { el.innerHTML = '<div class="imp-muted">Buscando…</div>'; return; }
+  if (p.error) { el.innerHTML = `<div class="imp-bad">${esc(p.error)}</div>`; return; }
+  if (p.done) {
+    const d = p.done.deleted || {};
+    const ph = d.photos || {};
+    const open = S.result && S.meta.some(m => m.tracking_id === p.done.tracking_id);
+    el.innerHTML = `<div class="imp-ok"><b>✓ Borrado:</b> ${esc(p.done.tracking_id)}<br>
+      ${d.orders || 0} pedido · ${d.notas || 0} notas importadas · ${d.history_rows || 0} filas de historial · ${d.qc_rows || 0} registro(s) de Empacar${ph.requested ? ` · fotos: ${ph.deleted || 0} borradas` : ''}</div>
+      ${ph.error ? `<div class="imp-warn">⚠ ${esc(ph.error)}</div>` : ''}
+      ${(p.done.unlinked || []).length ? `<div class="imp-muted">Sin vincular: ${p.done.unlinked.map(u => esc(u.order_id) + ' → ' + esc(u.to_status)).join(' · ')}</div>` : ''}
+      ${p.done.customers && p.done.customers !== 'ok' ? `<div class="imp-warn">${esc(p.done.customers)}</div>` : ''}
+      <div class="imp-muted" style="margin-top:6px">Ya se puede volver a importar este pedido.${open ? ' La importación que tienes abierta ya no es válida: vuelve a importar los archivos.' : ''}</div>`;
+    return;
+  }
+  if (p.plan) {
+    const pl = p.plan, t = (pl.tiktok || [])[0] || {};
+    const unlink = pl.unlink || [];
+    el.innerHTML = `
+      <div style="margin:8px 0"><button class="imp-mini" onclick="IMP.purgeBack()">← Volver a los resultados</button></div>
+      <div class="imp-cust-head">${esc(pl.tracking_id)} <span class="imp-muted">· @${esc(t.username || '')} · ${esc(t.customer_id || '')} · ${esc(t.status || '')}</span></div>
+      <div class="imp-muted">${esc(t.order_id || '')} — ${esc(t.products || '')}</div>
+      <div style="margin-top:8px"><b>Se borrará por completo:</b>
+        <div class="imp-list-item">• El pedido de TikTok en Pedidos</div>
+        <div class="imp-list-item">• ${plural((pl.notas_csv || []).length, 'mensaje importado del CSV', 'mensajes importados del CSV')}</div>
+        <div class="imp-list-item">• ${plural(pl.history_rows || 0, 'fila del historial de importación', 'filas del historial de importación')}</div>
+        <div class="imp-list-item">• ${plural(pl.qc_rows || 0, 'registro de Empacar', 'registros de Empacar')}${pl.photos ? ` con <b>${plural(pl.photos, 'foto', 'fotos')}</b>` : ''}</div>
+      </div>
+      ${unlink.length ? `<div style="margin-top:8px"><b>Se conservan, sin vincular:</b>${unlink.map(u => `<div class="imp-list-item">• ${esc(u.channel)} ${esc(u.order_id)} — ${esc(u.products)} <span class="imp-muted">→ ${esc(u.to_status)}</span></div>`).join('')}</div>` : ''}
+      ${pl.photos ? `<div class="imp-bad" style="margin-top:8px"><b>⚠ Este envío ya tiene ${plural(pl.photos, 'foto', 'fotos')} de calidad subidas:</b>${photoGridHtml(pl.photo_items)}Se borrarán junto con el pedido.</div>` : ''}
+      ${(pl.warnings || []).map(w => `<div class="imp-warn">⚠ ${esc(w)}</div>`).join('')}
+      ${(pl.blockers || []).map(b => `<div class="imp-bad">${esc(b.reason)}</div>`).join('')}
+      <div class="imp-btns">
+        ${(pl.blockers || []).length ? '' : '<button class="imp-btn" style="background:#a32d2d;color:#fff;border-color:#a32d2d" onclick="IMP.purgeAsk()">Borrar definitivamente…</button>'}
+      </div>`;
+    return;
+  }
+  if (p.matches) {
+    el.innerHTML = p.matches.length ? p.matches.map(m => `
+      <div class="imp-cust"><div class="imp-cust-head">${esc(m.tracking_id)} <span class="imp-muted">· @${esc(m.username)} · ${esc(m.customer_id)} · ${esc(m.status)}</span></div>
+        <div class="imp-muted">${esc(m.order_ids)} — ${esc(m.products)}</div>
+        <div class="imp-btns" style="margin-top:4px"><button class="imp-mini" data-tid="${esc(m.tracking_id)}" onclick="IMP.purgePick(this.dataset.tid)">Seleccionar</button></div></div>`).join('')
+      : '<div class="imp-muted">No se encontró ningún envío de TikTok con eso.</div>';
+  }
+}
+async function purgeSearch() {
+  const q = ($('purge-q') || {}).value ? $('purge-q').value.trim() : '';
+  if (q.length < 3) { showToast('Escribe al menos 3 caracteres', true); return; }
+  S.purge = { loading: true }; renderPurgeOut();
+  try { S.purge = { matches: (await VP.post({ action: 'order_purge_preview', query: q })).matches || [] }; }
+  catch (e) { S.purge = { error: e.message }; }
+  renderPurgeOut();
+}
+async function purgePick(tid) {
+  S.purge = { loading: true }; renderPurgeOut();
+  try { S.purge = { plan: (await VP.post({ action: 'order_purge_preview', tracking_id: tid })).plan }; }
+  catch (e) { S.purge = { error: e.message }; }
+  renderPurgeOut();
+}
+function purgeBack() { purgeSearch(); }
+// Prompt 1 (always): permanent. Prompt 2 (only with photos): shows them again.
+function purgeAsk() {
+  const pl = (S.purge || {}).plan;
+  if (!pl || (pl.blockers || []).length) return;
+  const t = (pl.tiktok || [])[0] || {};
+  const m = VP.showModal(`
+    <h3 style="margin:0 0 8px;font-size:16px">¿Borrar este envío?</h3>
+    <div style="margin-bottom:8px"><b>${esc(pl.tracking_id)}</b> · @${esc(t.username || '')}</div>
+    <div class="imp-bad"><b>Esto es permanente y no se puede deshacer.</b></div>
+    <div class="imp-btns"><button class="imp-btn" id="pg-no">Cancelar</button>
+      <button class="imp-btn" id="pg-yes" style="background:#a32d2d;color:#fff;border-color:#a32d2d">${pl.photos ? 'Continuar' : 'Sí, borrar definitivamente'}</button></div>`, { maxWidth: '460px' });
+  m.el.querySelector('#pg-no').addEventListener('click', () => m.close());
+  m.el.querySelector('#pg-yes').addEventListener('click', () => { m.close(); if (pl.photos) purgeAskPhotos(); else purgeRun(false); });
+}
+function purgeAskPhotos() {
+  const pl = S.purge.plan;
+  const m = VP.showModal(`
+    <h3 style="margin:0 0 8px;font-size:16px;color:#a32d2d">⚠ Hay fotos de calidad subidas</h3>
+    <div style="margin-bottom:4px">Este envío tiene <b>${plural(pl.photos, 'foto', 'fotos')}</b> en Empacar. Se borrarán junto con el pedido:</div>
+    ${photoGridHtml(pl.photo_items)}
+    <div class="imp-bad"><b>Esto no se puede deshacer.</b> ¿Seguro que quieres continuar?</div>
+    <div class="imp-btns"><button class="imp-btn" id="pg-no2">Cancelar</button>
+      <button class="imp-btn" id="pg-yes2" style="background:#a32d2d;color:#fff;border-color:#a32d2d">Sí, borrar todo, incluidas las fotos</button></div>`, { maxWidth: '620px' });
+  m.el.querySelector('#pg-no2').addEventListener('click', () => m.close());
+  m.el.querySelector('#pg-yes2').addEventListener('click', () => { m.close(); purgeRun(true); });
+}
+async function purgeRun(withPhotos) {
+  const pl = (S.purge || {}).plan;
+  if (!pl) return;
+  S.purge = { loading: true }; renderPurgeOut();
+  try {
+    // TROUBLESHOOT: "unauthorized" = the signed-in user is not an admin; any other
+    // error comes straight from Apps Script (order_purge), read its message.
+    const r = await VP.post({ action: 'order_purge', tracking_id: pl.tracking_id, confirm: 'BORRAR', confirm_photos: !!withPhotos });
+    S.purge = { done: r };
+    showToast('Envío borrado');
+  } catch (e) { S.purge = { error: e.message }; }
+  renderPurgeOut();
 }
 
 // ── possible matches (same flow as before; refreshes the configure step) ──
@@ -1255,6 +1386,7 @@ window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
+  purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun,
 };
 
 (async function init() {
