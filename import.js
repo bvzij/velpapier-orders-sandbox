@@ -12,7 +12,7 @@ const N8N_IMPORTAR_URL = 'https://n8n.srv2017849.hstgr.cloud/webhook/importar-ap
 const DEFAULTS = {
   slip: { font: 'atkinson', name_size: 7.5, sku_size: 8.5, seller_size: 8.5, qty_size: 11, header_size: 7,
           total_size: 12, note_size: 9, order_size: 7.5, extras_size: 8.5, lapiz_size: 26,
-          lapiz_text: 'Lápiz Infinito', deadline_size: 15, footer_id_size: 9, user_size: 12,
+          lapiz_text: 'Lápiz Infinito', deadline_size: 15, footer_id_size: 9, user_size: 12, row_note_size: 8,
           item_line_width: 0.8, item_line_style: 'solid' },
   sticker: { font: 'roboto', width_mm: 50, height_mm: 25, margin_top: 2, margin_right: 2.5, margin_bottom: 2,
              margin_left: 2.5, title_size: 9, answer_size: 7.5, align: 'center', gap_mm: 0.8 },
@@ -402,7 +402,7 @@ function initSelections() {
     };
   });
   S.notaEdit = {};
-  (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, assigned: n.assigned || '' }; });
+  (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, keys: parseList(n.assigned) }; });
   S.factId = (S.log && S.log['Fun Fact ID']) || '';
 }
 
@@ -560,24 +560,30 @@ function renderConfigure() {
       <div class="imp-muted">Los productos extra de estos envíos no se imprimen; al generar el PDF verás la lista para anotarlos a mano.</div>
     </div>` : '';
 
-  // Notas (CSV messages): visual warning + edit + product assignment slot
+  // Notas: one block per note piece. Its text can be edited, it is linked to products
+  // of THIS order with checkboxes, and it can be split into more pieces (duplicate).
   const notas = S.ctx.notas || [];
   const notaHtml = notas.length ? `
     <div class="imp-card">
       <h3><span class="nota-tag">Nota</span> Mensajes en esta importación <small>· ${notas.length}</small></h3>
-      <div class="imp-muted" style="margin-bottom:6px">Ya están en Pedidos como Anotado. Puedes acortar o aclarar el texto que se imprime en la hoja, y marcar a qué producto se refiere.</div>
+      <div class="imp-muted" style="margin-bottom:6px">Ya están en Pedidos como Anotado. Marca a qué producto(s) se refiere cada mensaje: en la hoja saldrá en negrita debajo de ese producto. Si un mensaje habla de varios productos, duplícalo y pon cada parte en su producto.</div>
       ${notas.map(n => {
         const i = list.find(x => x.tid === n.linked_shipment) || {};
-        const ed = S.notaEdit[n.order_id] || { text: n.text, assigned: '' };
-        const cands = String(n.candidates || '').split(';').map(x => x.trim()).filter(Boolean);
+        const ed = S.notaEdit[n.order_id] || { text: n.text, keys: parseList(n.assigned) };
+        const prods = parseList(n.candidates);
         return `<div class="imp-nota">
           <b>@${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
           ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
           <textarea data-nota="${esc(n.order_id)}" oninput="IMP.editNota(this.dataset.nota, this.value)">${esc(ed.text)}</textarea>
-          ${cands.length > 1 ? `<select data-nota="${esc(n.order_id)}" onchange="IMP.assignNota(this.dataset.nota, this.value)">
-            <option value="">¿A qué producto se refiere? (opcional)</option>
-            ${cands.map(p => `<option value="${esc(p)}"${ed.assigned === p ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-          </select>` : ''}
+          <div style="margin-top:6px;font-size:12.5px"><b>¿A qué producto(s) se refiere?</b></div>
+          ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
+              <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p)}" ${(ed.keys || []).includes(p) ? 'checked' : ''}
+                onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
+              <span>${esc(p)}</span></label>`).join('')
+            : '<div class="imp-muted">Este pedido no tiene productos en el CSV.</div>'}
+          <div class="imp-btns" style="margin-top:6px">
+            <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
+          </div>
         </div>`;
       }).join('')}
     </div>` : '';
@@ -675,20 +681,43 @@ function markAll(cust) {
   renderConfigure();
 }
 function editNota(id, text) { (S.notaEdit[id] = S.notaEdit[id] || {}).text = text; }
-function assignNota(id, v) { (S.notaEdit[id] = S.notaEdit[id] || {}).assigned = v; }
+// Products are stored as a list of labels ("Product (Variation)") on each note piece.
+function parseList(v) {
+  if (Array.isArray(v)) return v.map(String);
+  const s = String(v || '').trim();
+  if (!s) return [];
+  if (s[0] === '[') { try { const a = JSON.parse(s); if (Array.isArray(a)) return a.map(String); } catch (e) { /* not JSON */ } }
+  return s.split(';').map(x => x.trim()).filter(Boolean);
+}
+function toggleNotaKey(id, label, on) {
+  const e = (S.notaEdit[id] = S.notaEdit[id] || { text: '', keys: [] });
+  e.keys = (e.keys || []).filter(k => k !== label);
+  if (on) e.keys.push(label);
+  renderConfigure();
+}
+// Splits a note: a new piece with the same text, not linked to any product yet.
+async function duplicateNota(oid) {
+  try {
+    const r = await VP.post({ action: 'nota_duplicate', order_id: oid });
+    showToast('Nota duplicada: ' + (r.order_id || ''));
+    await loadContext();
+    initSelectionsKeep();
+    renderConfigure();
+  } catch (e) { showToast('No se pudo duplicar: ' + e.message, true); }
+}
 
 // ── 3) GENERATE ───────────────────────────────────────────────────────────
 function buildPlan(mode) {
   const groups = stack();
   const ships = {};
-  const notaByTid = {};
+  // Every note piece of each shipment, with its text and the products it is linked to.
+  const segsByTid = {};
   (S.ctx.notas || []).forEach(n => {
-    const ed = S.notaEdit[n.order_id] || {};
+    const ed = S.notaEdit[n.order_id] || { text: n.text, keys: [] };
     const text = String(ed.text == null ? n.text : ed.text).trim();
-    if (text === String(n.original || n.text).trim()) return;    // unchanged -> slip prints the CSV text
-    const key = n.source === 'Vendedor' ? 'seller' : 'buyer';
-    const t = (notaByTid[n.linked_shipment] = notaByTid[n.linked_shipment] || {});
-    (t[n.nota_pedido] = t[n.nota_pedido] || {})[key] = text;
+    if (!text) return;
+    (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
+      order_id: n.nota_pedido, source: n.source === 'Vendedor' ? 'seller' : 'buyer', text, keys: ed.keys || [] });
   });
   const extrasByTid = {};
   Object.entries(S.extraSel).forEach(([oid, s]) => {
@@ -700,7 +729,7 @@ function buildPlan(mode) {
     ships[i.tid] = {
       username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
       extras: (extrasByTid[i.tid] || []).map(x => ({ channel: x.channel, items: x.items })),
-      note_edits: notaByTid[i.tid] || {},
+      note_segments: segsByTid[i.tid] || [],
     };
   }));
   let seq = [];
@@ -780,8 +809,9 @@ async function finalizeLinks() {
   (S.ctx.notas || []).forEach(n => {
     const ed = S.notaEdit[n.order_id] || {};
     const text = String(ed.text == null ? n.text : ed.text).trim();
-    const assigned = ed.assigned || '';
-    if (text !== String(n.text).trim() || assigned !== (n.assigned || '')) nota_edits.push({ order_id: n.order_id, text, assigned });
+    const keys = ed.keys || [];
+    const keysChanged = JSON.stringify(keys) !== JSON.stringify(parseList(n.assigned));
+    if (text !== String(n.text).trim() || keysChanged) nota_edits.push({ order_id: n.order_id, text, assigned: JSON.stringify(keys) });
   });
   if (!links.length && !unlinks.length && !nota_edits.length) return;
   try {
@@ -1116,6 +1146,7 @@ const SLIP_FIELDS = [
   ['deadline_size', 'Fecha límite (pie)'], ['footer_id_size', 'Order ID (pie)'], ['user_size', 'Usuario (rojo)'],
   ['header_size', 'Encabezados'],
   ['item_line_width', 'Línea entre productos (grosor, pt)'],
+  ['row_note_size', 'Nota bajo el producto (negrita, pt)'],
 ];
 const STICKER_FIELDS = [
   ['width_mm', 'Ancho (mm)'], ['height_mm', 'Alto (mm)'], ['margin_top', 'Margen arriba (mm)'],
@@ -1472,7 +1503,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
-  tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
+  tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
