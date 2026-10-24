@@ -632,6 +632,42 @@ function getUniqueClientes() {
   return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 }
 
+// ── Anotado pill -> TikTok shipment summary ─────────────────────────────
+function linkedShipByText(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (isNaN(d)) return '';
+  const parts = new Intl.DateTimeFormat('es-MX', { timeZone: 'America/Mexico_City', weekday: 'short', day: 'numeric', month: 'short' }).formatToParts(d);
+  const g = t => ((parts.find(p => p.type === t) || {}).value || '').replace('.', '').toUpperCase();
+  return `${g('weekday')} ${g('day')} ${g('month')}`;
+}
+function showLinkedShipmentModal(tid) {
+  const t = allRecords.find(x => x.Channel === 'TikTok' && String(x.TrackingId) === String(tid));
+  const linked = allRecords.filter(x => x.Channel !== 'TikTok' && String(x.LinkedShipment) === String(tid));
+  const c = document.getElementById('modal-container');
+  const deadline = t ? linkedShipByText(t.ShipBy) : '';
+  const head = `<div class="modal-title">Envío de TikTok</div>
+    <div class="modal-body">
+      <div style="font-family:monospace;font-size:13px;margin-bottom:8px">${escapeHtml(tid)}</div>`;
+  const body = t ? `
+      <div class="modal-field"><div class="modal-field-label">Usuario</div><div class="modal-field-value">@${escapeHtml(t.Cliente || '')}</div></div>
+      <div class="modal-field"><div class="modal-field-label">Pedido TikTok</div><div class="modal-field-value">${escapeHtml(t.ID || '')}</div></div>
+      <div class="modal-field"><div class="modal-field-label">Estado</div><div class="modal-field-value">${escapeHtml(t.Status || '')}</div></div>
+      ${deadline ? `<div class="modal-field"><div class="modal-field-label">Fecha límite</div><div class="modal-field-value">${escapeHtml(deadline)}</div></div>` : ''}
+      <div class="modal-field"><div class="modal-field-label">Productos</div><div class="modal-field-value">${escapeHtml(t.Producto || '—')}</div></div>
+      ${t.Notas ? `<div class="modal-field"><div class="modal-field-label">Notas</div><div class="modal-field-value">${escapeHtml(t.Notas)}</div></div>` : ''}`
+    : `<div style="font-size:13px;color:var(--text-muted)">El pedido de TikTok de esta guía no está en la vista actual (puede estar archivado).</div>`;
+  const others = linked.length ? `
+      <hr class="modal-divider">
+      <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">VINCULADO A ESTE ENVÍO (${linked.length})</div>
+      ${linked.map(x => `<div style="font-size:13px;padding:4px 0">${channelTag(x.Channel)} ${escapeHtml(x.Producto || x.Cliente || x.ID || '')} <span style="color:var(--text-muted)">· ${escapeHtml(x.Status)}</span></div>`).join('')}` : '';
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal">${head}${body}${others}</div>
+      <div class="modal-actions"><button class="btn" id="modal-cancel-btn">Cerrar</button></div>
+    </div></div>`;
+  document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', e => { if (e.target.id === 'modal-overlay') closeModal(); });
+}
+
 // ── MODALS ───────────────────────────────────────────────────
 function showConfirmModal(message, onConfirm) {
   pendingAction = onConfirm;
@@ -2005,6 +2041,12 @@ function renderOrderRow(r, showActions) {
 
   const pill = document.createElement('span');
   pill.className = `status-pill ${pillClass}`; pill.textContent = pillText;
+  // Anotado: the pill opens the TikTok shipment this order travels with.
+  if (status === 'Anotado' && r.LinkedShipment) {
+    pill.style.cursor = 'pointer';
+    pill.title = 'Ver el envío de TikTok';
+    pill.addEventListener('click', e => { e.stopPropagation(); showLinkedShipmentModal(r.LinkedShipment); });
+  }
 
   const actionCell = document.createElement('div');
   actionCell.className = 'order-actions';
