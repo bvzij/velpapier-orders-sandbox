@@ -683,6 +683,13 @@ def short_title(name):
     return (s[:m.start()] if m else s).strip()
 
 
+def _square(page, x, base, size):
+    """Empty box, 75 % of the font size, sitting on the text baseline (for a pen tick)."""
+    side = size * 0.75
+    top = base - size * 0.72
+    page.draw_rect(fitz.Rect(x, top, x + side, top + side), color=(0, 0, 0), width=0.7)
+
+
 def _rule(page, x0, x1, yy, width, style, color=(0, 0, 0)):
     """A horizontal line; style 'dashed' gives '- - - -'."""
     sh = page.new_shape()
@@ -846,14 +853,21 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         _text(p, fonts, qx, top + 1 + qs * 0.95, qt, qs, True, (0.45, 0.45, 0.45) if qty_light else (0, 0, 0))
         if dot:
             # red dot = more than one unit; sits just left of the qty box, clear of the Seller SKU box
-            p.draw_circle(fitz.Point(qx - 4 - qs - 5, top + 1 + qs * 0.6), 2.2, color=(1, 0, 0), fill=(1, 0, 0))
+            p.draw_circle(fitz.Point(qx - _width(fonts, " ", qs) - qs * 0.75 - 5, top + 1 + qs * 0.6), 2.2, color=(1, 0, 0), fill=(1, 0, 0))
         if boxes:
-            # empty square, same height as the text, for a pen tick when picked
-            b_sku = fitz.Rect(cx["sku"] + cx["sku_w"] - ss - 2, top + 1 + ss * 0.28, cx["sku"] + cx["sku_w"] - 2, top + 1 + ss * 1.28)
-            b_sel = fitz.Rect(cx["seller"] + cx["seller_w"] - ls - 2, top + 1 + ls * 0.28, cx["seller"] + cx["seller_w"] - 2, top + 1 + ls * 1.28)
-            b_qty = fitz.Rect(qx - 4 - qs, top + 1 + qs * 0.23, qx - 4, top + 1 + qs * 1.23)
-            for rct in (b_sku, b_sel, b_qty):
-                p.draw_rect(rct, color=(0, 0, 0), width=0.7)
+            # Empty square drawn INLINE: one space after the last letter of SKU and
+            # Seller SKU, and one space before the qty number. Size = 75 % of the font.
+            if v_lines:
+                x_v = cx["sku"] + _width(fonts, v_lines[-1], ss) + _width(fonts, " ", ss)
+                _square(p, x_v, top + 1 + (len(v_lines) - 1) * ss * 1.18 + ss, ss)
+            else:
+                _square(p, cx["sku"], top + 1 + ss, ss)
+            if s_lines:
+                x_s = cx["seller"] + _width(fonts, s_lines[-1], ls) + _width(fonts, " ", ls)
+                _square(p, x_s, top + 1 + (len(s_lines) - 1) * ls * 1.18 + ls, ls)
+            else:
+                _square(p, cx["seller"], top + 1 + ls, ls)
+            _square(p, qx - _width(fonts, " ", qs) - qs * 0.75, top + 1 + qs * 0.95, qs)
         if light:
             p.draw_line(fitz.Point(M + indent, top + h), fitz.Point(W - M, top + h), color=(0.6, 0.6, 0.6), width=0.4)
         # read-back expectations (compared against the ORIGINAL text, so a
