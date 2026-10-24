@@ -263,7 +263,46 @@ async function startImport(data, opts) {
   await loadContext();
   initSelections();
   renderConfigure();
+  if (opts.reopen) goReview(); else showImportModal();
   if (!opts.reopen) saveImportToHistory();
+}
+
+// Step 2 lives under the summary on the Importar tab: jump straight to it.
+function goReview() {
+  tab('importar');
+  setTimeout(() => {
+    const el = $('configure');
+    if (el && el.style.display !== 'none') el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 60);
+}
+
+// Pop-up right after an import: the numbers + the way to step 2.
+function showImportModal() {
+  const c = counts();
+  const list = infos();
+  const fb = list.filter(i => i.slip && i.slip.ok === false).length;
+  const notas = (S.ctx.notas || []).length;
+  const pending = (S.ctx.candidates || []).filter(x => x.status !== 'Anotado').length;
+  const sum = S.result.summary || {};
+  const matches = sum.possible_matches || 0;
+  const m = VP.showModal(`
+    <h3 style="margin:0 0 4px;font-size:16px">✓ Importación lista</h3>
+    <div class="imp-muted" style="margin-bottom:10px">${esc(S.importId)}</div>
+    <div class="imp-stats">
+      <div class="imp-stat"><b>${sum.inserted ?? 0}</b><span>Insertadas</span></div>
+      <div class="imp-stat"><b>${sum.duplicates ?? 0}</b><span>Duplicadas</span></div>
+      <div class="imp-stat"><b>${c.newC}</b><span>Clientes nuevos</span></div>
+      <div class="imp-stat"><b>${c.existingC}</b><span>Existentes</span></div>
+      <div class="imp-stat"><b>${c.postcards}</b><span>Postales</span></div>
+      <div class="imp-stat"><b>${notas}</b><span>Notas</span></div>
+      <div class="imp-stat"><b>${pending}</b><span>Extras pendientes</span></div>
+    </div>
+    ${matches ? `<div class="imp-warn">⚠ ${plural(matches, 'posible cliente duplicado', 'posibles clientes duplicados')}: resuélvelos antes de generar el PDF.</div>` : ''}
+    ${c.unknownC ? `<div class="imp-warn">⚠ ${plural(c.unknownC, 'envío sin cliente asignado', 'envíos sin cliente asignado')}.</div>` : ''}
+    ${fb ? `<div class="imp-bad">${plural(fb, 'hoja saldrá', 'hojas saldrán')} en formato básico (el motivo aparece en el paso 2).</div>` : ''}
+    <div class="imp-muted" style="margin-top:10px">Siguiente paso: revisar los ajustes de esta importación y generar el PDF.</div>
+    <div class="imp-btns"><button class="imp-btn primary" id="imp-go">Revisar y generar PDF</button></div>`, { maxWidth: '520px' });
+  m.el.querySelector('#imp-go').addEventListener('click', () => { m.close(); goReview(); });
 }
 
 // Phase-1 results + original files go to the 7-day history in the background.
@@ -854,6 +893,7 @@ async function loadHistory() {
           ${r['Fun Fact Title'] ? ` · Dato: ${esc(r['Fun Fact Title'])} (${r['Stickers'] || 0})` : ''}</div>
         <div class="imp-btns" style="margin-top:6px">
           ${btn('output_pdf', 'PDF guías')}${btn('stickers_pdf', 'Stickers')}${btn('original_pdf', 'PDF original')}${btn('original_csv', 'CSV original')}
+          ${S.result && !S.render && S.importId === r['Import ID'] ? '<button class="imp-mini" onclick="IMP.goReview()"><b>Ir a revisar (paso 2)</b></button>' : ''}
           ${files.original_pdf && files.original_csv && files.result ? `<button class="imp-mini" onclick="IMP.reopen('${esc(r['Import ID'])}')"><b>Reabrir</b></button>` : ''}
           ${r['Status'] === 'Archivos borrados' ? '<span class="imp-muted">archivos borrados (más de 7 días)</span>' : ''}
         </div></div>`;
@@ -878,6 +918,7 @@ async function histFile(id, kind) {
 async function reopen(id) {
   const rec = (S.histRecords || []).find(r => r['Import ID'] === id);
   if (!rec) return;
+  if (S.result && S.importId === id) { goReview(); return; }      // already open: just go to step 2
   if (S.result && !S.render && !confirm('Hay una importación abierta sin PDF generado. ¿Reabrir otra de todos modos?')) return;
   tab('importar');
   hideError();
@@ -919,6 +960,71 @@ function ffPreview() {
     ? `${plural(items.length, 'dato listo', 'datos listos')} para agregar${bad.length ? ` · <b style="color:#a32d2d">${plural(bad.length, 'sin respuesta', 'sin respuesta')}</b>` : ''}`
     : '';
   $('ff-add-btn').disabled = !items.length;
+}
+// ── fun facts from a file: .xlsx / .xls (SheetJS) or .csv / .tsv / .txt ──
+function parseDelimited(text) {
+  text = String(text || '').replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/, 1)[0] || '';
+  const count = ch => first.split(ch).length - 1;
+  const delim = [['\t', count('\t')], [';', count(';')], [',', count(',')]].sort((a, b) => b[1] - a[1])[0];
+  const d = delim[1] > 0 ? delim[0] : ',';
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === d) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+function plainKey(x) { return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase(); }
+async function ffFile(file) {
+  if (!file) return;
+  try {
+    let rows;
+    if (/\.(csv|tsv|txt)$/i.test(file.name)) {
+      rows = parseDelimited(new TextDecoder('utf-8').decode(await file.arrayBuffer()));
+    } else {
+      // TROUBLESHOOT: XLSX undefined = the SheetJS script in import.html did not load (offline / blocked).
+      if (typeof XLSX === 'undefined') throw new Error('No cargó el lector de Excel. Revisa la conexión y recarga la página, o usa un archivo .csv.');
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', blankrows: false });
+    }
+    rows = rows.filter(r => r.some(c => String(c).trim() !== ''));
+    let tCol = 0, aCol = 1;
+    if (rows.length) {
+      const head = rows[0].map(plainKey);
+      const ti = head.findIndex(x => ['titulo', 'title', 'pregunta', 'question'].includes(x));
+      const ai = head.findIndex(x => ['respuesta', 'answer'].includes(x));
+      if (ti >= 0 || ai >= 0) {
+        tCol = ti >= 0 ? ti : 0; aCol = ai >= 0 ? ai : (tCol === 0 ? 1 : 0);
+        rows.shift();
+      }
+    }
+    const clean = x => String(x == null ? '' : x).replace(/[\t\r\n]+/g, ' ').trim();
+    const lines = rows.map(r => [clean(r[tCol]), clean(r[aCol])]).filter(p => p[0]).map(p => p[0] + '\t' + p[1]);
+    if (!lines.length) { showToast('No se encontraron datos en el archivo', true); return; }
+    const box = $('ff-bulk');
+    box.value = (box.value.trim() ? box.value.replace(/\s+$/, '') + '\n' : '') + lines.join('\n');
+    ffPreview();
+    showToast(`${plural(lines.length, 'dato leído', 'datos leídos')} del archivo. Revisa y pulsa "Agregar al pool".`);
+  } catch (e) { showToast('Error al leer el archivo: ' + e.message, true); }
+}
+function ffTemplate() {
+  if (typeof XLSX === 'undefined') { showToast('No cargó el lector de Excel; recarga la página', true); return; }
+  const ws = XLSX.utils.aoa_to_sheet([['Título', 'Respuesta'],
+    ['¿Cuántos años puede durar el papel washi?', 'Más de 1,000 años si se guarda bien.']]);
+  ws['!cols'] = [{ wch: 50 }, { wch: 90 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Datos curiosos');
+  XLSX.writeFile(wb, 'datos_curiosos_plantilla.xlsx');
 }
 async function ffAdd() {
   const items = parseBulk($('ff-bulk').value);
@@ -1148,7 +1254,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
-  ffPreview, ffAdd, ffOp, saveSettings, resetSettings, testSticker,
+  ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
 };
 
 (async function init() {
