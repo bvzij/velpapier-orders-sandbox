@@ -17,7 +17,10 @@ const DEFAULTS = {
              margin_left: 2.5, title_size: 9, answer_size: 7.5, align: 'center', gap_mm: 0.8 },
   // invert: TikTok's printer stacks the first printed page at the bottom, so the
   // file is written in reverse to get the chosen order from the top (same as before).
-  print: { sort: 'az', group: 'none', group_first: 'a', blank_between: false, invert: true, lapiz: true },
+  // group: none | newexist | extras | combined (new + existing, each split with/without extras)
+  // group_first: 'a' = the first option of the grouping (Nuevos, or Con extras)
+  // sub_first: 'a' = with extras first, inside each group (combined only)
+  print: { sort: 'az', group: 'none', group_first: 'a', sub_first: 'a', blank_between: false, invert: true, lapiz: true },
 };
 
 let csvFile = null;
@@ -229,7 +232,7 @@ async function startImport(data, opts) {
   delete slim.pdf_base64; delete slim.csv_base64;
   S.result = slim;
   S.meta = (data.shipments_meta || []);
-  S.opts = Object.assign({}, S.settings.print, (S.log && S.log['Settings'] && S.log['Settings'].print) || {});
+  S.opts = Object.assign({}, DEFAULTS.print, S.settings.print, (S.log && S.log['Settings'] && S.log['Settings'].print) || {});
 
   const s = data.summary || {};
   $('s-import-id').textContent = '· ' + S.importId;
@@ -417,18 +420,33 @@ function stack() {
   if (o.sort === 'za') cmp = (a, b) => -byName(a, b);
   if (o.sort === 'deadline') cmp = (a, b) => (a.ship_by || '9999').localeCompare(b.ship_by || '9999') || byName(a, b);
   const sorted = [...list].sort(cmp);
-  let groups = [{ label: '', items: sorted }];
+  const ex = extrasCountByTid();
+  const hasEx = i => !!ex[i.tid];
+  const pair = (x, y) => (o.group_first === 'b' ? [y, x] : [x, y]);
+  const subPair = arr => {
+    const withEx = arr.filter(hasEx), plain = arr.filter(i => !hasEx(i));
+    const withSub = { label: 'Con extras', items: withEx }, plainSub = { label: 'Sin extras', items: plain };
+    return o.sub_first === 'b' ? [plainSub, withSub] : [withSub, plainSub];
+  };
+  // sections: printed one after another; blank page between sections if chosen
+  let sections;
   if (o.group === 'newexist') {
-    const A = sorted.filter(i => i.kind === 'new'), B = sorted.filter(i => i.kind !== 'new');
-    groups = o.group_first === 'a' ? [{ label: 'Nuevos', items: A }, { label: 'Existentes', items: B }]
-                                   : [{ label: 'Existentes', items: B }, { label: 'Nuevos', items: A }];
+    sections = pair({ label: 'Nuevos', subs: [{ label: '', items: sorted.filter(i => i.kind === 'new') }] },
+                    { label: 'Existentes', subs: [{ label: '', items: sorted.filter(i => i.kind !== 'new') }] });
   } else if (o.group === 'extras') {
-    const ex = extrasCountByTid();
-    const A = sorted.filter(i => ex[i.tid]), B = sorted.filter(i => !ex[i.tid]);
-    groups = o.group_first === 'a' ? [{ label: 'Con productos extra', items: A }, { label: 'Sin extras', items: B }]
-                                   : [{ label: 'Sin extras', items: B }, { label: 'Con productos extra', items: A }];
+    sections = pair({ label: 'Con productos extra', subs: [{ label: '', items: sorted.filter(hasEx) }] },
+                    { label: 'Sin extras', subs: [{ label: '', items: sorted.filter(i => !hasEx(i)) }] });
+  } else if (o.group === 'combined') {
+    sections = pair({ label: 'Nuevos', subs: subPair(sorted.filter(i => i.kind === 'new')) },
+                    { label: 'Existentes', subs: subPair(sorted.filter(i => i.kind !== 'new')) });
+  } else {
+    sections = [{ label: '', subs: [{ label: '', items: sorted }] }];
   }
-  groups = groups.filter(g => g.items.length);
+  const groups = [];
+  sections.forEach((sec, si) => sec.subs.forEach(sub => {
+    if (!sub.items.length) return;
+    groups.push({ label: sec.label && sub.label ? sec.label + ' · ' + sub.label : (sec.label || sub.label), items: sub.items, section: si });
+  }));
   // One postcard / one Lápiz per CUSTOMER: the first of their shipments in the pile.
   const seen = {};
   groups.forEach(g => g.items.forEach(i => {
@@ -473,6 +491,33 @@ function extraLines(c) {
 }
 
 // ── configure UI ──────────────────────────────────────────────────────────
+// Print-order controls. mode 'import' changes this import only (S.opts);
+// mode 'settings' edits the defaults that every new import starts from.
+function printOptionsHtml(mode) {
+  const isSet = mode === 'settings';
+  const o = isSet ? S.settings.print : S.opts;
+  const grouped = o.group !== 'none';
+  const combined = o.group === 'combined';
+  const first = o.group === 'extras' ? ['Con extras', 'Sin extras'] : ['Nuevos', 'Existentes'];
+  const attr = (k, isCheck) => isSet
+    ? `id="set-print-${k}" onchange="IMP.settingsChanged()"`
+    : `data-k="${k}" data-c="${isCheck ? 1 : 0}" onchange="IMP.setOptEl(this)"`;
+  const sel = (k, label, opts, disabled) => `<label>${label}<select ${attr(k)}${disabled ? ' disabled' : ''}>${
+    opts.map(([v, t]) => `<option value="${v}"${String(o[k]) === v ? ' selected' : ''}>${t}</option>`).join('')}</select></label>`;
+  const chk = (k, label, disabled) => `<label>${label} <input type="checkbox" ${attr(k, true)} ${o[k] ? 'checked' : ''}${disabled ? ' disabled' : ''} style="width:auto"></label>`;
+  return `<div class="imp-grid">
+    ${sel('sort', 'Orden', [['az', 'A → Z (usuario TikTok)'], ['za', 'Z → A (usuario TikTok)'], ['deadline', 'Fecha límite (la más próxima)']])}
+    ${sel('group', 'Agrupar', [['none', 'Sin agrupar'], ['newexist', 'Nuevos / existentes'], ['extras', 'Con / sin extras'], ['combined', 'Nuevos y existentes, cada uno con / sin extras']])}
+    ${sel('group_first', 'Primer grupo', [['a', first[0] + ' primero'], ['b', first[1] + ' primero']], !grouped)}
+    ${sel('sub_first', 'Dentro de cada grupo', [['a', 'Con extras primero'], ['b', 'Sin extras primero']], !combined)}
+    ${chk('blank_between', 'Hoja en blanco entre grupos', !grouped)}
+    ${chk('lapiz', '"' + esc(S.settings.slip.lapiz_text) + '" en clientes nuevos')}
+    ${chk('invert', 'Invertir para la impresora (la primera hoja impresa queda abajo)')}
+  </div>`;
+}
+function setOptEl(el) { setOpt(el.dataset.k, el.dataset.c === '1' ? el.checked : el.value); }
+function settingsChanged() { S.settings = readSettingsForm(); renderSettings(); }
+
 function renderConfigure() {
   const el = $('configure');
   el.style.display = 'block';
@@ -579,32 +624,11 @@ function renderConfigure() {
       }).join('')}
     </div>` : '';
 
-  const o = S.opts;
   const optHtml = `
     <div class="imp-card">
-      <h3>Orden de impresión</h3>
-      <div class="imp-row">
-        <select onchange="IMP.setOpt('sort', this.value)">
-          <option value="az"${o.sort === 'az' ? ' selected' : ''}>A → Z (usuario TikTok)</option>
-          <option value="za"${o.sort === 'za' ? ' selected' : ''}>Z → A (usuario TikTok)</option>
-          <option value="deadline"${o.sort === 'deadline' ? ' selected' : ''}>Fecha límite (la más próxima primero)</option>
-        </select>
-        <select onchange="IMP.setOpt('group', this.value)">
-          <option value="none"${o.group === 'none' ? ' selected' : ''}>Sin agrupar</option>
-          <option value="newexist"${o.group === 'newexist' ? ' selected' : ''}>Agrupar: nuevos / existentes</option>
-          <option value="extras"${o.group === 'extras' ? ' selected' : ''}>Agrupar: con extras / sin extras</option>
-        </select>
-        ${o.group !== 'none' ? `<select onchange="IMP.setOpt('group_first', this.value)">
-          <option value="a"${o.group_first === 'a' ? ' selected' : ''}>${o.group === 'newexist' ? 'Nuevos' : 'Con extras'} primero</option>
-          <option value="b"${o.group_first === 'b' ? ' selected' : ''}>${o.group === 'newexist' ? 'Existentes' : 'Sin extras'} primero</option>
-        </select>
-        <label><input type="checkbox" ${o.blank_between ? 'checked' : ''} onchange="IMP.setOpt('blank_between', this.checked)"> Hoja en blanco entre grupos</label>` : ''}
-      </div>
-      <div class="imp-row">
-        <label><input type="checkbox" ${o.lapiz ? 'checked' : ''} onchange="IMP.setOpt('lapiz', this.checked)"> "${esc(S.settings.slip.lapiz_text)}" en clientes nuevos</label>
-        <label><input type="checkbox" ${o.invert ? 'checked' : ''} onchange="IMP.setOpt('invert', this.checked)"> Invertir para la impresora (la primera hoja impresa queda abajo)</label>
-      </div>
-      <div class="imp-muted">Orden de la pila (de arriba hacia abajo): ${groups.map(g => (g.label ? `<b>${esc(g.label)}</b>: ` : '') + g.items.slice(0, 6).map(i => esc('@' + i.username)).join(', ') + (g.items.length > 6 ? ` … (+${g.items.length - 6})` : '')).join(' | ')}</div>
+      <h3>Orden de impresión <small>· solo para esta importación</small></h3>
+      ${printOptionsHtml('import')}
+      <div class="imp-muted" style="margin-top:8px">Pila de arriba hacia abajo: ${groups.length ? groups.map(g => (g.label ? `<b>${esc(g.label)}</b>: ` : '') + g.items.slice(0, 6).map(i => esc('@' + i.username)).join(', ') + (g.items.length > 6 ? ` … (+${g.items.length - 6})` : '')).join(' | ') : 'sin envíos'}</div>
     </div>`;
 
   const genHtml = `
@@ -670,8 +694,10 @@ function buildPlan(mode) {
     };
   }));
   let seq = [];
-  groups.forEach((g, k) => {
-    if (k > 0 && S.opts.blank_between) seq.push({ type: 'blank' });
+  let prevSection = null;
+  groups.forEach(g => {
+    if (prevSection !== null && g.section !== prevSection && S.opts.blank_between) seq.push({ type: 'blank' });
+    prevSection = g.section;
     g.items.forEach(i => seq.push({ type: 'shipment', tracking_id: i.tid }));
   });
   if (S.opts.invert) seq = seq.reverse();
@@ -1108,15 +1134,8 @@ async function renderSettings() {
       </div>
       <div class="imp-btns"><button class="imp-btn" onclick="IMP.testSticker()">Imprimir página de prueba</button></div>
       <div class="imp-muted">La página de prueba dibuja un rectángulo en los márgenes. Ajusta hasta que quede centrado en el sticker.</div></div>
-    <div class="imp-card"><h3>Orden de impresión por defecto</h3>
-      <div class="imp-grid">
-        <label>Orden <select id="set-print-sort"><option value="az"${p.sort === 'az' ? ' selected' : ''}>A → Z</option><option value="za"${p.sort === 'za' ? ' selected' : ''}>Z → A</option><option value="deadline"${p.sort === 'deadline' ? ' selected' : ''}>Fecha límite</option></select></label>
-        <label>Agrupar <select id="set-print-group"><option value="none"${p.group === 'none' ? ' selected' : ''}>No</option><option value="newexist"${p.group === 'newexist' ? ' selected' : ''}>Nuevos / existentes</option><option value="extras"${p.group === 'extras' ? ' selected' : ''}>Con / sin extras</option></select></label>
-        <label>Primer grupo <select id="set-print-group_first"><option value="a"${p.group_first === 'a' ? ' selected' : ''}>Nuevos / con extras</option><option value="b"${p.group_first === 'b' ? ' selected' : ''}>Existentes / sin extras</option></select></label>
-        <label>Hoja en blanco entre grupos <input type="checkbox" id="set-print-blank_between" ${p.blank_between ? 'checked' : ''} style="width:auto"></label>
-        <label>Invertir para la impresora <input type="checkbox" id="set-print-invert" ${p.invert ? 'checked' : ''} style="width:auto"></label>
-        <label>Lápiz Infinito a nuevos <input type="checkbox" id="set-print-lapiz" ${p.lapiz ? 'checked' : ''} style="width:auto"></label>
-      </div></div>
+    <div class="imp-card"><h3>Orden de impresión por defecto <small>· cada importación nueva empieza con esto</small></h3>
+      ${printOptionsHtml('settings')}</div>
     <div class="imp-btns"><button class="imp-btn primary" onclick="IMP.saveSettings()">Guardar ajustes</button>
       <button class="imp-btn" onclick="IMP.resetSettings()">Restaurar valores de fábrica</button></div>
     <div class="imp-muted" style="margin-top:6px">Se guardan en el servidor: valen para todos los dispositivos.</div>
@@ -1131,7 +1150,7 @@ function readSettingsForm() {
   s.sticker.font = $('set-sticker-font').value;
   s.sticker.align = $('set-sticker-align').value;
   STICKER_FIELDS.forEach(([k]) => { const v = parseFloat($('set-sticker-' + k).value); if (!isNaN(v)) s.sticker[k] = v; });
-  ['sort', 'group', 'group_first'].forEach(k => { s.print[k] = $('set-print-' + k).value; });
+  ['sort', 'group', 'group_first', 'sub_first'].forEach(k => { s.print[k] = $('set-print-' + k).value; });
   ['blank_between', 'invert', 'lapiz'].forEach(k => { s.print[k] = $('set-print-' + k).checked; });
   return s;
 }
@@ -1420,7 +1439,7 @@ window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, assignNota, generate, reopenPdf,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
-  purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun,
+  purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged,
 };
 
 (async function init() {
