@@ -1,4 +1,4 @@
-# fixpack-20261019 + importar-v2 2026-10-23
+# fixpack-20261019 + importar-v2 2026-10-23 (+ test slip 2026-10-24)
 """
 service.py - Vel Papier TikTok Import FastAPI Service
 """
@@ -304,6 +304,11 @@ async def importar(body: dict = Body(...), x_api_key: str = Header(None)):
             pdf = base64.b64decode(body.get("pdf_base64") or "")
             csvb = base64.b64decode(body.get("csv_base64") or "")
             return {"checks": importar_lib.check_all(pdf, parse_csv(csvb))}
+        if op == "test_slip":
+            # Ajustes -> "Hoja de prueba": look-and-feel sample, nothing stored or uploaded.
+            out, info = importar_lib.test_slip_pdf(body.get("mode") or "single",
+                                                   (body.get("settings") or {}).get("slip") or {})
+            return {"pdf_base64": base64.b64encode(out).decode(), "info": info}
         if op == "version":
             return {"importar": "2026-10-23", "pymupdf": getattr(importar_lib.fitz, "VersionBind", "?"),
                     "fonts": sorted(os.listdir(importar_lib.FONT_DIR)) if os.path.isdir(importar_lib.FONT_DIR) else []}
