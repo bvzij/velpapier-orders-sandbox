@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.1';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.2';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -986,6 +986,9 @@ function dispatchPostAction(action, body, role) {
     if (action === 'dismiss_duplicate_pair') return requireAdmin(role) ? dismissDuplicatePairAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_merge') return requireAdmin(role) ? undoMergeAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'delete_merged_customer') return requireAdmin(role) ? deleteMergedCustomerAction(body) : jsonResponse({ error: 'unauthorized' });
+    // order purge (2026-10-24): admin only
+    if (action === 'order_purge_preview') return requireAdmin(role) ? orderPurgePreviewAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'order_purge') return requireAdmin(role) ? orderPurgeAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'dismiss_product_pair') return requireAdmin(role) ? dismissProductPairAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_products') return requireAdmin(role) ? mergeProductsAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_product_merge') return requireAdmin(role) ? undoProductMergeAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -8287,4 +8290,279 @@ function funFactsMarkUsedAction(body) {
     logAudit('funfact_used', 'FunFact', body.id, 'Status', row['Status'], 'Usado');
   }
   return jsonResponse({ result: 'ok' });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ORDER PURGE (2026-10-24) — kill one TikTok shipment completely. Admin only.
+//
+// Deletes: the TikTok row in Orders, the Notas imported from the CSV
+// (Buyer Message / Seller Note), the TikTok Import History rows, the Empacar/QC
+// row and its Cloudinary photos. Then recalculates the customer's totals.
+// Keeps: the customer, and every Shopify / Manual / hand-made Nota that was
+// Anotado on this shipment: they are unlinked and go back to Pagado (or to No
+// Pagado if that is what they were before Importar linked them).
+// Blocks: if a Mayoreo order is linked to this shipment (unlink it in
+// Mayoristas first), so the wholesale sync can never re-link a ghost shipment.
+// After a purge the same CSV/PDF can be imported again (the duplicate check
+// reads the Orders sheet and the history sheet, and both are cleared).
+// A full snapshot of every deleted row goes to the audit log.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function purgeNorm_(v) { return String(v == null ? '' : v).trim(); }
+
+// Search TikTok shipments by guía, TikTok order ID or username (newest first).
+function orderPurgeFind_(query) {
+  const q = purgeNorm_(query).toLowerCase();
+  if (q.length < 3) return [];
+  const data = getOrdersSheet().getDataRange().getValues();
+  if (data.length < 2) return [];
+  const h = data[0];
+  const iCh = h.indexOf('Channel'), iTid = h.indexOf('Tracking ID'), iOid = h.indexOf('Order ID');
+  const iUser = h.indexOf('Primary Username'), iCust = h.indexOf('Customer ID'), iSt = h.indexOf('Status');
+  const iProd = h.indexOf('Products'), iBy = h.indexOf('Ship By');
+  const out = [];
+  for (let r = data.length - 1; r >= 1 && out.length < 15; r--) {
+    const row = data[r];
+    if (purgeNorm_(row[iCh]) !== 'TikTok') continue;
+    const tid = purgeNorm_(row[iTid]), oid = purgeNorm_(row[iOid]), user = purgeNorm_(row[iUser]);
+    if (tid.toLowerCase().indexOf(q) < 0 && oid.toLowerCase().indexOf(q) < 0 && user.toLowerCase().indexOf(q) < 0) continue;
+    const by = iBy >= 0 ? row[iBy] : '';
+    out.push({
+      tracking_id: tid, order_ids: oid, username: user, customer_id: purgeNorm_(row[iCust]),
+      status: purgeNorm_(row[iSt]), products: purgeNorm_(row[iProd]).slice(0, 160),
+      ship_by: by instanceof Date ? by.toISOString() : purgeNorm_(by),
+    });
+  }
+  return out;
+}
+
+// What Importar had recorded as the status of add-ons BEFORE it linked them.
+function purgePrevStatusMap_() {
+  const map = {};
+  try {
+    const sh = openSheetCached(ORDERS_SHEET_ID).getSheetByName(IMPORT_LOG_SHEET);
+    if (!sh || sh.getLastRow() < 2) return map;
+    const c = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].indexOf('Linked');
+    if (c < 0) return map;
+    sh.getRange(2, c + 1, sh.getLastRow() - 1, 1).getValues().forEach(r => {
+      try { const o = JSON.parse(r[0] || '{}'); Object.keys(o).forEach(k => { map[k] = o[k]; }); } catch (e) { /* bad JSON row: ignore */ }
+    });
+  } catch (e) { /* no Import Log yet: everything restores to Pagado */ }
+  return map;
+}
+
+// Everything that belongs to one shipment. Throws (Spanish message) if the
+// guía does not exist. Nothing is written here.
+function orderPurgePlan_(trackingId) {
+  const tid = purgeNorm_(trackingId);
+  if (!tid) throw new Error('Falta la guía (Tracking ID).');
+  const sheet = getOrdersSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) throw new Error('La hoja de pedidos está vacía.');
+  const h = data[0];
+  const ix = n => h.indexOf(n);
+  const iCh = ix('Channel'), iTid = ix('Tracking ID'), iOid = ix('Order ID'), iLink = ix('Linked Shipment');
+  const iSt = ix('Status'), iUser = ix('Primary Username'), iCust = ix('Customer ID'), iProd = ix('Products');
+  const iBy = ix('Ship By'), iSrc = ix('Nota Fuente');
+  const prev = purgePrevStatusMap_();
+  const plan = { tracking_id: tid, tiktok: [], notas_csv: [], unlink: [], shipped_addons: [], blockers: [],
+                 warnings: [], order_ids: [], customer_ids: [], history_rows: [], qc_rows: [], photo_urls: [], photo_items: [] };
+  const addCust = c => { c = purgeNorm_(c); if (c && plan.customer_ids.indexOf(c) < 0) plan.customer_ids.push(c); };
+
+  for (let r = 1; r < data.length; r++) {
+    const row = data[r];
+    const ch = purgeNorm_(row[iCh]), st = purgeNorm_(row[iSt]);
+    const own = purgeNorm_(row[iTid]) === tid && ch === 'TikTok';
+    const linked = purgeNorm_(row[iLink]) === tid && ch !== 'TikTok';
+    if (!own && !linked) continue;
+    const snap = {};
+    h.forEach((name, k) => { snap[name] = row[k] instanceof Date ? row[k].toISOString() : row[k]; });
+    const id = purgeNorm_(row[iOid]);
+    if (own) {
+      const by = iBy >= 0 ? row[iBy] : '';
+      plan.tiktok.push({ row: r + 1, order_id: id, status: st, username: purgeNorm_(row[iUser]), customer_id: purgeNorm_(row[iCust]),
+                         products: purgeNorm_(row[iProd]), ship_by: by instanceof Date ? by.toISOString() : purgeNorm_(by), snapshot: snap });
+      addCust(row[iCust]);
+      id.split('+').map(s => s.replace(/[^0-9]/g, '')).filter(Boolean).forEach(o => { if (plan.order_ids.indexOf(o) < 0) plan.order_ids.push(o); });
+      if (st === 'Enviado' || st === 'Archivado') plan.warnings.push('Este envío ya figura como ' + st + '. Al borrarlo, el cliente pierde ese envío en su conteo.');
+    } else if (ch === 'Nota' && id.indexOf('NOTA-') === 0 && NOTA_SOURCES_CSV.indexOf(purgeNorm_(row[iSrc])) >= 0) {
+      plan.notas_csv.push({ row: r + 1, order_id: id, text: purgeNorm_(row[iProd]), snapshot: snap });
+    } else if (ch === 'Mayorista') {
+      plan.blockers.push({ order_id: id, reason: 'Hay un pedido de Mayoreo (' + id + ') ligado a este envío. Desvincúlalo primero en Mayoristas (cambia su envío) y vuelve a intentar.' });
+    } else if (st === 'Enviado' || st === 'Archivado') {
+      plan.shipped_addons.push({ order_id: id, channel: ch, status: st });
+    } else {
+      const was = prev[id] && purgeNorm_(prev[id].tid) === tid ? purgeNorm_(prev[id].prev) : '';
+      const back = was === 'No Pagado' ? 'No Pagado' : (st === 'Anotado' ? 'Pagado' : st);
+      plan.unlink.push({ idx: r - 1, order_id: id, channel: ch, products: purgeNorm_(row[iProd]).slice(0, 120),
+                         from_status: st, to_status: back });
+    }
+  }
+  if (!plan.tiktok.length) throw new Error('No se encontró ningún envío de TikTok con la guía ' + tid + '.');
+  if (plan.shipped_addons.length) plan.warnings.push(plan.shipped_addons.length + ' producto(s) extra ya se enviaron con esta guía; no se tocan.');
+
+  // TikTok Import History: by guía, or by any of this shipment's TikTok order IDs.
+  const hs = getTikTokImportHistorySheet();
+  if (hs && hs.getLastRow() > 1) {
+    const hh = hs.getRange(1, 1, 1, hs.getLastColumn()).getValues()[0];
+    const cT = hh.indexOf('Tracking ID'), cO = hh.indexOf('Order ID');
+    const tCol = cT >= 0 ? readColumn(hs, cT) : [], oCol = cO >= 0 ? readColumn(hs, cO) : [];
+    const n = Math.max(tCol.length, oCol.length);
+    for (let i = 0; i < n; i++) {
+      const byT = cT >= 0 && purgeNorm_(tCol[i]) === tid;
+      const byO = cO >= 0 && plan.order_ids.indexOf(purgeNorm_(oCol[i]).replace(/[^0-9]/g, '')) >= 0;
+      if (byT || byO) plan.history_rows.push(i + 2);
+    }
+  }
+
+  // Empacar / QC record + its photos.
+  const qs = getQCSheet();
+  if (qs && qs.getLastRow() > 1) {
+    const qh = qs.getRange(1, 1, 1, qs.getLastColumn()).getValues()[0];
+    const cQ = qh.indexOf('Tracking ID');
+    const qCol = cQ >= 0 ? readColumn(qs, cQ) : [];
+    const photoCols = QC_PHOTO_COLS.map(c => qh.indexOf(c));
+    const photoVals = photoCols.map(c => (c >= 0 ? readColumn(qs, c) : []));
+    qCol.forEach((v, i) => {
+      if (purgeNorm_(v) !== tid) return;
+      const snap = {};
+      const rowVals = qs.getRange(i + 2, 1, 1, qh.length).getValues()[0];
+      qh.forEach((name, k) => { snap[name] = rowVals[k] instanceof Date ? rowVals[k].toISOString() : rowVals[k]; });
+      plan.qc_rows.push({ row: i + 2, snapshot: snap });
+      photoVals.forEach((pv, k) => {
+        const u = purgeNorm_(pv[i]);
+        if (u && u.indexOf(QC_PLACEHOLDER_ID) < 0) {
+          plan.photo_urls.push(u);
+          const col = QC_PHOTO_COLS[k];
+          plan.photo_items.push({ url: u, label: (col.indexOf('Box') === 0 ? 'Caja ' : 'Contenido ') + col.replace(/\D/g, '') });
+        }
+      });
+    });
+  }
+  return plan;
+}
+
+function orderPurgeSummary_(plan) {
+  return {
+    tracking_id: plan.tracking_id,
+    tiktok: plan.tiktok.map(t => ({ order_id: t.order_id, status: t.status, username: t.username, customer_id: t.customer_id,
+                                     products: t.products.slice(0, 200), ship_by: t.ship_by })),
+    notas_csv: plan.notas_csv.map(n => ({ order_id: n.order_id, text: n.text.slice(0, 120) })),
+    unlink: plan.unlink.map(u => ({ order_id: u.order_id, channel: u.channel, products: u.products, from_status: u.from_status, to_status: u.to_status })),
+    shipped_addons: plan.shipped_addons,
+    blockers: plan.blockers,
+    warnings: plan.warnings,
+    history_rows: plan.history_rows.length,
+    qc_rows: plan.qc_rows.length,
+    photos: plan.photo_urls.length,
+    photo_items: plan.photo_items,
+    qc_status: plan.qc_rows.map(q => purgeNorm_(q.snapshot['Status'])),
+    customer_ids: plan.customer_ids,
+  };
+}
+
+// body: { query } -> matches   |   { tracking_id } -> plan summary (nothing is changed)
+function orderPurgePreviewAction(body) {
+  try {
+    if (body.tracking_id) return jsonResponse({ plan: orderPurgeSummary_(orderPurgePlan_(body.tracking_id)) });
+    return jsonResponse({ matches: orderPurgeFind_(body.query) });
+  } catch (err) {
+    return jsonResponse({ error: String((err && err.message) || err) });
+  }
+}
+
+function purgeDeleteCloudinary_(urls) {
+  const out = { requested: urls.length, deleted: 0, not_found: 0, error: '' };
+  if (!urls.length) return out;
+  try {
+    const p = PropertiesService.getScriptProperties();
+    const cloud = p.getProperty('CLOUDINARY_CLOUD'), key = p.getProperty('CLOUDINARY_API_KEY'), secret = p.getProperty('CLOUDINARY_API_SECRET');
+    // TROUBLESHOOT: if photos stay in Cloudinary, check these 3 script properties
+    // (Project settings -> Script properties). The purge still completes without them.
+    if (!cloud || !key || !secret) { out.error = 'Cloudinary no está configurado: las fotos se quedaron en la nube.'; return out; }
+    const auth = 'Basic ' + Utilities.base64Encode(key + ':' + secret);
+    const ids = urls.map(u => cloudinaryPublicId(u, cloud)).filter(id => id && id.indexOf(QC_PLACEHOLDER_ID) < 0);
+    for (let i = 0; i < ids.length; i += 15) {
+      const q = ids.slice(i, i + 15).map(id => 'public_ids[]=' + encodeURIComponent(id)).join('&');
+      const res = UrlFetchApp.fetch('https://api.cloudinary.com/v1_1/' + cloud + '/resources/image/upload?' + q,
+        { method: 'delete', headers: { Authorization: auth }, muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) { out.error = 'Cloudinary respondió ' + res.getResponseCode(); continue; }
+      const d = JSON.parse(res.getContentText()).deleted || {};
+      Object.keys(d).forEach(k => { if (d[k] === 'deleted') out.deleted++; else out.not_found++; });
+    }
+  } catch (e) { out.error = 'No se pudieron borrar las fotos: ' + e.message; }
+  return out;
+}
+
+// body: { tracking_id, confirm: 'BORRAR' }
+function orderPurgeAction(body) {
+  const tid = purgeNorm_(body.tracking_id);
+  if (purgeNorm_(body.confirm).toUpperCase() !== 'BORRAR') return jsonResponse({ error: 'Falta la confirmación: escribe BORRAR.' });
+  let plan;
+  try { plan = orderPurgePlan_(tid); } catch (err) { return jsonResponse({ error: String((err && err.message) || err) }); }
+  if (plan.blockers.length) return jsonResponse({ error: plan.blockers.map(b => b.reason).join(' ') });
+  // Quality photos are the one thing that cannot be recreated: a second, explicit
+  // confirmation is required (the page shows the photos before asking for it).
+  if (plan.photo_urls.length && body.confirm_photos !== true) {
+    return jsonResponse({ error: 'Este envío tiene ' + plan.photo_urls.length + ' foto(s) de calidad subidas. Falta confirmar que también se borren las fotos.' });
+  }
+
+  const sheet = getOrdersSheet();
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  // 1) Non-destructive first: unlink the add-ons that stay.
+  const toStatus = {};
+  const allUnlink = [];
+  plan.unlink.forEach(u => {
+    allUnlink.push(u.idx);
+    if (u.to_status !== u.from_status) (toStatus[u.to_status] = toStatus[u.to_status] || []).push(u.idx);
+    logAudit('order_purge_unlink', 'Order', u.order_id, 'Linked Shipment', tid, '');
+  });
+  Object.keys(toStatus).forEach(v => setCellsToValue(sheet, oh.indexOf('Status'), toStatus[v], v, false));
+  setCellsToValue(sheet, oh.indexOf('Linked Shipment'), allUnlink, '', true);
+
+  // 2) Photos in Cloudinary, then the QC rows, then the import history rows.
+  const photos = purgeDeleteCloudinary_(plan.photo_urls);
+  if (plan.qc_rows.length) {
+    const qs = getQCSheet();
+    plan.qc_rows.map(q => q.row).sort((a, b) => b - a).forEach(r => qs.deleteRow(r));
+  }
+  if (plan.history_rows.length) {
+    const hs = getTikTokImportHistorySheet();
+    plan.history_rows.slice().sort((a, b) => b - a).forEach(r => hs.deleteRow(r));
+  }
+
+  // 3) The order itself and its CSV Notas, bottom row first.
+  const orderRows = plan.tiktok.map(t => t.row).concat(plan.notas_csv.map(n => n.row)).sort((a, b) => b - a);
+  orderRows.forEach(r => sheet.deleteRow(r));
+
+  // 4) Customer totals (Shipment Count, First Order Date).
+  let customers = 'ok';
+  try { reconcileCustomerAggregates(); } catch (err) {
+    // TROUBLESHOOT: the order is already deleted; run reconcileCustomerAggregates
+    // from the Apps Script dropdown (it also runs every night).
+    customers = 'No se pudo recalcular al momento (se corrige solo en la noche): ' + err.message;
+  }
+
+  // 5) Snapshot of everything that was deleted, for manual recovery.
+  const snapshot = {
+    tracking_id: tid, order_ids: plan.order_ids,
+    orders: plan.tiktok.map(t => t.snapshot), notas: plan.notas_csv.map(n => n.snapshot),
+    qc: plan.qc_rows.map(q => q.snapshot), history_rows: plan.history_rows.length,
+    unlinked: plan.unlink.map(u => ({ order_id: u.order_id, from: u.from_status, to: u.to_status })),
+    photos: photos,
+  };
+  let details = snapshot;
+  if (JSON.stringify(snapshot).length > 60000) {       // audit cache entries are size-limited
+    details = { tracking_id: tid, order_ids: plan.order_ids, orders: snapshot.orders, note: 'snapshot reducido por tamaño' };
+  }
+  logAuditEvent('order_purge', 'Order', tid, details);
+
+  return jsonResponse({
+    result: 'purged', tracking_id: tid,
+    deleted: { orders: plan.tiktok.length, notas: plan.notas_csv.length, history_rows: plan.history_rows.length,
+               qc_rows: plan.qc_rows.length, photos: photos },
+    unlinked: plan.unlink.map(u => ({ order_id: u.order_id, channel: u.channel, to_status: u.to_status })),
+    warnings: plan.warnings, customers: customers,
+  });
 }
