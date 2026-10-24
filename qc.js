@@ -540,6 +540,12 @@ function notasByTracking() {
   });
   return out;
 }
+function notaAsignadaTxt(n) {
+  const raw = String(n['Nota Asignada'] || '').trim();
+  if (!raw) return '';
+  try { const a = JSON.parse(raw); if (Array.isArray(a)) return a.join(', '); } catch (e) { /* plain text */ }
+  return raw;
+}
 function notasHtml(tid, compact) {
   const notas = notasByTracking()[tid] || [];
   if (!notas.length) return '';
@@ -548,7 +554,7 @@ function notasHtml(tid, compact) {
     <span style="background:#f1da65;border-radius:99px;padding:0 6px;font-weight:700;font-size:11px">Nota</span>
     <span style="font-size:11px;color:#7a6a20">${escapeHtml(n['Nota Fuente'] === 'Vendedor' ? 'del vendedor' : n['Nota Fuente'] === 'Comprador' ? 'del cliente' : '')}</span>
     <div style="margin-top:4px">${escapeHtml(n['Products'] || '')}</div>
-    ${n['Nota Asignada'] ? `<div style="font-size:12px;margin-top:2px">→ ${escapeHtml(n['Nota Asignada'])}</div>` : ''}
+    ${n['Nota Asignada'] ? `<div style="font-size:12px;margin-top:2px">→ ${escapeHtml(notaAsignadaTxt(n))}</div>` : ''}
   </div>`).join('');
 }
 // "LUN 26 OCT" from the stored ISO deadline (Mexico City)
