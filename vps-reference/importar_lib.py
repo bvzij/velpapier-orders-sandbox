@@ -421,6 +421,14 @@ def _row_key(name, variation, seller, qty):
     return f"{norm(name)}|{norm(variation)}|{norm(seller)}|{int(qty)}"
 
 
+def product_label(r):
+    """The name a note is linked to: "Product (Variation)" -- the same text the
+    page shows in the product checklist and the slip matches with."""
+    p = str(r.get("product") or "").strip()
+    v = str(r.get("variation") or "").strip()
+    return f"{p} ({v})" if v else p
+
+
 def csv_notes_by_order(csv_rows):
     """{order_id: {"buyer": text, "seller": text, "products": [...]}} from the
     raw CSV rows of one shipment. Messages repeat on every row of an order,
@@ -436,8 +444,9 @@ def csv_notes_by_order(csv_rows):
             o["buyer"] = b
         if s and not o["seller"]:
             o["seller"] = s
-        if r.get("products_str"):
-            o["products"].append(r["products_str"])
+        lbl = product_label(r) if r.get("product") else ""
+        if lbl and lbl not in o["products"]:
+            o["products"].append(lbl)
     return out
 
 
@@ -650,6 +659,7 @@ DEFAULT_SLIP = {
     "extras_size": 8.5, "lapiz_size": 26, "lapiz_text": "Lápiz Infinito",
     "deadline_size": 15, "footer_id_size": 9, "user_size": 12,
     "item_line_width": 0.8, "item_line_style": "solid",   # line between TikTok items
+    "row_note_size": 8.0,                                  # note printed under a product (bold)
 }
 
 
@@ -815,7 +825,7 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                 y += 2
 
     def draw_row(name, variation, seller, qty, indent=0, combo_label=False, qty_light=False, dot=False,
-                 boxes=True, light=False):
+                 boxes=True, light=False, notes=()):
         nonlocal y
         name = short_title(name)                 # warehouse sees the title only
         ns, ss, ls, qs = st["name_size"], st["sku_size"], st["seller_size"], st["qty_size"]
@@ -828,7 +838,14 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         v_lines = _wrap(fonts, var_c, ss, cx["sku_w"] - ss - 8) if var_c else []
         s_lines = _wrap(fonts, sel_c, ls, cx["seller_w"] - ls - 8) if sel_c else []
         lab_h = (ns * 1.15) if combo_label else 0
-        h = max(lab_h + len(n_lines) * ns * 1.18, len(v_lines) * ss * 1.18, len(s_lines) * ls * 1.18, qs * 1.15) + 4
+        txt_h = max(len(v_lines) * ss * 1.18, len(s_lines) * ls * 1.18)       # SKU / Seller SKU block
+        ns_row = st["row_note_size"]
+        note_lines = []
+        for t in notes:                                                      # notes linked to this product
+            note_lines += _wrap(fonts, clean_text(t, fonts.bold), ns_row,
+                                cx["seller"] + cx["seller_w"] - cx["sku"] - 4, True)
+        note_h = (len(note_lines) * ns_row * 1.2 + 3) if note_lines else 0
+        h = max(lab_h + len(n_lines) * ns * 1.18, txt_h + note_h, qs * 1.15) + 4
         fit(h)
         p = pg.page
         top = y
@@ -854,6 +871,11 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         if dot:
             # red dot = more than one unit; sits just left of the qty box, clear of the Seller SKU box
             p.draw_circle(fitz.Point(qx - _width(fonts, " ", qs) - qs * 0.75 - 5, top + 1 + qs * 0.6), 2.2, color=(1, 0, 0), fill=(1, 0, 0))
+        if note_lines:
+            ny = top + 1 + txt_h + ns_row * 0.95
+            for ln in note_lines:
+                _text(p, fonts, cx["sku"], ny, ln, ns_row, True)
+                ny += ns_row * 1.2
         if boxes:
             # Empty square drawn INLINE: one space after the last letter of SKU and
             # Seller SKU, and one space before the qty number. Size = 75 % of the font.
@@ -874,8 +896,10 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         # glyph the font could not draw is caught, not silently dropped)
         prefix = "combinelisting" if combo_label else ""
         pg.checks.append((name_rect, prefix + norm(name), "producto"))
-        pg.checks.append((fitz.Rect(cx["sku"] - 1, top, cx["sku"] + cx["sku_w"], top + h - 1), norm(variation), "SKU"))
-        pg.checks.append((fitz.Rect(cx["seller"] - 1, top, cx["seller"] + cx["seller_w"], top + h - 1), norm(seller), "Seller SKU"))
+        # SKU / Seller checks only read their own text block (the note below is not theirs)
+        tb = top + txt_h + 1
+        pg.checks.append((fitz.Rect(cx["sku"] - 1, top, cx["sku"] + cx["sku_w"], tb), norm(variation), "SKU"))
+        pg.checks.append((fitz.Rect(cx["seller"] - 1, top, cx["seller"] + cx["seller_w"], tb), norm(seller), "Seller SKU"))
         pg.checks.append((fitz.Rect(cx["seller"] + cx["seller_w"], top, W, top + h - 1), norm(qt), "Qty"))
         y = top + h + 2
 
@@ -889,12 +913,29 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         _rule(pg.page, M, W - M, y + 1, item_w, item_style)
         y += item_w + 3
 
+    # Notes linked to products (new): one piece of note can sit under several products.
+    # Pieces with no product go to the bottom section, as before.
+    segs = ship.get("note_segments")
+    by_label, unlinked = {}, []
+    if segs is not None:
+        for sg in segs:
+            keys = {norm(k) for k in (sg.get("keys") or []) if norm(k)}
+            if keys:
+                for kk in keys:
+                    by_label.setdefault(kk, []).append(sg)
+            else:
+                unlinked.append(sg)
+
+    def notes_for(name, variation):
+        lbl = f"{name} ({variation})" if variation else name
+        return [sg["text"] for sg in by_label.get(norm(lbl), [])]
+
     for k, it in enumerate(data["items"]):
         if k > 0:
             item_sep()
         if it["kind"] == "combo":
             draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], combo_label=True, qty_light=True,
-                     boxes=False, light=True)
+                     boxes=False, light=True, notes=notes_for(it["name"], it["variation"]))
             # only once the parent row is placed: if the children run onto the next
             # page, that page gets the "(continúa)" line; the parent is not repeated
             state["combo"] = it["name"]
@@ -904,7 +945,8 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                          dot=ch["eff_qty"] > 1, light=j < len(kids) - 1)
             state["combo"] = ""
         else:
-            draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], dot=it["qty"] > 1)
+            draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], dot=it["qty"] > 1,
+                     notes=notes_for(it["name"], it["variation"]))
 
     # Qty Total
     ts = st["total_size"]
@@ -919,14 +961,22 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
     # Notes (CSV text, or the edited text from the browser)
     edits = ship.get("note_edits") or {}
     for oid in data["order_ids"]:
-        n = data["notes"].get(oid) or {}
-        e = edits.get(oid) or {}
         blocks = []
-        for key, label in (("buyer", "Mensaje del cliente:"), ("seller", "Nota del vendedor:")):
-            txt = e.get(key) if e.get(key) is not None else n.get(key, "")
-            txt = clean_text(txt, fonts.reg)
-            if txt:
-                blocks.append((label, txt))
+        if segs is not None:
+            for sg in unlinked:
+                if str(sg.get("order_id")) != str(oid):
+                    continue
+                txt = clean_text(sg.get("text", ""), fonts.reg)
+                if txt:
+                    blocks.append(("Mensaje del cliente:" if sg.get("source") == "buyer" else "Nota del vendedor:", txt))
+        else:
+            n = data["notes"].get(oid) or {}
+            e = edits.get(oid) or {}
+            for key, label in (("buyer", "Mensaje del cliente:"), ("seller", "Nota del vendedor:")):
+                txt = e.get(key) if e.get(key) is not None else n.get(key, "")
+                txt = clean_text(txt, fonts.reg)
+                if txt:
+                    blocks.append((label, txt))
         if not blocks:
             continue
         os_, ns = st["order_size"], st["note_size"]
@@ -1255,7 +1305,12 @@ def test_slip_pdf(mode, settings):
                                                     {"text": "1× Washi Monet", "note": ""}]},
                     {"channel": "Shopify", "items": [{"text": "1× Libreta Pride & Prejudice", "note": ""}]},
                     {"channel": "Nota", "items": [{"text": "Entregar en recepción del edificio", "note": ""}]}],
-                "note_edits": {}}
+                "note_edits": {},
+                # sample: one seller note linked to the first product, one buyer message unlinked
+                "note_segments": [
+                    {"order_id": "586724685448053923", "source": "seller", "text": "NO mandar; es GA de mesversario",
+                     "keys": ["Cuaderno A5 Van Gogh 100 Hojas 75 Gramos Raya - Cierre Elástico - Acentos Dorados (Alendros 1)"]},
+                    {"order_id": "586724685448053923", "source": "buyer", "text": "Para la comunidad de mi parte", "keys": []}]}
         out = fitz.open()
         pages = render_rebuilt_slip(out, data, ship, st, fonts, "PRUEBA-NO-ES-ENVIO")
         if mode == "single" and len(pages) == 1:
