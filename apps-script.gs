@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.4';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.5';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -454,6 +454,15 @@ function doGet(e) {
       }
 
       const visibleCustomers = customers.filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+      // "Order Count" = how many orders each customer has in total (activity). Every username
+      // search in the dashboard sorts its matches by this, most active first.
+      try {
+        const counts = ordersCountByCustomer_();
+        visibleCustomers.forEach(c => { c['Order Count'] = counts[String(c['Customer ID'] || '').trim()] || 0; });
+      } catch (err) {
+        // TROUBLESHOOT: searches fall back to Shipment Count when Order Count is missing.
+        // Check that the Orders sheet has "Customer ID" and "Channel" columns.
+      }
       return jsonResponse({ records: visibleCustomers });
     }
 
@@ -8636,6 +8645,23 @@ function notaDuplicateAction(body) {
 // A note can have ONE gift; gift_undo removes the entries that are still untouched.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Orders per Customer ID, notes (Channel "Nota") not counted. Reads two columns only.
+function ordersCountByCustomer_() {
+  const sh = getOrdersSheet();
+  const out = {};
+  if (sh.getLastRow() < 2) return out;
+  const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const iC = h.indexOf('Customer ID'), iCh = h.indexOf('Channel');
+  if (iC < 0) return out;
+  const ids = readColumn(sh, iC), chs = iCh >= 0 ? readColumn(sh, iCh) : [];
+  ids.forEach((v, i) => {
+    const id = String(v || '').trim();
+    if (!id || String(chs[i] || '') === 'Nota') return;
+    out[id] = (out[id] || 0) + 1;
+  });
+  return out;
+}
+
 function giftParse_(raw) {
   try {
     const o = JSON.parse(String(raw || ''));
@@ -8665,7 +8691,8 @@ function giftCreateAction(body) {
     .filter(it => it.text);
   if (!notaId) return jsonResponse({ error: 'nota_order_id es obligatorio' });
   if (!items.length) return jsonResponse({ error: 'Marca al menos un producto para el regalo' });
-  if (!body.recipient_customer_id && !String(body.new_username || '').trim()) return jsonResponse({ error: 'Falta el destinatario' });
+  // A giveaway has no recipient: it is a Manual order with no customer, packed from Pedidos.
+  if (!body.giveaway && !body.recipient_customer_id && !String(body.new_username || '').trim()) return jsonResponse({ error: 'Falta el destinatario' });
 
   const sheet = getOrdersSheet();
   const notaRow = findOrderRow(sheet, notaId);
@@ -8682,7 +8709,9 @@ function giftCreateAction(body) {
   // Recipient: an existing customer by ID, or by username (reuses an exact/alias match, else a stub).
   const customersSheet = getCustomersSheet();
   let recipient = null, createdCustomer = false;
-  if (body.recipient_customer_id) {
+  if (body.giveaway) {
+    recipient = { id: '', username: 'GIVEAWAY' };
+  } else if (body.recipient_customer_id) {
     recipient = giftCustomerById_(body.recipient_customer_id);
     if (!recipient) return jsonResponse({ error: 'Cliente destinatario no encontrado' });
   } else {
@@ -8717,11 +8746,11 @@ function giftCreateAction(body) {
   forceTextFormat(sheet, oh, ['Order ID', 'Tracking ID'], start, rows.length);
   sheet.getRange(start, 1, rows.length, oh.length).setValues(rows);
 
-  const info = { recipient: recipient.id, username: recipient.username, gifter: String(body.gifter_username || ''),
+  const info = { giveaway: !!body.giveaway, recipient: recipient.id, username: recipient.username, gifter: String(body.gifter_username || ''),
                  order_ids: ids, labels: items.map(it => it.label).filter(Boolean) };
   sheet.getRange(notaRow, giftCol + 1).setValue(JSON.stringify(info));
   ids.forEach(id => logAuditEvent('gift_create', 'Order', id, { nota: notaId, recipient: recipient.id }));
-  return jsonResponse({ result: 'created', order_ids: ids, recipient_id: recipient.id,
+  return jsonResponse({ result: 'created', giveaway: !!body.giveaway, order_ids: ids, recipient_id: recipient.id,
                         recipient_username: recipient.username, created_customer: createdCustomer });
 }
 
