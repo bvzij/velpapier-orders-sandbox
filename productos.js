@@ -58,23 +58,60 @@ window.vpProductos = (function () {
     const key = pendingKey(type, id);
     const existing = pending.get(key);
     if (existing && existing.previewUrl) URL.revokeObjectURL(existing.previewUrl);
-    pending.set(key, { type, id, label, file, previewUrl: URL.createObjectURL(file), status: 'pending' });
+    const item = { type, id, label, file, previewUrl: URL.createObjectURL(file), status: 'uploading' };
+    pending.set(key, item);
+    render();
+    uploadInBackground(item);
+  }
+
+  async function uploadInBackground(item) {
+    try {
+      const thumbUrl = await uploadOne(item);
+      if (pending.get(pendingKey(item.type, item.id)) !== item) return;   // discarded or replaced while it was uploading
+      applyResult(item, thumbUrl);
+      item.status = 'uploaded';
+    } catch (e) {
+      if (pending.get(pendingKey(item.type, item.id)) !== item) return;
+      item.status = 'error';
+      item.error = e.message || String(e);
+    }
     render();
   }
 
-  function discardOne(type, id) {
+  async function discardOne(type, id) {
     const key = pendingKey(type, id);
     const p = pending.get(key);
-    if (p && p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+    if (!p) return;
+    if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
     pending.delete(key);
     render();
+    if (p.status === 'uploaded') {
+      // the photo is already saved on the sheet -- clear it back out
+      try { await clearImage(p.type, p.id); } catch (e) { toast('No se pudo borrar la foto guardada: ' + (e.message || e), true); }
+    }
   }
 
-  function discardAll() {
+  async function discardAll() {
     if (!pending.size || saving) return;
-    if (!confirm('¿Descartar ' + pending.size + ' foto(s) sin guardar?')) return;
-    pending.forEach(p => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
+    const items = Array.from(pending.values());
+    if (!confirm('¿Descartar ' + items.length + ' foto(s)?')) return;
+    items.forEach(p => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     pending.clear();
+    render();
+    const toClear = items.filter(p => p.status === 'uploaded');
+    for (let i = 0; i < toClear.length; i++) {
+      try { await clearImage(toClear[i].type, toClear[i].id); } catch (e) { /* best-effort */ }
+    }
+  }
+
+  async function clearImage(type, id) {
+    const body = type === 'parent'
+      ? { action: 'catalog_set_fields', catalog_id: id, type: 'parent', fields: { 'Image URL': '' } }
+      : { action: 'catalog_set_fields', catalog_id: id, fields: { 'Image URL': '' } };
+    const res = await VP.post(body);
+    if (!res || !res.ok) throw new Error((res && res.error) || 'Error desconocido');
+    if (type === 'parent') { const p = parents.find(x => x.parent_id === id); if (p) p.image = ''; }
+    else { for (const p of parents) { const v = p.variants.find(x => x.catalog_id === id); if (v) { v.image = ''; break; } } }
     render();
   }
 
@@ -99,44 +136,14 @@ window.vpProductos = (function () {
   }
 
   async function saveAll() {
-    if (saving || !pending.size) return;
-    saving = true;
+    if (saving) return;
     const items = Array.from(pending.values());
-    render();   // lock inputs, show "Guardando…"
-
-    let ok = 0, failed = 0;
-    // Sequential, not parallel: Apps Script serialises writes behind one lock
-    // anyway, so parallel calls would just queue up and risk the 30s "busy"
-    // timeout on a big batch. One at a time is slower but reliable.
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      item.status = 'uploading';
-      render();
-      try {
-        const thumbUrl = await uploadOne(item);
-        applyResult(item, thumbUrl);
-        item.status = 'done';
-        ok++;
-      } catch (e) {
-        item.status = 'error';
-        item.error = e.message || String(e);
-        failed++;
-      }
-      render();
-    }
-
-    // Drop everything that succeeded; keep failures staged so they can be retried.
-    items.forEach(item => {
-      if (item.status === 'done') {
-        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
-        pending.delete(pendingKey(item.type, item.id));
-      }
-    });
-
-    saving = false;
+    const stillUploading = items.filter(i => i.status === 'uploading');
+    if (stillUploading.length) { toast('Espera a que terminen de subir ' + stillUploading.length + ' foto(s)…', true); return; }
+    const done = items.filter(i => i.status === 'uploaded');
+    done.forEach(item => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); pending.delete(pendingKey(item.type, item.id)); });
     render();
-    if (failed) toast(ok + ' foto(s) guardadas, ' + failed + ' con error — revisa los recuadros en rojo', true);
-    else toast('✓ ' + ok + ' foto(s) guardadas');
+    if (done.length) toast('✓ ' + done.length + ' foto(s) guardadas');
   }
 
   function applyResult(item, thumbUrl) {
@@ -161,9 +168,8 @@ window.vpProductos = (function () {
     const inner = showUrl ? '<img src="' + esc(showUrl) + '" alt="">' : '<span class="pr-box-empty">+</span>';
     let overlay = '';
     if (p) {
-      if (p.status === 'pending') overlay = '<span class="pr-box-pending-badge">nueva</span><span class="pr-box-plus">✎</span>';
-      else if (p.status === 'uploading') overlay = '<div class="pr-box-progress">Subiendo…</div>';
-      else if (p.status === 'done') overlay = '<div class="pr-box-ok">✓</div>';
+      if (p.status === 'uploading') overlay = '<div class="pr-box-progress">Subiendo…</div>';
+      else if (p.status === 'uploaded') overlay = '<span class="pr-box-pending-badge" style="background:#1f8a4c;color:#fff">guardada</span><span class="pr-box-plus">✎</span>';
       else if (p.status === 'error') overlay = '<div class="pr-box-err" title="' + esc(p.error || '') + '">Error — toca para reintentar</div>';
     } else if (showUrl) {
       overlay = '<span class="pr-box-plus">✎</span>';
