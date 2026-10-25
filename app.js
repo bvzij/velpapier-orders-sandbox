@@ -289,6 +289,17 @@ function renderBulkItems() {
   });
 }
 
+function renderGiveawayToggle() {
+  const on = document.getElementById('giveaway-checkbox').checked;
+  const gift = document.getElementById('gift-checkbox');
+  if (on) {
+    gift.checked = false;
+    gift.disabled = true;
+    document.getElementById('gift-recipient-section').style.display = 'none';
+  } else {
+    gift.disabled = false;
+  }
+}
 function renderGiftToggle() {
   const checkbox = document.getElementById('gift-checkbox');
   const giftSection = document.getElementById('gift-recipient-section');
@@ -1858,6 +1869,7 @@ async function createRecord() {
   const channel = document.getElementById('new-channel').value;
   const status = document.getElementById('new-status').value;
   const isGift = document.getElementById('gift-checkbox').checked;
+  const isGiveaway = document.getElementById('giveaway-checkbox').checked;
   const recipient = isGift ? (document.getElementById('gift-recipient').value || '').trim() : '';
 
   if (!cliente) { showToast('Falta el usuario'); return; }
@@ -1873,6 +1885,8 @@ async function createRecord() {
   document.getElementById('new-channel').value = 'Manual';
   document.getElementById('new-status').value = 'No Pagado';
   document.getElementById('gift-checkbox').checked = false;
+  document.getElementById('giveaway-checkbox').checked = false;
+  document.getElementById('gift-checkbox').disabled = false;
   document.getElementById('gift-recipient').value = '';
   document.getElementById('gift-recipient-section').style.display = 'none';
   bulkItems = [{ producto: '', precio: '', notas: '' }];
@@ -1895,6 +1909,11 @@ async function createRecord() {
     jobs.push({ key, payload, item });
   };
   items.forEach(item => {
+    if (isGiveaway) {
+      // Giveaway: a Manual order with no customer, "Giveaway" in Notas (Pedidos pill)
+      addJob({ action: 'create_order', username: '', channel: 'Manual', products: 'GIVEAWAY DE ' + cliente + ' - ' + item.producto, price: 0, notes: 'Giveaway' + (item.notas ? ' · ' + item.notas : ''), shopify_order_id: '', status: 'Pagado' }, item);
+      return;
+    }
     if (isGift) {
       addJob({ action: 'create_order', username: cliente, channel: 'Manual', products: 'NO MANDAR - ' + item.producto, price: 0, notes: item.notas || '', shopify_order_id: '', status: 'Pagado' }, item);
       addJob({ action: 'create_order', username: recipient, channel: 'Manual', products: 'REGALO DE ' + cliente + ' - ' + item.producto, price: 0, notes: item.notas || '', shopify_order_id: '', status: 'Pagado' }, item);
