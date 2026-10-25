@@ -404,7 +404,7 @@ function initSelections() {
     };
   });
   S.notaEdit = {};
-  (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, keys: parseList(n.assigned) }; });
+  (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, keys: parseList(n.assigned), giftQty: {} }; });
   S.factId = (S.log && S.log['Fun Fact ID']) || '';
 }
 
@@ -577,7 +577,10 @@ function noteBoxHtml(n, list) {
     ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
         <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" ${(ed.keys || []).includes(p.label) ? 'checked' : ''}
           onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
-        <span>${esc(p.label)}</span></label>`).join('')
+        <span>${esc(p.label)}${(p.qty || 1) > 1 ? ` <span class="imp-muted">(${p.qty} pedidos)</span>` : ''}</span>
+        ${(p.qty || 1) > 1 && (ed.keys || []).includes(p.label) ? `<span style="margin-left:auto;white-space:nowrap;font-size:12.5px">regalar
+          <input type="number" min="1" max="${p.qty}" value="${giftQtyOf(ed, p)}" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" data-max="${p.qty}"
+            onchange="IMP.setGiftQty(this.dataset.nota, this.dataset.label, this.value, this.dataset.max)" style="width:56px;padding:3px 5px;border:0.5px solid var(--border-strong);border-radius:6px;font:inherit"></span>` : ''}</label>`).join('')
       : '<div class="imp-muted">Este pedido no tiene productos en el CSV.</div>'}
     <div class="imp-btns" style="margin-top:6px">
       <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
@@ -746,7 +749,22 @@ function giftItemsFor(n) {
   // the gift can use any product the checkboxes show (this order, or the whole shipment)
   const keys = (S.notaEdit[n.order_id] || {}).keys || [];
   const all = !!(S.notaAll || {})[n.order_id];
-  return noteProducts(n, all).filter(c => keys.includes(c.label));
+  const ed = S.notaEdit[n.order_id] || {};
+  return noteProducts(n, all).filter(c => keys.includes(c.label))
+    .map(c => Object.assign({}, c, { qty: giftQtyOf(ed, c), ordered: c.qty || 1 }));
+}
+// How many of a product are given away: the number the user chose, never more than ordered.
+function giftQtyOf(ed, p) {
+  const ordered = p.qty || 1;
+  const q = parseInt((ed.giftQty || {})[p.label], 10);
+  return Math.min(ordered, Math.max(1, isNaN(q) ? ordered : q));
+}
+function setGiftQty(oid, label, val, max) {
+  const e = (S.notaEdit[oid] = S.notaEdit[oid] || { text: '', keys: [], giftQty: {} });
+  e.giftQty = e.giftQty || {};
+  const mx = parseInt(max, 10) || 1;
+  e.giftQty[label] = Math.min(mx, Math.max(1, parseInt(val, 10) || 1));
+  renderConfigure();
 }
 async function ensureCustomers() { if (!allCustomers.length) await fetchCustomersForModal(); }
 function activityOf(c) {
@@ -858,7 +876,7 @@ async function giftCreate(oid) {
     const r = await VP.post({
       action: 'gift_create', nota_order_id: oid, gifter_username: gifterInfo.username || '', giveaway: ga,
       recipient_customer_id: (!ga && ui.recipient) ? ui.recipient.id : '', new_username: (!ga && ui.newName) || '',
-      items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c, ga) })),
+      items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c, ga), qty: c.qty, ordered: c.ordered })),
     });
     S.giftUi[oid] = {};
     if (r.created_customer) allCustomers = [];
@@ -925,10 +943,14 @@ function buildPlan(mode) {
     const ed = S.notaEdit[n.order_id] || { text: n.text, keys: [] };
     const g = n.gift;
     if (g && (g.labels || []).length) {
-      // the gifted product does not go in the gifter's box: say so under that product
-      const who = g.giveaway ? 'GIVEAWAY' : `REGALO PARA ${g.username}`;
-      (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
-        order_id: n.nota_pedido, source: 'gift', text: `${who} – NO va en este paquete`, keys: g.labels });
+      // the gifted product(s) do not all go in the gifter's box: say how many, under that product
+      const who = g.giveaway ? 'GIVEAWAY' : g.username;
+      g.labels.forEach(lbl => {
+        const q = (g.qtys || {})[lbl] || 1;
+        const tot = (g.ordered || {})[lbl] || q;
+        (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
+          order_id: n.nota_pedido, source: 'gift', text: `${q}/${tot} es para ${who} – NO va en este paquete`, keys: [lbl] });
+      });
     }
     const text = String(ed.text == null ? n.text : ed.text).trim();
     if (!text) return;
@@ -975,7 +997,6 @@ async function generate(mode) {
     const plan = buildPlan(mode);
     const sendPlan = Object.assign({}, plan);
     delete sendPlan.extrasByTid;
-    sendPlan.reverse_slip_pages = true;              // slip pages always 3,2,1 under the label
     const res = await callImporter({ op: 'render', csv_base64: S.csvB64, pdf_base64: S.pdfB64, plan: sendPlan,
                                      settings: { slip: S.settings.slip } });
     setProgress(true, 'Marcando productos como Anotado…', 80);
@@ -1722,7 +1743,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
-  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll,
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
