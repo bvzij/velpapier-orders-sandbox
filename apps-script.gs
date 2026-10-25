@@ -369,6 +369,7 @@ function doGet(e) {
     if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
     // Empacar pick list
     if (action === 'pick_lines') return pickLinesAction(e);
+    if (action === 'catalog_list') return catalogListAction(e);
     if (action === 'empacar_settings') return empacarSettingsGetAction(e, identity);
     if (action === 'batch_lines') return batchLinesAction(e);
     if (action === 'pack_stats') return requireAdmin(role) ? packStatsAction(e) : jsonResponse({ error: 'unauthorized' });
