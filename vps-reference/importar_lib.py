@@ -924,6 +924,23 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
     segs = ship.get("note_segments")
     by_label, unlinked = {}, []
     if segs is not None:
+        # A note linked to a product whose exact label is not on the slip (variation text changed,
+        # or spacing differs) is linked to that product when the PRODUCT NAME matches exactly one
+        # item on this slip. Otherwise it stays where it is and goes to the bottom section.
+        slip_labels = [norm(f"{it['name']} ({it['variation']})" if it["variation"] else it["name"]) for it in data["items"]]
+        slip_names = {}
+        for it in data["items"]:
+            slip_names.setdefault(norm(it["name"]), []).append(norm(f"{it['name']} ({it['variation']})" if it["variation"] else it["name"]))
+        for sg in segs:
+            ks = [k for k in (sg.get("keys") or []) if norm(k)]
+            if ks and not any(norm(k) in slip_labels for k in ks):
+                extra = []
+                for k in ks:
+                    cands = slip_names.get(norm(k.rsplit(" (", 1)[0]), [])
+                    if len(cands) == 1:
+                        extra.append(cands[0])
+                if extra:
+                    sg["keys"] = list(sg.get("keys") or []) + extra
         for sg in segs:
             keys = {norm(k) for k in (sg.get("keys") or []) if norm(k)}
             if keys:
@@ -1197,6 +1214,13 @@ def render_pdf(pdf_bytes, csv_bytes, plan, settings):
                 out.insert_pdf(src, from_page=si, to_page=si)
                 basic_annotate_slip(out[-1], ship)
             r["pages"] = len(slip_indices)
+        # "Invertir para la impresora": the pile comes out reversed, so a shipment's slip pages are
+        # written last-to-first (label, slip 3, slip 2, slip 1). The label stays first, and in the
+        # printed pile the slips then read 1, 2, 3 from the top. Single-page slips are unaffected.
+        n_slip = len(out) - start_pages
+        if plan.get("reverse_slip_pages") and n_slip > 1:
+            for i in range(n_slip - 1):
+                out.move_page(len(out) - 1, start_pages + i)
         report["shipments"][tid] = r
         report["rebuilt" if done else "basic"] += 1
     report["pages"] = len(out)
