@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.7';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.8';   // empacar pick list
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -367,6 +367,12 @@ function doGet(e) {
     if (action === 'get_upload_signature') return getUploadSignature(e);
     if (action === 'qc') return getQC(e);
     if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
+    // Empacar pick list
+    if (action === 'pick_lines') return pickLinesAction(e);
+    if (action === 'empacar_settings') return empacarSettingsGetAction(e, identity);
+    if (action === 'batch_lines') return batchLinesAction(e);
+    if (action === 'pack_stats') return requireAdmin(role) ? packStatsAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'pack_history') return requireAdmin(role) ? packHistoryAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_data') return mayoreoAllowed(identity) ? mayoreoDataAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_products') return mayoreoAllowed(identity) ? mayoreoProductsAction(e) : jsonResponse({ error: 'unauthorized' });
 
@@ -985,6 +991,12 @@ function dispatchPostAction(action, body, role) {
     if (action === 'funfacts_mark_used') return funFactsMarkUsedAction(body);
     if (action === 'save_qc') return saveQC(body);
     if (action === 'bulk_set_urgent') return bulkSetUrgent(body);
+    // Empacar pick list
+    if (action === 'save_pick') return savePickAction(body);
+    if (action === 'user_settings_save') return userSettingsSaveAction(body);
+    if (action === 'empacar_settings_save') return requireAdmin(role) ? empacarSettingsSaveAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_set_fields') return requireAdmin(role) ? catalogSetFieldsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'empacar_setup') return requireAdmin(role) ? empacarSetupAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'logout') return logoutAction(body);
     if (action === 'import_qc_history') return requireAdmin(role) ? importQcHistoryAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'run_health_checks') return requireAdmin(role) ? runHealthChecksAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -8785,4 +8797,674 @@ function giftUndoAction(body) {
   del.sort((a, b) => b.row - a.row).forEach(d => sheet.deleteRow(d.row));
   logAuditEvent('gift_undo', 'Order', notaId, { deleted: del.map(d => d.snap), kept: kept, already_gone: gone });
   return jsonResponse({ result: 'undone', deleted: del.map(d => d.id), kept: kept });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EMPACAR PICK LIST — lista visual de productos, Pack Log, escáner, ajustes
+// Added 2026-10-24. Everything below is NEW; nothing above was changed except
+// the version line and the route lines in doGet / dispatchPostAction.
+//
+//   GET  pick_lines        lines of a shipment + catalog join + saved pick state
+//   GET  empacar_settings  feature flags + this user's scan mode
+//   GET  pack_stats        (admin) orders / minutes per person per day
+//   GET  pack_history      (admin) every Pack Log row of a tracking / order id
+//   GET  batch_lines       combined pick list across several shipments (dormant UI)
+//   POST save_pick         save the ticks of one shipment (append-only Pack Log)
+//   POST user_settings_save    per-user scan mode (manual | continuous)
+//   POST empacar_settings_save (admin) feature flags
+//   POST catalog_set_fields    (admin) Image URL / Barcode / Stock / Low Stock At
+//   POST empacar_setup         (admin) creates the Pack Log tab + new columns
+//
+// Run setupEmpacarPick() ONCE from the Apps Script editor (Run button) to create
+// the Pack Log tab and the new columns. If you forget, save_pick creates the
+// Pack Log tab and the QC columns by itself the first time it runs.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PK_LOG_SHEET = 'Pack Log';
+// NOTE: the headers 'QC Ref' / 'Tracking Ref' are deliberately NOT 'QC ID' /
+// 'Tracking ID'. getQCSheet() finds the QC tab by looking for a tab that has
+// BOTH 'QC ID' and 'Tracking ID' -- a Pack Log with those names could be picked
+// as the QC tab if it ever sits before it in the tab order.
+const PK_LOG_HEADERS = ['Log ID', 'Timestamp', 'Session Open', 'QC Ref', 'Tracking Ref', 'Order Ref', 'Channel',
+  'Line Key', 'Catalog ID', 'TikTok SKU ID', 'Line Label', 'Qty Ordered', 'Qty Packed', 'State',
+  'Problem Reason', 'Problem Note', 'Method', 'Scanned Code', 'User', 'Save Kind'];
+const PK_LOG_NUMERIC = ['Qty Ordered', 'Qty Packed'];
+const PK_QC_COLS = ['Pick Status', 'Pick Problems', 'Pick By', 'Pick At'];
+const PK_VARIANT_COLS = ['Image URL', 'Barcode', 'Stock', 'Low Stock At'];
+const PK_REASONS = { no_encontrado: 'no encontrado', sobrevendido: 'sobrevendido', danado: 'dañado', otro: 'otro' };
+const PK_FLAG_DEFAULTS = {
+  pickListEnabled: true,        // master switch for the pick list
+  pickLockRequired: false,      // true = Enviar needs the pick list opened + completed on EVERY order
+  problemOverrideAllowed: true, // true = "enviar de todos modos" is possible with problem lines
+  productScanEnabled: true,     // scan button on the pick list (only shows when a line has a Barcode)
+  lowStockEnabled: true,        // low-stock flag on a line (only shows when Stock + Low Stock At are filled)
+  batchPickEnabled: false,      // reserved for the batch pick UI (not built yet)
+};
+
+function pkStr_(v, n) {
+  return String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
+}
+function pkDigits_(v) { return String(v == null ? '' : v).replace(/\D/g, ''); }
+function pkSplitIds_(csv) {
+  const out = [];
+  String(csv || '').split(/[,+]/).forEach(s => { const id = pkDigits_(s); if (id && out.indexOf(id) < 0) out.push(id); });
+  return out;
+}
+
+// ─── Settings ──────────────────────────────────────────────────────────────
+
+function pkFlags_() {
+  let s = {};
+  try { s = JSON.parse(PropertiesService.getScriptProperties().getProperty('EMPACAR_SETTINGS') || '{}'); } catch (e) { s = {}; }
+  const out = {};
+  Object.keys(PK_FLAG_DEFAULTS).forEach(k => { out[k] = typeof s[k] === 'boolean' ? s[k] : PK_FLAG_DEFAULTS[k]; });
+  return out;
+}
+
+// doPost sets _currentIdentity globally, doGet does NOT -- so GET handlers must be
+// handed the identity explicitly (see the route line in doGet).
+function pkUserKey_(identity) {
+  const id = identity || _currentIdentity;
+  return String((id && id.name) || '').toUpperCase();
+}
+
+function pkUserSettings_(identity) {
+  let all = {};
+  try { all = JSON.parse(PropertiesService.getScriptProperties().getProperty('USER_SETTINGS') || '{}'); } catch (e) { all = {}; }
+  const mine = all[pkUserKey_(identity)] || {};
+  return { scanMode: mine.scanMode === 'continuous' ? 'continuous' : 'manual' };
+}
+
+function empacarSettingsGetAction(e, identity) {
+  const id = identity || _currentIdentity;
+  return jsonResponse({
+    flags: pkFlags_(),
+    user: pkUserSettings_(id),
+    name: id ? id.name : '',
+  });
+}
+
+function userSettingsSaveAction(body) {
+  const key = pkUserKey_();
+  if (!key) return jsonResponse({ error: 'No se pudo identificar al usuario' }); // token without a name -> log in again
+  const mode = body.scan_mode === 'continuous' ? 'continuous' : 'manual';
+  const store = PropertiesService.getScriptProperties();
+  let all = {};
+  try { all = JSON.parse(store.getProperty('USER_SETTINGS') || '{}'); } catch (e) { all = {}; }
+  all[key] = Object.assign({}, all[key] || {}, { scanMode: mode });
+  store.setProperty('USER_SETTINGS', JSON.stringify(all));
+  return jsonResponse({ ok: true, scanMode: mode });
+}
+
+function empacarSettingsSaveAction(body) {
+  const incoming = body.flags || {};
+  const current = pkFlags_();
+  Object.keys(PK_FLAG_DEFAULTS).forEach(k => { if (typeof incoming[k] === 'boolean') current[k] = incoming[k]; });
+  PropertiesService.getScriptProperties().setProperty('EMPACAR_SETTINGS', JSON.stringify(current));
+  logAuditEvent('empacar_settings_save', 'Settings', 'EMPACAR_SETTINGS', current);
+  return jsonResponse({ ok: true, flags: current });
+}
+
+// ─── Sheets ────────────────────────────────────────────────────────────────
+
+function pkGetLogSheet_(create) {
+  const ss = openSheetCached(QC_SHEET_ID);
+  let sh = ss.getSheetByName(PK_LOG_SHEET);
+  if (!sh && create) {
+    sh = ss.insertSheet(PK_LOG_SHEET, ss.getSheets().length);   // always LAST tab
+    sh.getRange(1, 1, 1, PK_LOG_HEADERS.length).setValues([PK_LOG_HEADERS]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+// Creates the Pack Log tab + the new QC and Product Variants columns. Safe to
+// run any number of times (only adds what is missing).
+function pkSetup_() {
+  const report = { pack_log: false, qc_columns: [], variant_columns: [] };
+  const had = !!openSheetCached(QC_SHEET_ID).getSheetByName(PK_LOG_SHEET);
+  pkGetLogSheet_(true);
+  report.pack_log = !had;
+  const qc = getQCSheet();
+  PK_QC_COLS.forEach(c => {
+    const before = qc.getLastColumn();
+    const idx = ensureHeader(qc, c);
+    if (idx >= before) report.qc_columns.push(c);
+  });
+  const vs = getProductVariantsSheet();
+  if (vs) {
+    PK_VARIANT_COLS.forEach(c => {
+      const before = vs.getLastColumn();
+      const idx = ensureHeader(vs, c);
+      if (idx >= before) report.variant_columns.push(c);
+    });
+    const h = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
+    const bc = h.indexOf('Barcode');
+    if (bc >= 0) vs.getRange(2, bc + 1, Math.max(1, vs.getMaxRows() - 1), 1).setNumberFormat('@');   // EAN codes are long numbers
+  }
+  return report;
+}
+
+// Run this from the Apps Script editor (select it, press Run).
+function setupEmpacarPick() {
+  const r = pkSetup_();
+  Logger.log('Empacar pick setup: ' + JSON.stringify(r));
+  return r;
+}
+
+function empacarSetupAction(body) {
+  return jsonResponse({ ok: true, report: pkSetup_() });
+}
+
+// ─── Catalog join ──────────────────────────────────────────────────────────
+
+// One read of Product Variants + Product Parents. Columns Image URL / Barcode /
+// Stock / Low Stock At are optional: a missing column just reads as blank.
+function pkCatalogIndex_() {
+  const idx = { bySku: {}, byCatalog: {}, parentName: {}, parentImage: {} };
+  const vs = getProductVariantsSheet();
+  if (!vs || vs.getLastRow() < 2) return idx;
+  const vd = vs.getDataRange().getValues();
+  const vh = vd[0];
+  const c = n => vh.indexOf(n);
+  const iCat = c('Catalog ID'), iPar = c('Parent ID'), iVar = c('Variant Name'), iSku = c('TikTok SKU IDs');
+  const iImg = c('Image URL'), iBar = c('Barcode'), iStock = c('Stock'), iLow = c('Low Stock At');
+  if (iCat < 0) return idx;
+
+  const ps = getProductParentsSheet();
+  if (ps && ps.getLastRow() >= 2) {
+    const pd = ps.getDataRange().getValues();
+    const iPId = pd[0].indexOf('Parent ID'), iPName = pd[0].indexOf('Parent Name');
+    if (iPId >= 0 && iPName >= 0) {
+      for (let r = 1; r < pd.length; r++) idx.parentName[String(pd[r][iPId]).trim()] = String(pd[r][iPName] || '').trim();
+    }
+  }
+
+  for (let r = 1; r < vd.length; r++) {
+    const row = vd[r];
+    const cat = String(row[iCat] || '').trim();
+    if (!cat) continue;
+    const parentId = iPar >= 0 ? String(row[iPar] || '').trim() : '';
+    const img = iImg >= 0 ? String(row[iImg] || '').trim() : '';
+    const v = {
+      catalog_id: cat,
+      parent_id: parentId,
+      parent_name: idx.parentName[parentId] || '',
+      variant_name: iVar >= 0 ? String(row[iVar] || '').trim() : '',
+      image: img,
+      barcode: iBar >= 0 ? String(row[iBar] || '').trim() : '',
+      stock: iStock >= 0 && row[iStock] !== '' ? Number(row[iStock]) : null,
+      low_stock_at: iLow >= 0 && row[iLow] !== '' ? Number(row[iLow]) : null,
+    };
+    idx.byCatalog[cat] = v;
+    if (img && parentId && !idx.parentImage[parentId]) idx.parentImage[parentId] = img;
+    if (iSku >= 0) String(row[iSku] || '').split(',').forEach(s => { const sk = pkDigits_(s); if (sk) idx.bySku[sk] = v; });
+  }
+  return idx;
+}
+
+// ─── Raw order lines ───────────────────────────────────────────────────────
+
+// TikTok lines per Order ID from TikTok Import History. Only RAW data is cached
+// (6 h, they never change after import). The catalog join is done fresh on every
+// call, otherwise a newly added photo would stay invisible for hours.
+function pkTikTokRaw_(wanted) {
+  const result = {};
+  if (!wanted.length) return result;
+  const cache = CacheService.getScriptCache();
+  const cached = cache.getAll(wanted.map(id => 'otl3_' + id));
+  const missing = [];
+  wanted.forEach(id => {
+    const hit = cached['otl3_' + id];
+    if (hit) { try { result[id] = JSON.parse(hit); return; } catch (err) {} }
+    missing.push(id);
+  });
+  if (!missing.length) return result;
+
+  const sheet = getTikTokImportHistorySheet();
+  if (!sheet || sheet.getLastRow() < 2) return result;
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iId = h.indexOf('Order ID'), iSku = h.indexOf('SKU ID'), iSeller = h.indexOf('Seller SKU');
+  const iName = h.indexOf('Product Name'), iVar = h.indexOf('Variation'), iQty = h.indexOf('Quantity');
+  if (iId < 0 || iName < 0) return result;
+
+  const want = {};
+  missing.forEach(id => { want[id] = true; });
+  const matches = [];
+  readColumn(sheet, iId).forEach((v, i) => {
+    const id = pkDigits_(v);
+    if (want[id]) matches.push({ row: i + 2, id: id });
+  });
+  if (!matches.length) return result;
+
+  const cols = [iName, iVar, iQty, iSku, iSeller].filter(c => c >= 0);
+  const c0 = Math.min.apply(null, cols), c1 = Math.max.apply(null, cols);
+  const r0 = matches[0].row, r1 = matches[matches.length - 1].row;
+  const block = sheet.getRange(r0, c0 + 1, r1 - r0 + 1, c1 - c0 + 1).getValues();
+
+  const found = {}, seen = {};
+  matches.forEach(m => {
+    const rv = block[m.row - r0];
+    const name = String(rv[iName - c0] || '').trim();
+    if (!name) return;
+    const variation = iVar >= 0 ? String(rv[iVar - c0] || '').trim() : '';
+    const sku = iSku >= 0 ? pkDigits_(rv[iSku - c0]) : '';
+    const seller = iSeller >= 0 ? String(rv[iSeller - c0] || '').trim() : '';
+    const q = iQty >= 0 ? parseInt(rv[iQty - c0], 10) : 1;
+    const qty = q > 0 ? q : 1;
+    const key = m.id + '|' + sku + '|' + name + '|' + variation + '|' + qty;
+    if (seen[key]) return;          // the same import row sent twice
+    seen[key] = true;
+    (found[m.id] = found[m.id] || []).push({ sku: sku, name: name, variation: variation, qty: qty, seller: seller });
+  });
+  const toCache = {};
+  Object.keys(found).forEach(id => { result[id] = found[id]; toCache['otl3_' + id] = JSON.stringify(found[id]); });
+  try { if (Object.keys(toCache).length) cache.putAll(toCache, 21600); } catch (err) {}
+  return result;
+}
+
+// Shopify / Manual / Mayorista orders written on the same label ("Agregados").
+// Their lines live in the Orders row: 30 slots of Product N Catalog ID + Qty.
+function pkAddonRaw_(addons) {
+  const out = [];
+  if (!addons.length) return out;
+  const sheet = getOrdersSheet();
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iChan = oh.indexOf('Channel'), iProducts = oh.indexOf('Products');
+  addons.forEach(a => {
+    const row = findOrderRow(sheet, a.id);
+    if (!row) return;
+    const v = sheet.getRange(row, 1, 1, oh.length).getValues()[0];
+    const channel = a.channel || (iChan >= 0 ? String(v[iChan] || '') : '') || 'Manual';
+    let any = false;
+    for (let n = 1; n <= 30; n++) {
+      const iCat = oh.indexOf('Product ' + n + ' Catalog ID'), iQty = oh.indexOf('Product ' + n + ' Qty');
+      if (iCat < 0) break;
+      const cat = String(v[iCat] || '').trim();
+      if (!cat) continue;
+      const q = iQty >= 0 ? parseInt(v[iQty], 10) : 1;
+      out.push({ order_id: String(a.id), channel: channel, catalog_id: cat, label: '', qty: q > 0 ? q : 1 });
+      any = true;
+    }
+    if (!any && iProducts >= 0) {
+      // No catalog slots: fall back to the human-readable Products text ("2x Name; 1x Other").
+      String(v[iProducts] || '').split(';').map(x => x.trim()).filter(Boolean).forEach(p => {
+        const m = p.match(/^(\d+)\s*x\s*(.*)$/i);
+        out.push({ order_id: String(a.id), channel: channel, catalog_id: '', label: m ? m[2] : p, qty: m ? (parseInt(m[1], 10) || 1) : 1 });
+      });
+    }
+  });
+  return out;
+}
+
+function pkParseAddons_(str) {
+  const out = [];
+  String(str || '').split(',').forEach(s => {
+    const p = s.split(':');
+    const channel = p.length > 1 ? p[0].trim() : '';
+    const id = (p.length > 1 ? p.slice(1).join(':') : p[0]).trim();
+    if (id && !out.some(o => o.id === id)) out.push({ channel: channel, id: id });
+  });
+  return out;
+}
+
+function pkLineFromCatalog_(cat, idx) {
+  const own = cat.image;
+  return {
+    image: own || idx.parentImage[cat.parent_id] || '',
+    image_approx: !own && !!idx.parentImage[cat.parent_id],
+    barcode: cat.barcode,
+    stock: cat.stock,
+    low_stock_at: cat.low_stock_at,
+  };
+}
+
+function pkBuildLines_(ttIds, addons) {
+  const raw = pkTikTokRaw_(ttIds);
+  const addonRaw = pkAddonRaw_(addons);
+  const idx = pkCatalogIndex_();
+  const lines = [];
+
+  ttIds.forEach(oid => {
+    (raw[oid] || []).forEach(l => {
+      const cat = (l.sku && idx.bySku[l.sku]) || null;
+      const name = cat ? (cat.parent_name || l.name) : l.name;
+      const variation = cat ? (cat.variant_name || l.variation) : l.variation;
+      const extra = cat ? pkLineFromCatalog_(cat, idx) : { image: '', image_approx: false, barcode: '', stock: null, low_stock_at: null };
+      lines.push(Object.assign({
+        key: oid + '|' + (l.sku || (cat && cat.catalog_id) || pkStr_(l.name, 40)),
+        order_id: oid, channel: 'TikTok', sku_id: l.sku, catalog_id: cat ? cat.catalog_id : '',
+        name: name, variation: variation,
+        label: name + (variation ? ' (' + variation + ')' : ''),
+        qty: l.qty,
+      }, extra));
+    });
+  });
+
+  addonRaw.forEach((l, i) => {
+    const cat = l.catalog_id ? idx.byCatalog[l.catalog_id] : null;
+    const name = cat ? (cat.parent_name || cat.variant_name || l.label) : l.label;
+    const variation = cat ? cat.variant_name : '';
+    const extra = cat ? pkLineFromCatalog_(cat, idx) : { image: '', image_approx: false, barcode: '', stock: null, low_stock_at: null };
+    lines.push(Object.assign({
+      key: l.order_id + '|' + (l.catalog_id || pkStr_(l.label, 40)) + '|' + i,
+      order_id: l.order_id, channel: l.channel, sku_id: '', catalog_id: l.catalog_id || '',
+      name: name, variation: variation && variation !== name ? variation : '',
+      label: name + (variation && variation !== name ? ' (' + variation + ')' : ''),
+      qty: l.qty,
+    }, extra));
+  });
+  return lines;
+}
+
+// ─── Saved state (Pack Log) ────────────────────────────────────────────────
+
+function pkSavedState_(tracking) {
+  const out = { map: {}, by: '', at: '' };
+  const sh = pkGetLogSheet_(false);
+  if (!sh || sh.getLastRow() < 2 || !tracking) return out;
+  const h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const iTrk = h.indexOf('Tracking Ref');
+  if (iTrk < 0) return out;
+  const rows = [];
+  readColumn(sh, iTrk).forEach((v, i) => { if (String(v) === String(tracking)) rows.push(i + 2); });
+  if (!rows.length) return out;
+  const r0 = rows[0], r1 = rows[rows.length - 1];
+  const block = sh.getRange(r0, 1, r1 - r0 + 1, h.length).getValues();
+  const col = n => h.indexOf(n);
+  rows.forEach(r => {
+    const v = block[r - r0];
+    const key = String(v[col('Line Key')] || '');
+    if (!key) return;
+    out.map[key] = {
+      packed: Number(v[col('Qty Packed')]) || 0,
+      state: String(v[col('State')] || ''),
+      reason: String(v[col('Problem Reason')] || ''),
+      note: String(v[col('Problem Note')] || ''),
+    };
+    out.by = String(v[col('User')] || '');
+    out.at = String(v[col('Timestamp')] || '');
+  });
+  return out;
+}
+
+function pkQcSummary_(tracking) {
+  const empty = { status: '', problems: '', by: '', at: '' };
+  if (!tracking) return empty;
+  const qc = getQCSheet();
+  const h = qc.getRange(1, 1, 1, qc.getLastColumn()).getValues()[0];
+  const iTrk = h.indexOf('Tracking ID');
+  if (iTrk < 0) return empty;
+  const row = findRowByColumn(qc, colLetter(iTrk), tracking);
+  if (!row) return empty;
+  const v = qc.getRange(row, 1, 1, h.length).getValues()[0];
+  const g = n => { const i = h.indexOf(n); return i >= 0 ? String(v[i] || '') : ''; };
+  return { status: g('Pick Status'), problems: g('Pick Problems'), by: g('Pick By'), at: g('Pick At') };
+}
+
+// ─── GET pick_lines ────────────────────────────────────────────────────────
+// ?tracking_id=…&ids=orderId1,orderId2&addons=Shopify:123,Manual:456
+function pickLinesAction(e) {
+  const tracking = String(e.parameter.tracking_id || '').trim();
+  const ttIds = pkSplitIds_(e.parameter.ids);
+  const addons = pkParseAddons_(e.parameter.addons);
+  const lines = pkBuildLines_(ttIds, addons);
+  const saved = pkSavedState_(tracking);
+  return jsonResponse({
+    lines: lines,
+    saved: saved.map,
+    saved_by: saved.by,
+    saved_at: saved.at,
+    qc: pkQcSummary_(tracking),
+    flags: pkFlags_(),
+  });
+}
+
+// ─── POST save_pick ────────────────────────────────────────────────────────
+
+function pkCleanLine_(r) {
+  const qo = Math.max(1, Math.min(9999, parseInt(r.qty_ordered, 10) || 1));
+  const qp = Math.max(0, Math.min(qo, parseInt(r.qty_packed, 10) || 0));
+  let state = r.problem ? 'problema' : (qp >= qo ? 'empacado' : 'pendiente');
+  let reason = pkStr_(r.reason, 20);
+  if (state === 'problema' && !PK_REASONS[reason]) reason = 'otro';
+  if (state !== 'problema') reason = '';
+  return {
+    key: pkStr_(r.key, 120), order_id: pkStr_(r.order_id, 40), channel: pkStr_(r.channel, 20),
+    catalog_id: pkStr_(r.catalog_id, 40), sku_id: pkStr_(r.sku_id, 40), label: pkStr_(r.label, 200),
+    qty_ordered: qo, qty_packed: qp, state: state, reason: reason,
+    note: state === 'problema' ? pkStr_(r.note, 200) : '',
+    method: r.method === 'scan' ? 'scan' : 'tap', code: pkStr_(r.code, 60),
+  };
+}
+
+// status: '' | Parcial | Completo | Problema   (any problem line wins)
+function pkSummarize_(lines) {
+  const problems = [];
+  let anyProgress = false, allDone = lines.length > 0;
+  lines.forEach(l => {
+    if (l.state === 'problema') { problems.push(l); anyProgress = true; allDone = false; return; }
+    if (l.qty_packed > 0) anyProgress = true;
+    if (l.state !== 'empacado') allDone = false;
+  });
+  let status = '';
+  if (problems.length) status = 'Problema';
+  else if (allDone) status = 'Completo';
+  else if (anyProgress) status = 'Parcial';
+  const text = problems.map(l =>
+    l.qty_ordered + '× ' + l.label + ' — ' + (PK_REASONS[l.reason] || 'problema') +
+    (l.reason === 'otro' && l.note ? ' (' + l.note + ')' : '')).join('; ').slice(0, 300);
+  return { status: status, problems: text, problemCount: problems.length };
+}
+
+function savePickAction(body) {
+  const tracking = pkStr_(body.tracking_id, 80);
+  if (!tracking) return jsonResponse({ error: 'tracking_id es obligatorio' });      // the order was opened without a tracking ID -> reopen it from the list
+  if (!Array.isArray(body.lines) || !body.lines.length) return jsonResponse({ error: 'No hay productos que guardar' });   // pick list not loaded -> press "Ver productos" first
+  if (body.lines.length > 100) return jsonResponse({ error: 'Demasiados productos en un solo envío (máx. 100)' });          // unusual order; split it or contact admin
+  const lines = body.lines.map(pkCleanLine_).filter(l => l.key);
+  if (!lines.length) return jsonResponse({ error: 'Los productos no tienen identificador' });                                // front end out of date -> hard refresh the page
+  const kind = body.save_kind === 'enviar_override' ? 'enviar_override' : 'guardar';
+  const user = _currentIdentity ? _currentIdentity.name : '';
+  const now = nowISO();
+  const sessionOpen = pkStr_(body.session_open, 40);
+
+  // ── QC row: find it, or create the same blank row saveQC would ──────────
+  const qc = getQCSheet();
+  PK_QC_COLS.forEach(c => ensureHeader(qc, c));
+  const h = qc.getRange(1, 1, 1, qc.getLastColumn()).getValues()[0];
+  const iTrk = h.indexOf('Tracking ID'), iQcId = h.indexOf('QC ID');
+  if (iTrk < 0 || iQcId < 0) return jsonResponse({ error: 'La hoja QC no tiene las columnas QC ID / Tracking ID' });   // headers renamed in the QC sheet -> restore them
+  let row = findRowByColumn(qc, colLetter(iTrk), tracking);
+  let qcId;
+  if (row) {
+    qcId = qc.getRange(row, iQcId + 1).getValue();
+  } else {
+    qcId = generateQCID(qc);
+    const blank = new Array(h.length).fill('');
+    const put = (name, val) => { const i = h.indexOf(name); if (i >= 0) blank[i] = val; };
+    put('QC ID', qcId);
+    put('Tracking ID', tracking);
+    put('Customer ID', pkStr_(body.customer_id, 40));
+    put('Primary Username', pkStr_(body.username, 80));
+    put('Packer', user);
+    put('Timestamp', now);
+    put('Status', 'Activo');
+    const tt = (body.order_ids || []).filter(o => o && o.channel === 'TikTok').map(o => pkStr_(o.id, 60));
+    if (tt.length) put('TikTok Order IDs', tt.join(' + '));
+    forceTextFormat(qc, h, QC_ID_COLUMNS, qc.getLastRow() + 1, 1);
+    qc.appendRow(blank);
+    row = qc.getLastRow();
+  }
+
+  const sum = pkSummarize_(lines);
+  const prev = qc.getRange(row, 1, 1, h.length).getValues()[0];
+  const prevBy = String(prev[h.indexOf('Pick By')] || ''), prevAt = String(prev[h.indexOf('Pick At')] || '');
+  const setCell = (name, val) => { const i = h.indexOf(name); if (i >= 0) qc.getRange(row, i + 1).setValue(val); };
+  setCell('Pick Status', sum.status);
+  setCell('Pick Problems', sum.problems);
+  setCell('Pick By', user);
+  setCell('Pick At', now);
+
+  // ── Pack Log: ONE append for all lines ─────────────────────────────────
+  const log = pkGetLogSheet_(true);
+  const lh = log.getRange(1, 1, 1, log.getLastColumn()).getValues()[0];
+  const stamp = Utilities.getUuid().slice(0, 6);
+  const rows = lines.map((l, i) => {
+    const rec = {
+      'Log ID': 'PL-' + now.replace(/\D/g, '').slice(0, 14) + '-' + stamp + '-' + (i + 1),
+      'Timestamp': now, 'Session Open': sessionOpen, 'QC Ref': String(qcId), 'Tracking Ref': tracking,
+      'Order Ref': l.order_id, 'Channel': l.channel, 'Line Key': l.key, 'Catalog ID': l.catalog_id,
+      'TikTok SKU ID': l.sku_id, 'Line Label': l.label, 'Qty Ordered': l.qty_ordered, 'Qty Packed': l.qty_packed,
+      'State': l.state, 'Problem Reason': l.reason, 'Problem Note': l.note, 'Method': l.method,
+      'Scanned Code': l.code, 'User': user, 'Save Kind': kind,
+    };
+    return lh.map(name => rec[name] !== undefined ? rec[name] : '');
+  });
+  const start = log.getLastRow() + 1;
+  forceTextFormat(log, lh, lh.filter(n => PK_LOG_NUMERIC.indexOf(n) < 0), start, rows.length);
+  log.getRange(start, 1, rows.length, lh.length).setValues(rows);
+
+  logAuditEvent('save_pick', 'QC', String(qcId), { tracking: tracking, status: sum.status, lines: lines.length, problems: sum.problemCount, kind: kind });
+  return jsonResponse({
+    ok: true, qc_id: String(qcId), pick_status: sum.status, pick_problems: sum.problems,
+    saved_at: now, saved_by: user, previous: { by: prevBy, at: prevAt },
+  });
+}
+
+// ─── POST catalog_set_fields (admin) ───────────────────────────────────────
+// { catalog_id, fields: { 'Image URL': 'https://…', 'Barcode': '…', 'Stock': 12, 'Low Stock At': 3 } }
+function catalogSetFieldsAction(body) {
+  const catalogId = pkStr_(body.catalog_id, 40);
+  const fields = body.fields || {};
+  if (!catalogId) return jsonResponse({ error: 'catalog_id es obligatorio' });                          // the line has no catalog match -> link its SKU in Catálogo first
+  const names = Object.keys(fields);
+  if (!names.length) return jsonResponse({ error: 'No hay campos que guardar' });                       // empty request
+  for (let i = 0; i < names.length; i++) {
+    if (PK_VARIANT_COLS.indexOf(names[i]) < 0) return jsonResponse({ error: 'Campo no permitido: ' + names[i] });   // only Image URL / Barcode / Stock / Low Stock At
+  }
+  const vs = getProductVariantsSheet();
+  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });                   // tab renamed -> restore the name
+  const startH = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
+  const iCat = startH.indexOf('Catalog ID');
+  if (iCat < 0) return jsonResponse({ error: 'Product Variants no tiene la columna Catalog ID' });
+  const row = findRowByColumn(vs, colLetter(iCat), catalogId);
+  if (!row) return jsonResponse({ error: 'Variante no encontrada: ' + catalogId });                     // merged or deleted variant -> refresh the page and reopen
+
+  const clean = {};
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    let v = fields[n] == null ? '' : String(fields[n]).trim();
+    if (n === 'Image URL' && v && !/^https:\/\/[^\s]{4,480}$/i.test(v)) return jsonResponse({ error: 'La URL de la foto debe empezar con https:// y no tener espacios' });
+    if ((n === 'Stock' || n === 'Low Stock At') && v !== '' && !(Number(v) >= 0)) return jsonResponse({ error: n + ' debe ser un número mayor o igual a 0' });
+    if (n === 'Barcode') v = v.replace(/\s+/g, '');
+    clean[n] = v;
+  }
+  names.forEach(n => {
+    const col = ensureHeader(vs, n) + 1;
+    const cell = vs.getRange(row, col);
+    const before = cell.getValue();
+    if (n === 'Barcode' || n === 'Image URL') cell.setNumberFormat('@');
+    cell.setValue(n === 'Stock' || n === 'Low Stock At' ? (clean[n] === '' ? '' : Number(clean[n])) : clean[n]);
+    logAudit('catalog_set_field', 'Variant', catalogId, n, before, clean[n]);
+  });
+  return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
+}
+
+// ─── Dormant readers (admin) ───────────────────────────────────────────────
+
+function pkReadLog_() {
+  const sh = pkGetLogSheet_(false);
+  if (!sh || sh.getLastRow() < 2) return { h: [], rows: [] };
+  const d = sh.getDataRange().getValues();
+  return { h: d[0], rows: d.slice(1) };
+}
+
+// GET pack_stats?from=2026-10-01&to=2026-10-31  -> orders + minutes per person per day
+function packStatsAction(e) {
+  const log = pkReadLog_();
+  const h = log.h, g = n => h.indexOf(n);
+  const to = String(e.parameter.to || Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd'));
+  const from = String(e.parameter.from || Utilities.formatDate(new Date(Date.now() - 30 * 86400000), MX_TZ, 'yyyy-MM-dd'));
+  const days = {};
+  const saves = {};
+  log.rows.forEach(r => {
+    const ts = String(r[g('Timestamp')] || '');
+    const t = new Date(ts);
+    if (isNaN(t.getTime())) return;
+    const day = Utilities.formatDate(t, MX_TZ, 'yyyy-MM-dd');
+    if (day < from || day > to) return;
+    const user = String(r[g('User')] || '');
+    const k = day + '|' + user;
+    const d = days[k] = days[k] || { day: day, user: user, orders: {}, saves: {}, minutes: [], problems: 0 };
+    d.orders[String(r[g('QC Ref')])] = true;
+    if (r[g('State')] === 'problema') d.problems++;
+    const sk = ts + '|' + r[g('QC Ref')];
+    if (!d.saves[sk]) {
+      d.saves[sk] = true;
+      const so = new Date(String(r[g('Session Open')] || ''));
+      const mins = (t.getTime() - so.getTime()) / 60000;
+      if (!isNaN(mins) && mins >= 0 && mins <= 240) d.minutes.push(mins);
+    }
+  });
+  const out = Object.keys(days).sort().map(k => {
+    const d = days[k];
+    const avg = d.minutes.length ? d.minutes.reduce((a, b) => a + b, 0) / d.minutes.length : null;
+    return { day: d.day, user: d.user, orders: Object.keys(d.orders).length, saves: Object.keys(d.saves).length,
+             avg_minutes: avg === null ? null : Math.round(avg * 10) / 10, problem_lines: d.problems };
+  });
+  return jsonResponse({ from: from, to: to, rows: out });
+}
+
+// GET pack_history?tracking_id=…  or  ?order_id=…   -> every Pack Log row (newest last)
+function packHistoryAction(e) {
+  const tid = String(e.parameter.tracking_id || '').trim(), oid = String(e.parameter.order_id || '').trim();
+  if (!tid && !oid) return jsonResponse({ error: 'Falta tracking_id u order_id' });      // pass one of them in the URL
+  const log = pkReadLog_();
+  const h = log.h, g = n => h.indexOf(n);
+  const rows = [];
+  log.rows.forEach(r => {
+    if ((tid && String(r[g('Tracking Ref')]) === tid) || (oid && String(r[g('Order Ref')]) === oid)) {
+      const o = {}; h.forEach((k, i) => { o[k] = r[i]; }); rows.push(o);
+    }
+  });
+  return jsonResponse({ rows: rows.slice(-500) });
+}
+
+// Combine lines of several shipments: "Marcador azul: 7 en total, en 4 pedidos".
+// Pure function so it can be unit-tested: perShipment = [{ tracking_id, lines:[…] }]
+function pkAggregate_(perShipment) {
+  const map = {};
+  perShipment.forEach(s => {
+    (s.lines || []).forEach(l => {
+      const k = l.catalog_id || l.sku_id || l.label;
+      const a = map[k] = map[k] || { catalog_id: l.catalog_id, label: l.label, image: l.image, barcode: l.barcode, total: 0, orders: [] };
+      if (!a.image && l.image) a.image = l.image;
+      a.total += l.qty;
+      a.orders.push({ tracking_id: s.tracking_id, order_id: l.order_id, qty: l.qty });
+    });
+  });
+  return Object.keys(map).map(k => map[k]).sort((a, b) => a.label.localeCompare(b.label, 'es'));
+}
+
+// GET batch_lines?tracking_ids=A,B,C   (TikTok orders only)
+function batchLinesAction(e) {
+  const wanted = String(e.parameter.tracking_ids || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 60);
+  if (!wanted.length) return jsonResponse({ items: [], shipments: [] });
+  const sheet = getOrdersSheet();
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iT = oh.indexOf('Tracking ID'), iO = oh.indexOf('Order ID'), iC = oh.indexOf('Channel');
+  const byTid = {};
+  const tids = readColumn(sheet, iT), oids = readColumn(sheet, iO), chans = iC >= 0 ? readColumn(sheet, iC) : [];
+  tids.forEach((t, i) => {
+    const tid = String(t || '').trim();
+    if (wanted.indexOf(tid) < 0) return;
+    if (iC >= 0 && String(chans[i]) !== 'TikTok') return;
+    pkSplitIds_(oids[i]).forEach(id => { (byTid[tid] = byTid[tid] || []).indexOf(id) < 0 && byTid[tid].push(id); });
+  });
+  const all = [];
+  Object.keys(byTid).forEach(t => byTid[t].forEach(id => { if (all.indexOf(id) < 0) all.push(id); }));
+  const lines = pkBuildLines_(all, []);
+  const perShipment = wanted.map(t => ({ tracking_id: t, lines: lines.filter(l => (byTid[t] || []).indexOf(l.order_id) >= 0) }));
+  return jsonResponse({ items: pkAggregate_(perShipment), shipments: wanted });
 }
