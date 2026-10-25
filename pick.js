@@ -421,17 +421,40 @@
     }
   }
 
+  function pickFile() {
+    return new Promise(resolve => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'image/*'; inp.style.display = 'none';
+      inp.onchange = () => resolve(inp.files && inp.files[0] ? inp.files[0] : null);
+      document.body.appendChild(inp);
+      inp.click();
+      setTimeout(() => inp.remove(), 60000);
+    });
+  }
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('No se pudo leer el archivo'));
+      r.readAsDataURL(file);
+    });
+  }
+
   async function setImage(i) {
     const l = S.lines[i];
     if (!l || !l.catalog_id) { toast('Esta línea no está ligada al catálogo', true); return; }
-    const url = prompt('Pega la URL (https://…) de la foto para «' + l.label + '».\nDéjalo vacío para quitarla.', l.image || '');
-    if (url === null) return;
+    const file = await pickFile();
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { toast('La foto es demasiado grande (máx 15MB)', true); return; }
+    toast('Subiendo foto…');
     try {
-      await VP.post({ action: 'catalog_set_fields', catalog_id: l.catalog_id, fields: { 'Image URL': url.trim() } });
-      S.lines.forEach(x => { if (x.catalog_id === l.catalog_id) { x.image = url.trim(); x.image_approx = false; } });
+      const dataUrl = await fileToDataUrl(file);
+      const res = await VP.post({ action: 'catalog_upload_image', catalog_id: l.catalog_id, file_name: file.name, file_data: dataUrl });
+      if (!res || !res.ok) throw new Error((res && res.error) || 'Error desconocido');
+      S.lines.forEach(x => { if (x.catalog_id === l.catalog_id) { x.image = res.thumb_url; x.image_approx = false; } });
       renderSection();
       toast('✓ Foto guardada');
-    } catch (e) { toast('No se pudo guardar la foto: ' + (e.message || e), true); }   // only admins can change catalog photos
+    } catch (e) { toast('No se pudo subir la foto: ' + (e.message || e), true); }   // only admins can change catalog photos
   }
 
   // ── Section clicks ───────────────────────────────────────────────────────
