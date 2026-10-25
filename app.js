@@ -1913,15 +1913,12 @@ function showAssignGiveawayModal(id) {
   const r = allRecords.find(x => x.ID === id);
   if (!r) return;
   const c = document.getElementById('modal-container');
-  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Asignar giveaway a cliente</div>
-    <div class="edit-form" style="position:relative">
+  // overflow:visible so the autocomplete dropdown is not clipped by .modal's overflow:hidden
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" style="overflow:visible"><div class="modal-title">Asignar giveaway a cliente</div>
+    <div class="edit-form" style="position:relative;overflow:visible">
       <div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">${escapeHtml(r.Producto || '')}</div>
       <input type="text" id="assign-cliente" placeholder="Usuario del ganador" autocomplete="off" />
-      <div id="assign-autocomplete-list" class="autocomplete-list" style="display:none"></div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
-        <input type="checkbox" id="assign-strip-prefix" checked style="width:auto" />
-        <span>Quitar "GIVEAWAY DE …" del nombre del producto</span>
-      </label>
+      <div id="assign-autocomplete-list" class="autocomplete-list" style="display:none;max-height:220px;overflow-y:auto"></div>
     </div>
     <div class="modal-actions"><button class="btn" id="assign-cancel-btn">Cancelar</button><button class="btn btn-primary" id="assign-save-btn">Asignar</button></div>
   </div></div>`;
@@ -1958,8 +1955,7 @@ function showAssignGiveawayModal(id) {
     // customer) -- it just won't carry a Customer ID until the next customer sync links it.
     const name = picked && picked.name === typed ? picked.name : typed;
     const customerId = picked && picked.name === typed ? picked.customerId : '';
-    const strip = document.getElementById('assign-strip-prefix').checked;
-    const newProducto = strip ? stripGiveawayPrefix(r.Producto) : r.Producto;
+    const newProducto = stripGiveawayPrefix(r.Producto);
     closeModal();
     try {
       const fields = { Cliente: name, Producto: newProducto };
