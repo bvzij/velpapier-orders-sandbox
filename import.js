@@ -975,6 +975,7 @@ async function generate(mode) {
     const plan = buildPlan(mode);
     const sendPlan = Object.assign({}, plan);
     delete sendPlan.extrasByTid;
+    sendPlan.reverse_slip_pages = true;              // slip pages always 3,2,1 under the label
     const res = await callImporter({ op: 'render', csv_base64: S.csvB64, pdf_base64: S.pdfB64, plan: sendPlan,
                                      settings: { slip: S.settings.slip } });
     setProgress(true, 'Marcando productos como Anotado…', 80);
