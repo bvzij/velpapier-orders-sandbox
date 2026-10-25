@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
+  <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Productos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .pr-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .pr-search-wrap { flex: 1; min-width: 220px; position: relative; }
+    .pr-search-wrap svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-faint); }
+    .pr-search { width: 100%; padding: 9px 10px 9px 32px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--text); font-family: inherit; }
+    .pr-stat { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+    .pr-save-bar { position: sticky; top: 56px; z-index: 40; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 1rem; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+    .pr-save-bar.is-empty { display: none; }
+    .pr-save-text { font-size: 13px; font-weight: 600; }
+    .pr-save-btn { background: var(--text); color: var(--surface); border: none; border-radius: var(--radius-md); padding: 9px 18px; font-size: 13px; font-weight: 700; font-family: inherit; cursor: pointer; }
+    .pr-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .pr-discard-btn { background: none; border: 0.5px solid var(--border-strong); border-radius: var(--radius-md); padding: 9px 14px; font-size: 13px; font-family: inherit; cursor: pointer; color: var(--text-muted); }
+
+    .pr-product { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 14px; margin-bottom: 12px; }
+    .pr-product-top { display: flex; gap: 14px; align-items: flex-start; }
+    .pr-product-info { flex: 1; min-width: 0; padding-top: 2px; }
+    .pr-product-name { font-size: 15px; font-weight: 700; }
+    .pr-product-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .pr-variants { margin-top: 12px; padding-top: 12px; border-top: 0.5px solid var(--border); display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .pr-variant { display: flex; flex-direction: column; gap: 6px; }
+    .pr-variant-label { font-size: 12px; font-weight: 600; line-height: 1.3; }
+    .pr-variant-sku { font-size: 11px; color: var(--text-faint); }
+
+    .pr-box { position: relative; border: 1.5px dashed var(--border-strong); border-radius: var(--radius-md); background: var(--bg); overflow: hidden; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.12s, background 0.12s; }
+    .pr-box.pr-box--parent { width: 110px; height: 110px; flex: 0 0 auto; }
+    .pr-box.pr-box--variant { width: 100%; aspect-ratio: 1 / 1; }
+    .pr-box:hover { border-color: var(--text-muted); }
+    .pr-box.drag-over { border-color: var(--pr-accent, #1f8a4c); background: var(--surface2); }
+    .pr-box.has-image { border-style: solid; border-color: var(--border); }
+    .pr-box.is-pending { border-color: #d9a400; border-style: solid; }
+    .pr-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .pr-box-empty { font-size: 20px; color: var(--text-faint); }
+    .pr-box-plus { position: absolute; bottom: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; background: var(--text); color: var(--surface); font-size: 13px; display: flex; align-items: center; justify-content: center; line-height: 1; pointer-events: none; }
+    .pr-box-pending-badge { position: absolute; top: 4px; left: 4px; background: #d9a400; color: #1a1500; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 99px; pointer-events: none; }
+    .pr-box-progress { position: absolute; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: 700; }
+    .pr-box-ok { position: absolute; inset: 0; background: rgba(31,138,76,0.85); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; }
+    .pr-box-err { position: absolute; bottom: 0; left: 0; right: 0; background: #d92d20; color: #fff; font-size: 10px; font-weight: 700; padding: 3px 4px; text-align: center; }
+    .pr-box input[type=file] { display: none; }
+
+    .pr-empty-state { padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+    @media (max-width: 560px) {
+      .pr-product-top { flex-wrap: wrap; }
+      .pr-variants { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+
+<main class="vp-shell vp-shell--wide">
+
+  <section class="vp-hero" style="padding-bottom:1.25rem">
+    <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Productos</h1>
+    <div class="vp-hero-date">Fotos del catálogo — arrastra una imagen o toca para elegir</div>
+  </section>
+
+  <div class="pr-toolbar">
+    <div class="pr-search-wrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="pr-search" class="pr-search" placeholder="Buscar producto, SKU o variante…" oninput="vpProductos.render()">
+    </div>
+    <div class="pr-stat" id="pr-stat"></div>
+    <button class="refresh-btn" id="pr-refresh" onclick="vpProductos.load(true)">↻ Actualizar</button>
+  </div>
+
+  <div class="pr-save-bar is-empty" id="pr-save-bar">
+    <div class="pr-save-text" id="pr-save-text"></div>
+    <div style="display:flex;gap:8px">
+      <button class="pr-discard-btn" id="pr-discard-btn" onclick="vpProductos.discardAll()">Descartar</button>
+      <button class="pr-save-btn" id="pr-save-btn" onclick="vpProductos.saveAll()">Guardar todo</button>
+    </div>
+  </div>
+
+  <div id="pr-list"></div>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+  (async function () {
+    await VP.ensureToken();
+    VP.requireAdminPage();
+    VP.mountNav('productos');
+  })();
+</script>
+<script src="productos.js"></script>
+</body>
+</html>
