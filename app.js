@@ -173,6 +173,7 @@ let tabDataLoaded = { enviado: false, archivo: false };
 let shopifyPendingGroupsList = [];
 let allCustomers = {}; // keyed by lowercase username → { name, shipmentCount }
 let customersById = {}; // keyed by Customer ID → Primary Username, for backfilling missing order-level usernames
+let customersOrders = {}; // keyed by Customer ID → total orders (activity), used to rank username matches
 let pendingMatchesByShopifyOrderId = {}; // keyed by Shopify Order ID → pending match record, for the merge review UI
 let currentTab = 'activos';
 let currentSort = 'newest';
@@ -318,6 +319,15 @@ let historyPromise = null;       // single shared Enviado+Archivado load
 
 function normUser(s) { return String(s || '').trim().replace(/^@/, '').toLowerCase(); }
 
+// Username matches: the ones that START with what was typed first, then the most active
+// customers (most orders in total). Used by every username search in Pedidos.
+function rankClientes(list, val) {
+  const v = normUser(val);
+  const starts = c => [c.name, ...(c.aliases || [])].some(n => normUser(n).startsWith(v));
+  return list.sort((a, b) => (starts(b) - starts(a)) || ((b.orderCount || 0) - (a.orderCount || 0)) ||
+    String(a.name).localeCompare(String(b.name), 'es'));
+}
+
 function searchSuggestions(val) {
   const v = normUser(val);
   if (!v) return [];
@@ -328,7 +338,7 @@ function searchSuggestions(val) {
     if (names.some(n => n.startsWith(v))) starts.push(c);
     else if (names.some(n => n.includes(v))) contains.push(c);
   });
-  return [...starts, ...contains].slice(0, 8);
+  return [...rankClientes(starts, v), ...rankClientes(contains, v)].slice(0, 8);
 }
 
 function handleSearchInput() {
@@ -561,11 +571,11 @@ function handleClienteInput() {
   const val = document.getElementById('new-cliente').value.trim().toLowerCase();
   const list = document.getElementById('autocomplete-list');
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => {
+  const clientes = rankClientes(getUniqueClientes().filter(c => {
     const val_lower = val.toLowerCase();
-    return c.name.toLowerCase().startsWith(val_lower) ||
-      (c.aliases || []).some(a => a.toLowerCase().startsWith(val_lower));
-  }).slice(0, 8);
+    return c.name.toLowerCase().includes(val_lower) ||
+      (c.aliases || []).some(a => a.toLowerCase().includes(val_lower));
+  }), val).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
   clientes.forEach(c => {
@@ -591,10 +601,10 @@ function handleGiftRecipientInput() {
   const val = (document.getElementById('gift-recipient').value || '').trim().toLowerCase();
   const list = document.getElementById('gift-autocomplete-list');
   if (!val) { list.style.display = 'none'; return; }
-  const clientes = getUniqueClientes().filter(c => {
-    return c.name.toLowerCase().startsWith(val) ||
-      (c.aliases || []).some(a => a.toLowerCase().startsWith(val));
-  }).slice(0, 8);
+  const clientes = rankClientes(getUniqueClientes().filter(c => {
+    return c.name.toLowerCase().includes(val) ||
+      (c.aliases || []).some(a => a.toLowerCase().includes(val));
+  }), val).slice(0, 8);
   if (!clientes.length) { list.style.display = 'none'; return; }
   list.innerHTML = '';
   clientes.forEach(c => {
@@ -627,7 +637,7 @@ function getUniqueClientes() {
     const primary = (c.name || '').trim();
     if (!primary) return;
     const k = primary.toLowerCase();
-    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [], customerId: c.customerId || '' };
+    if (!seen[k]) seen[k] = { name: primary, aliases: c.aliases || [], customerId: c.customerId || '', orderCount: c.orderCount || 0 };
   });
   return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 }
@@ -650,7 +660,7 @@ function showLinkedShipmentModal(tid) {
     <div class="modal-body">
       <div style="font-family:monospace;font-size:13px;margin-bottom:8px">${escapeHtml(tid)}</div>`;
   const body = t ? `
-      <div class="modal-field"><div class="modal-field-label">Usuario</div><div class="modal-field-value">@${escapeHtml(t.Cliente || '')}</div></div>
+      <div class="modal-field"><div class="modal-field-label">Usuario</div><div class="modal-field-value">${escapeHtml(t.Cliente || '')}</div></div>
       <div class="modal-field"><div class="modal-field-label">Pedido TikTok</div><div class="modal-field-value">${escapeHtml(t.ID || '')}</div></div>
       <div class="modal-field"><div class="modal-field-label">Estado</div><div class="modal-field-value">${escapeHtml(t.Status || '')}</div></div>
       ${deadline ? `<div class="modal-field"><div class="modal-field-label">Fecha límite</div><div class="modal-field-value">${escapeHtml(deadline)}</div></div>` : ''}
@@ -1521,13 +1531,16 @@ function rebuildAllRecords() {
 function applyCustomers(customersData) {
   allCustomers = {};
   customersById = {};
+  customersOrders = {};
   (customersData.records || []).forEach(c => {
     const primary = String(c['Primary Username'] || '').trim();
     const custId = String(c['Customer ID'] || '').trim();
     if (custId) customersById[custId] = primary;
     if (!primary) return;
     const aliases = c['Aliases'] ? String(c['Aliases']).split(',').map(a => a.trim()).filter(Boolean) : [];
-    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, aliases, customerId: custId };
+    const orderCount = c['Order Count'] !== undefined ? (parseInt(c['Order Count'], 10) || 0) : (parseInt(c['Shipment Count'], 10) || 0);
+    const entry = { name: primary, shipmentCount: parseInt(c['Shipment Count'], 10) || 0, orderCount, aliases, customerId: custId };
+    customersOrders[custId] = orderCount;
     [primary, ...aliases].forEach(a => { if (a) allCustomers[a.toLowerCase()] = entry; });
   });
 }
@@ -1758,7 +1771,7 @@ function requestRenameCliente(group) {
   input.addEventListener('input', () => {
     const val = input.value.trim().toLowerCase();
     if (!val) { list.style.display = 'none'; return; }
-    const clientes = getUniqueClientes().filter(cl => (cl.name.toLowerCase().startsWith(val) || (cl.aliases || []).some(a => a.toLowerCase().startsWith(val))) && cl.name !== oldName).slice(0, 8);
+    const clientes = rankClientes(getUniqueClientes().filter(cl => (cl.name.toLowerCase().includes(val) || (cl.aliases || []).some(a => a.toLowerCase().includes(val))) && cl.name !== oldName), val).slice(0, 8);
     if (!clientes.length) { list.style.display = 'none'; return; }
     list.innerHTML = '';
     clientes.forEach(cl => {
@@ -3170,9 +3183,8 @@ function showRelinkPicker(match) {
   const c = document.getElementById('modal-container');
 
   const options = Object.keys(customersById)
-    .map(id => ({ id, name: customersById[id] || id }))
-    .filter(o => o.name)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .map(id => ({ id, name: customersById[id] || id, orderCount: customersOrders[id] || 0 }))
+    .filter(o => o.name);
 
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal relink-picker-modal">
     <div class="modal-title">Buscar cliente correcto</div>
@@ -3190,9 +3202,7 @@ function showRelinkPicker(match) {
 
   function renderResults(query) {
     const q = query.trim().toLowerCase();
-    const filtered = q
-      ? options.filter(o => o.name.toLowerCase().includes(q)).slice(0, 25)
-      : options.slice(0, 25);
+    const filtered = rankClientes(q ? options.filter(o => o.name.toLowerCase().includes(q)) : options.slice(), q).slice(0, 25);
 
     if (!filtered.length) {
       resultsEl.innerHTML = '<div class="empty-state">Sin resultados</div>';
