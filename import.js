@@ -530,6 +530,64 @@ function printOptionsHtml(mode) {
 function setOptEl(el) { setOpt(el.dataset.k, el.dataset.c === '1' ? el.checked : el.value); }
 function settingsChanged() { S.settings = readSettingsForm(); renderSettings(); }
 
+// ── Notas list: filter pills per customer, products of the order or of the whole shipment ──
+function noteOwner(n, list) { return (list.find(x => x.tid === n.linked_shipment) || {}).username || '?'; }
+// Products a note can be linked to. Default: the products of ITS order. "Todos": every product of the shipment.
+function noteProducts(n, all) {
+  const base = parseCands(n.candidates);
+  if (!all) return base;
+  const seen = new Set(base.map(c => c.label));
+  const m = S.meta.find(x => x.tracking_id === n.linked_shipment) || {};
+  const extra = [];
+  (m.products || []).forEach(p => {
+    const label = p.variation ? `${p.product} (${p.variation})` : p.product;
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    extra.push({ label, product: p.product || '', variation: p.variation || '', seller_sku: '', qty: p.qty || 1 });
+  });
+  return base.concat(extra);
+}
+function notaBlockHtml(notas, list) {
+  S.notaAll = S.notaAll || {};
+  const owners = {};
+  notas.forEach(n => { const u = noteOwner(n, list); owners[u] = (owners[u] || 0) + 1; });
+  const filt = S.noteFilter && owners[S.noteFilter] ? S.noteFilter : 'all';
+  S.noteFilter = filt;
+  const shown = filt === 'all' ? notas : notas.filter(n => noteOwner(n, list) === filt);
+  const pill = (key, label, count) => `<button data-f="${esc(key)}" onclick="IMP.noteFilter(this.dataset.f)" style="padding:4px 10px;border-radius:99px;font:inherit;font-size:12.5px;cursor:pointer;border:0.5px solid var(--border-strong);background:${filt === key ? 'var(--text)' : 'var(--surface)'};color:${filt === key ? 'var(--surface)' : 'var(--text)'}">${esc(label)} · ${count}</button>`;
+  const pills = [pill('all', 'Todos', notas.length)].concat(Object.keys(owners).sort((x, y) => x.localeCompare(y, 'es')).map(u => pill(u, u, owners[u]))).join('');
+  return `<div class="imp-card">
+      <h3><span class="nota-tag">Nota</span> Mensajes en esta importación <small>· ${notas.length}</small></h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px">${pills}</div>
+      <div class="imp-muted" style="margin-bottom:6px">Ya están en Pedidos como Anotado. Marca a qué producto(s) se refiere cada mensaje: en la hoja saldrá en negrita debajo de ese producto. Si un mensaje habla de varios productos, duplícalo y pon cada parte en su producto.</div>
+      ${shown.map(n => noteBoxHtml(n, list)).join('')}
+    </div>`;
+}
+function noteBoxHtml(n, list) {
+  const ed = S.notaEdit[n.order_id] || { text: n.text, keys: parseList(n.assigned) };
+  const i = list.find(x => x.tid === n.linked_shipment) || {};
+  const all = !!(S.notaAll || {})[n.order_id];
+  const prods = noteProducts(n, all);
+  return `<div class="imp-nota">
+    <b>${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
+    ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
+    <textarea data-nota="${esc(n.order_id)}" oninput="IMP.editNota(this.dataset.nota, this.value)">${esc(ed.text)}</textarea>
+    <div style="margin-top:6px;font-size:12.5px"><b>¿A qué producto(s) se refiere?</b>
+      <button data-nota="${esc(n.order_id)}" onclick="IMP.noteAll(this.dataset.nota)" style="margin-left:8px;font:inherit;font-size:12px;background:none;border:none;color:var(--blue-text, #185fa5);cursor:pointer;text-decoration:underline">${all ? 'Solo productos de este pedido' : 'Ver todos los productos del envío'}</button></div>
+    ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
+        <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" ${(ed.keys || []).includes(p.label) ? 'checked' : ''}
+          onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
+        <span>${esc(p.label)}</span></label>`).join('')
+      : '<div class="imp-muted">Este pedido no tiene productos en el CSV.</div>'}
+    <div class="imp-btns" style="margin-top:6px">
+      <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
+    </div>
+    ${giftBoxHtml(n, list)}
+  </div>`;
+}
+function noteFilter(f) { S.noteFilter = f; renderConfigure(); }
+function noteAll(oid) { S.notaAll = S.notaAll || {}; S.notaAll[oid] = !S.notaAll[oid]; renderConfigure(); }
+
 function renderConfigure() {
   const el = $('configure');
   el.style.display = 'block';
@@ -552,44 +610,19 @@ function renderConfigure() {
         ${c.unknownC ? `<div class="imp-stat" style="background:var(--amber-bg)"><b>${c.unknownC}</b><span>Sin cliente</span></div>` : ''}
       </div>
       ${c.unknownC ? `<div class="imp-warn">⚠ ${plural(c.unknownC, 'envío no tiene', 'envíos no tienen')} cliente asignado (se imprimen con "? env", sin Lápiz ni postal). Resuelve los posibles duplicados de arriba para corregirlo.</div>` : ''}
-      ${noDeadline.length ? `<div class="imp-warn">⚠ ${plural(noDeadline.length, 'envío sin', 'envíos sin')} fecha límite leída: ${noDeadline.map(i => esc('@' + i.username)).join(', ')}</div>` : ''}
+      ${noDeadline.length ? `<div class="imp-warn">⚠ ${plural(noDeadline.length, 'envío sin', 'envíos sin')} fecha límite leída: ${noDeadline.map(i => esc('' + i.username)).join(', ')}</div>` : ''}
     </div>`;
 
   const fbHtml = fallbacks.length ? `
     <div class="imp-card">
       <h3>Hojas en formato básico <small>· se imprimen como antes (solo usuario y envíos)</small></h3>
-      ${fallbacks.map(i => `<div class="imp-bad"><b>@${esc(i.username)}</b> · ${esc(i.tid)} — ${esc(i.slip.reason || '')}${i.slip.detail ? ': ' + esc(i.slip.detail) : ''}</div>`).join('')}
+      ${fallbacks.map(i => `<div class="imp-bad"><b>${esc(i.username)}</b> · ${esc(i.tid)} — ${esc(i.slip.reason || '')}${i.slip.detail ? ': ' + esc(i.slip.detail) : ''}</div>`).join('')}
       <div class="imp-muted">Los productos extra de estos envíos no se imprimen; al generar el PDF verás la lista para anotarlos a mano.</div>
     </div>` : '';
 
   // Notas: one block per note piece. Its text can be edited, it is linked to products
   // of THIS order with checkboxes, and it can be split into more pieces (duplicate).
-  const notas = S.ctx.notas || [];
-  const notaHtml = notas.length ? `
-    <div class="imp-card">
-      <h3><span class="nota-tag">Nota</span> Mensajes en esta importación <small>· ${notas.length}</small></h3>
-      <div class="imp-muted" style="margin-bottom:6px">Ya están en Pedidos como Anotado. Marca a qué producto(s) se refiere cada mensaje: en la hoja saldrá en negrita debajo de ese producto. Si un mensaje habla de varios productos, duplícalo y pon cada parte en su producto.</div>
-      ${notas.map(n => {
-        const i = list.find(x => x.tid === n.linked_shipment) || {};
-        const ed = S.notaEdit[n.order_id] || { text: n.text, keys: parseList(n.assigned) };
-        const prods = parseCands(n.candidates).map(c => c.label);
-        return `<div class="imp-nota">
-          <b>@${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
-          ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
-          <textarea data-nota="${esc(n.order_id)}" oninput="IMP.editNota(this.dataset.nota, this.value)">${esc(ed.text)}</textarea>
-          <div style="margin-top:6px;font-size:12.5px"><b>¿A qué producto(s) se refiere?</b></div>
-          ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
-              <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p)}" ${(ed.keys || []).includes(p) ? 'checked' : ''}
-                onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
-              <span>${esc(p)}</span></label>`).join('')
-            : '<div class="imp-muted">Este pedido no tiene productos en el CSV.</div>'}
-          <div class="imp-btns" style="margin-top:6px">
-            <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
-          </div>
-          ${giftBoxHtml(n, list)}
-        </div>`;
-      }).join('')}
-    </div>` : '';
+  const notaHtml = (S.ctx.notas || []).length ? notaBlockHtml(S.ctx.notas || [], list) : '';
 
   // Extras per customer
   const byCust = {};
@@ -598,9 +631,9 @@ function renderConfigure() {
     if (cust) (byCust[cust] = byCust[cust] || []).push(cd);
   });
   const custName = cust => {
-    if (cust.startsWith('USER:')) return '@' + ((list.find(i => i.tid === cust.slice(5)) || {}).username || '');
+    if (cust.startsWith('USER:')) return '' + ((list.find(i => i.tid === cust.slice(5)) || {}).username || '');
     const tids = ct[cust] || [];
-    return tids.map(t => '@' + (list.find(i => i.tid === t) || {}).username).join(' / ');
+    return tids.map(t => '' + (list.find(i => i.tid === t) || {}).username).join(' / ');
   };
   const extrasHtml = Object.keys(byCust).length ? `
     <div class="imp-card">
@@ -623,7 +656,7 @@ function renderConfigure() {
                 ${tids.length > 1 ? `<div style="margin-top:4px">Va con:
                   <select data-oid="${esc(cd.order_id)}" onchange="IMP.setExtraTid(this.dataset.oid, this.value)">
                     <option value="">— elegir pedido —</option>
-                    ${tids.map(t => { const ii = list.find(x => x.tid === t) || {}; return `<option value="${esc(t)}"${sel.tid === t ? ' selected' : ''}>@${esc(ii.username)} · ${esc(t)}</option>`; }).join('')}
+                    ${tids.map(t => { const ii = list.find(x => x.tid === t) || {}; return `<option value="${esc(t)}"${sel.tid === t ? ' selected' : ''}>${esc(ii.username)} · ${esc(t)}</option>`; }).join('')}
                   </select></div>` : ''}
               </div>
             </div>`;
@@ -639,7 +672,7 @@ function renderConfigure() {
       <h3>Clientes con varios envíos <small>· una sola postal / un solo Lápiz</small></h3>
       ${multi.map(([cust, tids]) => {
         const items = flat.filter(i => i.cust === cust);
-        return `<div class="imp-list-item"><b>${esc(cust)}</b>: ${items.map(i => `@${esc(i.username)}${i.no_postal ? ' <b>NO POSTAL</b>' : i.primary ? ' ✓' : ''}`).join(' · ')}</div>`;
+        return `<div class="imp-list-item"><b>${esc(cust)}</b>: ${items.map(i => `${esc(i.username)}${i.no_postal ? ' <b>NO POSTAL</b>' : i.primary ? ' ✓' : ''}`).join(' · ')}</div>`;
       }).join('')}
     </div>` : '';
 
@@ -647,7 +680,7 @@ function renderConfigure() {
     <div class="imp-card">
       <h3>Orden de impresión <small>· solo para esta importación</small></h3>
       ${printOptionsHtml('import')}
-      <div class="imp-muted" style="margin-top:8px">Pila de arriba hacia abajo: ${groups.length ? groups.map(g => (g.label ? `<b>${esc(g.label)}</b>: ` : '') + g.items.slice(0, 6).map(i => esc('@' + i.username)).join(', ') + (g.items.length > 6 ? ` … (+${g.items.length - 6})` : '')).join(' | ') : 'sin envíos'}</div>
+      <div class="imp-muted" style="margin-top:8px">Pila de arriba hacia abajo: ${groups.length ? groups.map(g => (g.label ? `<b>${esc(g.label)}</b>: ` : '') + g.items.slice(0, 6).map(i => esc('' + i.username)).join(', ') + (g.items.length > 6 ? ` … (+${g.items.length - 6})` : '')).join(' | ') : 'sin envíos'}</div>
     </div>`;
 
   const genHtml = `
@@ -703,38 +736,54 @@ function parseCands(v) {
     : { label: String(x.label || ''), product: String(x.product || x.label || ''), variation: String(x.variation || ''),
         seller_sku: String(x.seller_sku || ''), qty: parseInt(x.qty, 10) || 1 }).filter(c => c.label);
 }
-function giftLine(gifter, c) {
+function giftLine(gifter, c, giveaway) {
   const clean = t => String(t || '').replace(/;/g, ',').replace(/\s+/g, ' ').trim();
-  const parts = ['REGALO DE @' + clean(gifter), clean(shortTitle(c.product)), clean(c.variation), clean(c.seller_sku)].filter(Boolean);
+  const kind = giveaway ? 'GIVEAWAY DE ' : 'REGALO DE ';
+  const parts = [kind + clean(gifter), clean(shortTitle(c.product)), clean(c.variation), clean(c.seller_sku)].filter(Boolean);
   return `${c.qty || 1}x ` + parts.join(' · ');
 }
 function giftItemsFor(n) {
+  // the gift can use any product the checkboxes show (this order, or the whole shipment)
   const keys = (S.notaEdit[n.order_id] || {}).keys || [];
-  return parseCands(n.candidates).filter(c => keys.includes(c.label));
+  const all = !!(S.notaAll || {})[n.order_id];
+  return noteProducts(n, all).filter(c => keys.includes(c.label));
 }
 async function ensureCustomers() { if (!allCustomers.length) await fetchCustomersForModal(); }
+function activityOf(c) {
+  const v = c['Order Count'] !== undefined ? c['Order Count'] : c['Shipment Count'];
+  return Number(v) || 0;
+}
+// Matches first (typed letters at the start), then by how active the customer is.
+function sortByMatchThenActivity(list, nq) {
+  const rank = c => {
+    const names = [c['Primary Username'], ...String(c['Aliases'] || '').split(',')].map(normUser);
+    return names.some(n => n.startsWith(nq)) ? 0 : 1;
+  };
+  return list.sort((a, b) => (rank(a) - rank(b)) || (activityOf(b) - activityOf(a)) ||
+    String(a['Primary Username'] || '').localeCompare(String(b['Primary Username'] || ''), 'es'));
+}
 function giftResultsHtml(oid) {
   const ui = S.giftUi[oid] || {};
   const nq = normUser(ui.q || '');
   if (nq.length < 2) return '<div class="imp-muted">Escribe al menos 2 letras del usuario…</div>';
   if (!allCustomers.length) return '<div class="imp-muted">Cargando clientes…</div>';
-  const hits = allCustomers.filter(c => {
+  const hits = sortByMatchThenActivity(allCustomers.filter(c => {
     if (String(c['Primary Username'] || '').indexOf('(merged') >= 0) return false;
     return normUser(c['Primary Username']).includes(nq) ||
       String(c['Aliases'] || '').split(',').some(a => normUser(a).includes(nq));
-  }).slice(0, 8);
+  }), nq).slice(0, 8);
   const exact = allCustomers.some(c => normUser(c['Primary Username']) === nq);
   return hits.map(c => `<div class="imp-list-item"><button class="imp-mini" data-nota="${esc(oid)}" data-cid="${esc(c['Customer ID'])}" data-user="${esc(c['Primary Username'])}" onclick="IMP.giftPick(this.dataset.nota, this.dataset.cid, this.dataset.user)">Elegir</button>
-      @${esc(c['Primary Username'])} <span class="imp-muted">· ${esc(c['Customer ID'])} · ${plural(Number(c['Shipment Count']) || 0, 'envío', 'envíos')}</span></div>`).join('')
-    + (exact ? '' : `<div class="imp-list-item"><button class="imp-mini" data-nota="${esc(oid)}" onclick="IMP.giftPickNew(this.dataset.nota)">Crear cliente nuevo "@${esc((ui.q || '').trim())}"</button></div>`)
-    + (hits.length || !exact ? '' : '');
+      ${esc(c['Primary Username'])} <span class="imp-muted">· ${esc(c['Customer ID'])} · ${plural(activityOf(c), 'pedido', 'pedidos')}</span></div>`).join('')
+    + (exact ? '' : `<div class="imp-list-item"><button class="imp-mini" data-nota="${esc(oid)}" onclick="IMP.giftPickNew(this.dataset.nota)">Crear cliente nuevo "${esc((ui.q || '').trim())}"</button></div>`);
 }
 function giftBoxHtml(n, list) {
   const g = n.gift;
   if (g && (g.order_ids || []).length) {
-    const inBatch = list.filter(x => x.cust && x.cust === g.recipient);
+    const isGA = !!g.giveaway;
+    const inBatch = !isGA && list.filter(x => x.cust && x.cust === g.recipient).length > 0;
     return `<div style="margin-top:8px;padding:6px 8px;background:#e7f4df;border-radius:8px;font-size:13px;color:#2a4a14">
-      🎁 Regalo creado para <b>@${esc(g.username)}</b> (${plural(g.order_ids.length, 'producto', 'productos')})${inBatch.length ? ' · va en su paquete de este lote' : ' · queda pendiente para su próximo pedido'}
+      🎁 ${isGA ? 'Giveaway creado' : `Regalo creado para <b>${esc(g.username)}</b>`} (${plural(g.order_ids.length, 'producto', 'productos')})${isGA ? ' · se empaca desde Pedidos' : inBatch ? ' · va en su paquete de este lote' : ' · queda pendiente para su próximo pedido'}
       <button class="imp-mini" style="margin-left:6px" data-nota="${esc(n.order_id)}" onclick="IMP.giftUndo(this.dataset.nota)">Deshacer</button></div>`;
   }
   const ui = S.giftUi[n.order_id] || {};
@@ -743,21 +792,36 @@ function giftBoxHtml(n, list) {
   }
   const gifter = (list.find(x => x.tid === n.linked_shipment) || {}).username || '';
   const items = giftItemsFor(n);
-  const who = ui.recipient ? `@${esc(ui.recipient.username)} <span class="imp-muted">(${esc(ui.recipient.id)})</span>`
-            : ui.newName ? `@${esc(ui.newName)} <span class="imp-muted">(cliente nuevo)</span>` : '';
-  const ready = items.length && (ui.recipient || ui.newName);
+  const ga = !!ui.giveaway;
+  const who = ga ? '<b>Giveaway</b> <span class="imp-muted">(sin cliente)</span>'
+    : ui.recipient ? `${esc(ui.recipient.username)} <span class="imp-muted">(${esc(ui.recipient.id)})</span>`
+    : ui.newName ? `${esc(ui.newName)} <span class="imp-muted">(cliente nuevo)</span>` : '';
+  const ready = items.length && (ga || ui.recipient || ui.newName);
+  const searchDisabled = ga ? ' disabled' : '';
+  const greyed = ga ? 'opacity:0.35;pointer-events:none;' : '';
   return `<div style="margin-top:8px;padding:8px;border:0.5px solid #d9c25a;border-radius:10px;background:#fffdf3">
     <b>🎁 Regalo para…</b>
-    ${who ? `<div style="margin:6px 0">Destinatario: ${who} <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.giftChange(this.dataset.nota)">Cambiar</button></div>`
-          : `<div style="margin:6px 0"><input type="text" id="gift-q-${esc(n.order_id)}" value="${esc(ui.q || '')}" placeholder="Usuario del destinatario" style="width:100%;box-sizing:border-box;padding:6px 8px;border:0.5px solid #d9c25a;border-radius:8px;font:inherit;font-size:13px"
-              data-nota="${esc(n.order_id)}" oninput="IMP.giftSearch(this.dataset.nota, this.value)"><div id="gift-res-${esc(n.order_id)}">${giftResultsHtml(n.order_id)}</div></div>`}
-    <div style="font-size:12.5px;margin-top:4px"><b>Se creará en su lista (Manual, Pagado, $0):</b></div>
-    ${items.length ? items.map(c => `<div class="imp-list-item">• ${esc(giftLine(gifter, c))}</div>`).join('')
+    <label style="display:flex;gap:6px;align-items:center;font-size:13px;margin:6px 0">
+      <input type="checkbox" data-nota="${esc(n.order_id)}" ${ga ? 'checked' : ''} onchange="IMP.giftGiveaway(this.dataset.nota, this.checked)">
+      Giveaway (regalo sin cliente: se empaca desde Pedidos)</label>
+    <div style="${greyed}">
+    ${who && !ga ? `<div style="margin:6px 0">Destinatario: ${who} <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.giftChange(this.dataset.nota)">Cambiar</button></div>`
+          : `<div style="margin:6px 0"><input type="text" id="gift-q-${esc(n.order_id)}" value="${esc(ui.q || '')}" placeholder="Usuario del destinatario" style="width:100%;box-sizing:border-box;padding:6px 8px;border:0.5px solid #d9c25a;border-radius:8px;font:inherit;font-size:13px"${searchDisabled}
+              data-nota="${esc(n.order_id)}" oninput="IMP.giftSearch(this.dataset.nota, this.value)"><div id="gift-res-${esc(n.order_id)}">${ga ? '' : giftResultsHtml(n.order_id)}</div></div>`}
+    </div>
+    <div style="font-size:12.5px;margin-top:4px"><b>Se creará (Manual, Pagado, $0):</b></div>
+    ${items.length ? items.map(c => `<div class="imp-list-item">• ${esc(giftLine(gifter, c, ga))}</div>`).join('')
                    : '<div class="imp-warn">Marca primero a qué producto(s) se refiere el regalo (casillas de arriba).</div>'}
     <div class="imp-btns" style="margin-top:6px">
-      <button class="imp-btn primary" ${ready && !S.giftBusy ? '' : 'disabled'} data-nota="${esc(n.order_id)}" onclick="IMP.giftCreate(this.dataset.nota)">Crear regalo</button>
+      <button class="imp-btn primary" ${ready && !S.giftBusy ? '' : 'disabled'} data-nota="${esc(n.order_id)}" onclick="IMP.giftCreate(this.dataset.nota)">Crear ${ga ? 'giveaway' : 'regalo'}</button>
       <button class="imp-btn" data-nota="${esc(n.order_id)}" onclick="IMP.giftClose(this.dataset.nota)">Cancelar</button>
     </div></div>`;
+}
+function giftGiveaway(oid, on) {
+  const ui = (S.giftUi[oid] = S.giftUi[oid] || { open: true });
+  ui.giveaway = !!on;
+  if (on) { ui.recipient = null; ui.newName = ''; ui.q = ''; }
+  renderConfigure();
 }
 async function giftOpen(oid) {
   S.giftUi[oid] = { open: true, q: '', recipient: null, newName: '' };
@@ -782,33 +846,33 @@ async function giftCreate(oid) {
   if (!n) return;
   const list = infos();
   const gifterInfo = list.find(x => x.tid === n.linked_shipment) || {};
+  const ga = !!ui.giveaway;
   const items = giftItemsFor(n);
   if (!items.length) { showToast('Marca primero a qué producto(s) se refiere el regalo', true); return; }
-  if (!ui.recipient && !ui.newName) { showToast('Elige al destinatario', true); return; }
-  if (ui.recipient && ui.recipient.id && ui.recipient.id === (gifterInfo.cust || n.customer_id)) {
+  if (!ga && !ui.recipient && !ui.newName) { showToast('Elige al destinatario o marca Giveaway', true); return; }
+  if (!ga && ui.recipient && ui.recipient.id && ui.recipient.id === (gifterInfo.cust || n.customer_id)) {
     showToast('El destinatario es el mismo cliente que hace el regalo', true); return;
   }
   S.giftBusy = true; renderConfigure();
   try {
     const r = await VP.post({
-      action: 'gift_create', nota_order_id: oid, gifter_username: gifterInfo.username || '',
-      recipient_customer_id: ui.recipient ? ui.recipient.id : '', new_username: ui.newName || '',
-      items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c) })),
+      action: 'gift_create', nota_order_id: oid, gifter_username: gifterInfo.username || '', giveaway: ga,
+      recipient_customer_id: (!ga && ui.recipient) ? ui.recipient.id : '', new_username: (!ga && ui.newName) || '',
+      items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c, ga) })),
     });
     S.giftUi[oid] = {};
     if (r.created_customer) allCustomers = [];
-    await loadContext();                 // the new entries join this batch's pending list right now
+    await loadContext();
     initSelectionsKeep();
-    (r.order_ids || []).forEach(id => { if (S.extraSel[id]) S.extraSel[id].checked = true; });
-    const inBatch = infos().some(x => x.cust && x.cust === r.recipient_id);
-    if (S.render && inBatch) {
-      (S.render.giftNotice = S.render.giftNotice || []).push('@' + r.recipient_username);
-    }
-    showToast(inBatch ? `Regalo creado: ya está en la lista de @${r.recipient_username} para esta importación`
-                      : `Regalo creado para @${r.recipient_username}: queda pendiente para su próximo pedido`);
+    (r.order_ids || []).forEach(id => { if (S.extraSel[id] && !ga) S.extraSel[id].checked = true; });
+    const inBatch = !ga && infos().some(x => x.cust && x.cust === r.recipient_id);
+    if (S.render && inBatch) (S.render.giftNotice = S.render.giftNotice || []).push(r.recipient_username);
+    showToast(ga ? 'Giveaway creado: se empaca desde Pedidos'
+      : inBatch ? `Regalo creado: ya está en la lista de ${r.recipient_username} para esta importación`
+      : `Regalo creado para ${r.recipient_username}: queda pendiente para su próximo pedido`);
   } catch (e) {
     // TROUBLESHOOT: message comes from Apps Script gift_create. "ya tiene un regalo" = use Deshacer first.
-    showToast('No se pudo crear el regalo: ' + e.message, true);
+    showToast('No se pudo crear: ' + e.message, true);
   }
   S.giftBusy = false;
   renderConfigure();
@@ -862,8 +926,9 @@ function buildPlan(mode) {
     const g = n.gift;
     if (g && (g.labels || []).length) {
       // the gifted product does not go in the gifter's box: say so under that product
+      const who = g.giveaway ? 'GIVEAWAY' : `REGALO PARA ${g.username}`;
       (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
-        order_id: n.nota_pedido, source: 'gift', text: `REGALO PARA @${g.username} – NO va en este paquete`, keys: g.labels });
+        order_id: n.nota_pedido, source: 'gift', text: `${who} – NO va en este paquete`, keys: g.labels });
     }
     const text = String(ed.text == null ? n.text : ed.text).trim();
     if (!text) return;
@@ -1003,8 +1068,8 @@ function manualList() {
       items.push(c.channel === 'Nota' ? `Nota: ${c.products}` : x.title.replace(' · ', ' - ').replace('productos', 'Productos').replace('producto', 'Producto'));
     });
     if (!items.length) return;
-    const key = i.cust || ('@' + i.username);
-    (out[key] = out[key] || { name: '@' + i.username, items: [] }).items.push(...items);
+    const key = i.cust || ('' + i.username);
+    (out[key] = out[key] || { name: '' + i.username, items: [] }).items.push(...items);
   });
   return out;
 }
@@ -1019,7 +1084,7 @@ function renderReportHtml() {
     <div class="${basics.length ? 'imp-warn' : 'imp-ok'}" style="margin-top:10px">
       ${r.mode === 'basic' ? 'PDF en formato básico.' : `✓ ${rep.rebuilt || 0} hojas nuevas · ${rep.basic || 0} en formato básico`} · ${rep.pages || 0} páginas · ${VP.fmtDateTime(r.at)}
     </div>
-    ${basics.map(([t, x]) => { const i = list.find(z => z.tid === t) || {}; return `<div class="imp-bad">@${esc(i.username || '')} · ${esc(t)} — ${esc(x.reason)}${x.detail ? ': ' + esc(x.detail) : ''}</div>`; }).join('')}
+    ${basics.map(([t, x]) => { const i = list.find(z => z.tid === t) || {}; return `<div class="imp-bad">${esc(i.username || '')} · ${esc(t)} — ${esc(x.reason)}${x.detail ? ': ' + esc(x.detail) : ''}</div>`; }).join('')}
     ${(rep.warnings || []).map(w => `<div class="imp-warn">${esc(w)}</div>`).join('')}
     ${(r.giftNotice || []).length ? `<div class="imp-warn">⚠ El regalo para ${esc(r.giftNotice.join(', '))} se agregó después de generar el PDF. Vuelve a generar el PDF para que salga en su hoja.</div>` : ''}
     ${Object.keys(manual).length ? `<div class="imp-bad"><b>Anotar a mano (no se imprimió en la hoja):</b>
@@ -1446,7 +1511,7 @@ function renderPurgeOut() {
     const unlink = pl.unlink || [];
     el.innerHTML = `
       <div style="margin:8px 0"><button class="imp-mini" onclick="IMP.purgeBack()">← Volver a los resultados</button></div>
-      <div class="imp-cust-head">${esc(pl.tracking_id)} <span class="imp-muted">· @${esc(t.username || '')} · ${esc(t.customer_id || '')} · ${esc(t.status || '')}</span></div>
+      <div class="imp-cust-head">${esc(pl.tracking_id)} <span class="imp-muted">· ${esc(t.username || '')} · ${esc(t.customer_id || '')} · ${esc(t.status || '')}</span></div>
       <div class="imp-muted">${esc(t.order_id || '')} — ${esc(t.products || '')}</div>
       <div style="margin-top:8px"><b>Se borrará por completo:</b>
         <div class="imp-list-item">• El pedido de TikTok en Pedidos</div>
@@ -1465,7 +1530,7 @@ function renderPurgeOut() {
   }
   if (p.matches) {
     el.innerHTML = p.matches.length ? p.matches.map(m => `
-      <div class="imp-cust"><div class="imp-cust-head">${esc(m.tracking_id)} <span class="imp-muted">· @${esc(m.username)} · ${esc(m.customer_id)} · ${esc(m.status)}</span></div>
+      <div class="imp-cust"><div class="imp-cust-head">${esc(m.tracking_id)} <span class="imp-muted">· ${esc(m.username)} · ${esc(m.customer_id)} · ${esc(m.status)}</span></div>
         <div class="imp-muted">${esc(m.order_ids)} — ${esc(m.products)}</div>
         <div class="imp-btns" style="margin-top:4px"><button class="imp-mini" data-tid="${esc(m.tracking_id)}" onclick="IMP.purgePick(this.dataset.tid)">Seleccionar</button></div></div>`).join('')
       : '<div class="imp-muted">No se encontró ningún envío de TikTok con eso.</div>';
@@ -1521,7 +1586,7 @@ function purgeAsk() {
   const t = (pl.tiktok || [])[0] || {};
   const m = VP.showModal(`
     <h3 style="margin:0 0 8px;font-size:16px">¿Borrar este envío?</h3>
-    <div style="margin-bottom:8px"><b>${esc(pl.tracking_id)}</b> · @${esc(t.username || '')}</div>
+    <div style="margin-bottom:8px"><b>${esc(pl.tracking_id)}</b> · ${esc(t.username || '')}</div>
     <div class="imp-bad"><b>Esto es permanente y no se puede deshacer.</b></div>
     <div class="imp-btns"><button class="imp-btn" id="pg-no">Cancelar</button>
       <button class="imp-btn" id="pg-yes" style="background:#a32d2d;color:#fff;border-color:#a32d2d">${pl.photos ? 'Continuar' : 'Sí, borrar definitivamente'}</button></div>`, { maxWidth: '460px' });
@@ -1565,7 +1630,7 @@ let activeMatchIdx = null;
 function renderMatches(matches) {
   $('matches-list').innerHTML = matches.map((m, i) => `
     <div class="match-card" id="match-card-${i}">
-      <div class="match-card-top"><div class="match-username">@${esc(m.username)}</div><div class="match-score">${m.score}% similitud</div></div>
+      <div class="match-card-top"><div class="match-username">${esc(m.username)}</div><div class="match-score">${m.score}% similitud</div></div>
       <div class="match-row">Posible match: <strong>${esc(m.matched_to)}</strong></div>
       <div class="match-row">Tracking: <strong>${esc(m.tracking_id)}</strong></div>
       <div class="match-actions">
@@ -1618,7 +1683,7 @@ async function doAddAlias(username, customerId, cardIdx) {
     await VP.post({ action: 'stamp_customer_ids' });
     const a = $(`match-assigned-${cardIdx}`); if (a) a.style.display = 'block';
     const w = $(`match-assign-${cardIdx}`); if (w) w.style.display = 'none';
-    showToast(`@${username} asignado como alias`);
+    showToast(`${username} asignado como alias`);
     if (S.result && S.result.shipments_meta) {
       await loadContext();
       initSelectionsKeep();
@@ -1630,7 +1695,7 @@ function openMatchModal(i) {
   activeMatchIdx = i;
   const m = lastMatches[i];
   const e = m.enriched || {};
-  $('modal-username').textContent = `@${m.username}`;
+  $('modal-username').textContent = `${m.username}`;
   $('modal-score').textContent = `${m.score}%`;
   $('modal-matched-to').textContent = m.matched_to || '—';
   setModalField('modal-name', [e['First Name'], e['Surname']].filter(Boolean).join(' '));
@@ -1656,7 +1721,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
-  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo,
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
