@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.8';   // empacar pick list
+const SCRIPT_VERSION = '2026-10-24.9';   // empacar pick list
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -996,6 +996,7 @@ function dispatchPostAction(action, body, role) {
     if (action === 'user_settings_save') return userSettingsSaveAction(body);
     if (action === 'empacar_settings_save') return requireAdmin(role) ? empacarSettingsSaveAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'catalog_set_fields') return requireAdmin(role) ? catalogSetFieldsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_upload_image') return requireAdmin(role) ? catalogUploadImageAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'empacar_setup') return requireAdmin(role) ? empacarSetupAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'logout') return logoutAction(body);
     if (action === 'import_qc_history') return requireAdmin(role) ? importQcHistoryAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -9369,6 +9370,110 @@ function catalogSetFieldsAction(body) {
     logAudit('catalog_set_field', 'Variant', catalogId, n, before, clean[n]);
   });
   return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
+}
+
+// ─── POST catalog_set_fields (admin) ───────────────────────────────────────
+// { catalog_id, fields: { 'Image URL': 'https://…', 'Barcode': '…', 'Stock': 12, 'Low Stock At': 3 } }
+function catalogSetFieldsAction(body) {
+  const catalogId = pkStr_(body.catalog_id, 40);
+  const fields = body.fields || {};
+  if (!catalogId) return jsonResponse({ error: 'catalog_id es obligatorio' });                          // the line has no catalog match -> link its SKU in Catálogo first
+  const names = Object.keys(fields);
+  if (!names.length) return jsonResponse({ error: 'No hay campos que guardar' });                       // empty request
+  for (let i = 0; i < names.length; i++) {
+    if (PK_VARIANT_COLS.indexOf(names[i]) < 0) return jsonResponse({ error: 'Campo no permitido: ' + names[i] });   // only Image URL / Barcode / Stock / Low Stock At
+  }
+  const vs = getProductVariantsSheet();
+  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });                   // tab renamed -> restore the name
+  const startH = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
+  const iCat = startH.indexOf('Catalog ID');
+  if (iCat < 0) return jsonResponse({ error: 'Product Variants no tiene la columna Catalog ID' });
+  const row = findRowByColumn(vs, colLetter(iCat), catalogId);
+  if (!row) return jsonResponse({ error: 'Variante no encontrada: ' + catalogId });                     // merged or deleted variant -> refresh the page and reopen
+
+  const clean = {};
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    let v = fields[n] == null ? '' : String(fields[n]).trim();
+    if (n === 'Image URL' && v && !/^https:\/\/[^\s]{4,480}$/i.test(v)) return jsonResponse({ error: 'La URL de la foto debe empezar con https:// y no tener espacios' });
+    if ((n === 'Stock' || n === 'Low Stock At') && v !== '' && !(Number(v) >= 0)) return jsonResponse({ error: n + ' debe ser un número mayor o igual a 0' });
+    if (n === 'Barcode') v = v.replace(/\s+/g, '');
+    clean[n] = v;
+  }
+  names.forEach(n => {
+    const col = ensureHeader(vs, n) + 1;
+    const cell = vs.getRange(row, col);
+    const before = cell.getValue();
+    if (n === 'Barcode' || n === 'Image URL') cell.setNumberFormat('@');
+    cell.setValue(n === 'Stock' || n === 'Low Stock At' ? (clean[n] === '' ? '' : Number(clean[n])) : clean[n]);
+    logAudit('catalog_set_field', 'Variant', catalogId, n, before, clean[n]);
+  });
+  return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
+}
+
+// ─── POST catalog_upload_image (admin) ─────────────────────────────────────
+// { catalog_id, file_name, file_data: 'data:image/jpeg;base64,...' }
+// Forwards the photo to the VPS image service (resizes to thumb/full there),
+// then saves the returned thumbnail URL into Image URL.
+const IMAGE_SERVICE_URL = 'https://img.srv2017849.hstgr.cloud';
+
+function catalogUploadImageAction(body) {
+  const catalogId = pkStr_(body.catalog_id, 40);
+  if (!catalogId) return jsonResponse({ error: 'catalog_id es obligatorio' });                           // the line has no catalog match -> link its SKU in Catálogo first
+  const dataUrl = String(body.file_data || '');
+  const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return jsonResponse({ error: 'Formato de imagen no válido' });                                 // front end sent something other than a data URL -> hard refresh and try again
+  const mime = m[1];
+  if (!/^image\/(jpeg|jpg|png|webp|gif)$/i.test(mime)) return jsonResponse({ error: 'Tipo de archivo no permitido: ' + mime });   // only common photo formats
+  let bytes;
+  try { bytes = Utilities.base64Decode(m[2]); } catch (e) { return jsonResponse({ error: 'No se pudo leer el archivo' }); }        // corrupted upload -> try again
+  if (bytes.length > 15 * 1024 * 1024) return jsonResponse({ error: 'La foto es demasiado grande (máx 15MB)' });
+
+  const key = PropertiesService.getScriptProperties().getProperty('IMAGE_SERVICE_KEY');
+  if (!key) return jsonResponse({ error: 'IMAGE_SERVICE_KEY no está configurada en el proyecto' });        // set it once in Apps Script -> Project Settings -> Script Properties
+
+  const boundary = '----vpImg' + Utilities.getUuid().replace(/-/g, '');
+  const fileName = pkStr_(body.file_name, 100) || 'photo.jpg';
+  const parts = [];
+  parts.push(Utilities.newBlob('--' + boundary + '\r\nContent-Disposition: form-data; name="key"\r\n\r\n' + catalogId + '\r\n').getBytes());
+  parts.push(Utilities.newBlob('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName + '"\r\nContent-Type: ' + mime + '\r\n\r\n').getBytes());
+  parts.push(bytes);
+  parts.push(Utilities.newBlob('\r\n--' + boundary + '--\r\n').getBytes());
+  let payload = [];
+  parts.forEach(p => { payload = payload.concat(Array.from(p)); });
+
+  let res;
+  try {
+    res = UrlFetchApp.fetch(IMAGE_SERVICE_URL + '/upload', {
+      method: 'post',
+      contentType: 'multipart/form-data; boundary=' + boundary,
+      payload: Utilities.newBlob(payload).getBytes(),
+      headers: { 'X-Service-Key': key },
+      muteHttpExceptions: true,
+    });
+  } catch (e) {
+    return jsonResponse({ error: 'No se pudo conectar con el servicio de imágenes: ' + e.message });       // VPS/service down -> check "docker ps" on the VPS
+  }
+  const code = res.getResponseCode();
+  let data;
+  try { data = JSON.parse(res.getContentText()); } catch (e) { data = null; }
+  if (code !== 200 || !data || !data.ok) {
+    return jsonResponse({ error: (data && data.detail) || ('El servicio de imágenes respondió con error ' + code) });   // see the image-service container logs on the VPS
+  }
+
+  const vs = getProductVariantsSheet();
+  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });
+  const h = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
+  const iCat = h.indexOf('Catalog ID');
+  const row = iCat >= 0 ? findRowByColumn(vs, colLetter(iCat), catalogId) : null;
+  if (!row) return jsonResponse({ error: 'Variante no encontrada: ' + catalogId });                        // merged or deleted variant -> refresh the page and reopen
+  const col = ensureHeader(vs, 'Image URL') + 1;
+  const cell = vs.getRange(row, col);
+  const before = cell.getValue();
+  cell.setNumberFormat('@').setValue(data.thumb_url);
+  logAudit('catalog_upload_image', 'Variant', catalogId, 'Image URL', before, data.thumb_url);
+
+  return jsonResponse({ ok: true, catalog_id: catalogId, thumb_url: data.thumb_url, full_url: data.full_url });
 }
 
 // ─── Dormant readers (admin) ───────────────────────────────────────────────
