@@ -152,7 +152,12 @@ function custName(cid) {
 }
 function custUser(cid) {
   const c = cliente(cid);
-  return c && c['Usuario'] ? '@' + String(c['Usuario']).replace(/^@/, '') : '';
+  return c && c['Usuario'] ? String(c['Usuario']).replace(/^@/, '') : '';
+}
+// Total orders of a customer (most active first in username searches).
+function activityOfC(c) {
+  const v = c['Order Count'] !== undefined ? c['Order Count'] : c['Shipment Count'];
+  return Number(v) || 0;
 }
 function firstName(cid) { return String(custName(cid)).split(' ')[0]; }
 
@@ -644,7 +649,7 @@ function openClientEdit(cid, prefill, onDone) {
 
   const m = VP.showModal(`
     <h2 class="may-h2">${isNew ? 'Nuevo mayorista' : 'Editar ' + esc(custName(cid))}</h2>
-    <div class="may-sub">${esc(c['Usuario'] ? '@' + c['Usuario'] : '')} · ${esc(cid)}</div>
+    <div class="may-sub">${esc(c['Usuario'] || '')} · ${esc(cid)}</div>
     ${CLIENT_FIELDS.map(([title, fields]) => `<div class="may-h3">${title}</div><div class="may-grid">${fields.map(field).join('')}</div>`).join('')}
     <div class="may-h3">Programa de mayoreo</div>
     <div class="may-grid">
@@ -729,8 +734,9 @@ function openNewClient() {
       const s = q.value.trim().toLowerCase();
       m.el.querySelector('#nc-create').disabled = s.length < 2;
       if (s.length < 2) { list.classList.remove('open'); return; }
-      const hits = all.filter(c => [c['Customer ID'], c['Primary Username'], c['Aliases'], c['First Name'], c['Surname']].join(' ').toLowerCase().includes(s)).slice(0, 12);
-      list.innerHTML = hits.map(c => `<div class="may-combo-item" data-cid="${esc(c['Customer ID'])}">@${esc(c['Primary Username'])} <span class="may-sub">${esc(c['Customer ID'])} ${esc([c['First Name'], c['Surname']].filter(Boolean).join(' '))}${cliente(c['Customer ID']) ? ' · ya es mayorista' : ''}</span></div>`).join('')
+      const hits = all.filter(c => [c['Customer ID'], c['Primary Username'], c['Aliases'], c['First Name'], c['Surname']].join(' ').toLowerCase().includes(s))
+        .sort((a, b) => (activityOfC(b) - activityOfC(a))).slice(0, 12);
+      list.innerHTML = hits.map(c => `<div class="may-combo-item" data-cid="${esc(c['Customer ID'])}">${esc(c['Primary Username'])} <span class="may-sub">${esc(c['Customer ID'])} ${esc([c['First Name'], c['Surname']].filter(Boolean).join(' '))}${cliente(c['Customer ID']) ? ' · ya es mayorista' : ''}</span></div>`).join('')
         || '<div class="may-combo-item may-sub">Sin coincidencias</div>';
       list.classList.add('open');
       list.querySelectorAll('[data-cid]').forEach(el => el.onclick = () => go(el.dataset.cid, all.find(c => c['Customer ID'] === el.dataset.cid)));
