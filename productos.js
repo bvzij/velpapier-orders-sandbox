@@ -183,10 +183,12 @@ window.vpProductos = (function () {
     const q = (document.getElementById('pr-search') || {}).value || '';
     const query = q.trim().toLowerCase();
 
-    const filtered = !query ? parents : parents.filter(p => {
-      if (p.name.toLowerCase().includes(query)) return true;
+    let filtered = !query ? parents.slice() : parents.filter(p => {
+      if (p.name.toLowerCase().includes(query) || (p.sku || '').toLowerCase().includes(query)) return true;
       return p.variants.some(v => v.variant_name.toLowerCase().includes(query) || v.sku.toLowerCase().includes(query));
     });
+    const chanFilter = (document.getElementById('pr-channel') || {}).value || 'all';
+    if (chanFilter !== 'all') filtered = filtered.filter(p => (p.channel || '').toLowerCase().includes(chanFilter));
 
     const list = document.getElementById('pr-list');
     if (list) {
@@ -204,11 +206,19 @@ window.vpProductos = (function () {
           return '<div class="pr-product">' +
             '<div class="pr-product-top">' + boxHtml('parent', p.parent_id, p.name, p.image, 'pr-box--parent') +
             '<div class="pr-product-info"><div class="pr-product-name">' + esc(p.name || '(sin nombre)') + '</div>' +
-            '<div class="pr-product-sub">' + p.variants.length + ' variante' + (p.variants.length !== 1 ? 's' : '') + ' · ' + esc(p.parent_id) + '</div></div>' +
+            '<div class="pr-product-sub">' + p.variants.length + ' variante' + (p.variants.length !== 1 ? 's' : '') + ' · SKU ' + esc(p.sku || p.parent_id) + (p.units_sold ? ' · ' + p.units_sold + ' vendidos' : '') + '</div></div>' +
             '</div>' + variantsHtml + '</div>';
         }).join('');
       }
     }
+
+    const sortMode = (document.getElementById('pr-sort') || {}).value || 'name';
+    const chan = (document.getElementById('pr-channel') || {}).value || 'all';
+    filtered.sort((a, b) => {
+      if (sortMode === 'created') return (b.created || '').localeCompare(a.created || '');
+      if (sortMode === 'sold') return (b.units_sold || 0) - (a.units_sold || 0);
+      return a.name.localeCompare(b.name, 'es');
+    });
 
     const stat = document.getElementById('pr-stat');
     if (stat) stat.textContent = parents.length ? (filtered.length + ' producto' + (filtered.length !== 1 ? 's' : '')) : '';
