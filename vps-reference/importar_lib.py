@@ -437,7 +437,7 @@ def csv_notes_by_order(csv_rows):
     for r in csv_rows:
         oid = r.get("order_id") or ""
         raw = r.get("raw_row") or {}
-        o = out.setdefault(oid, {"buyer": "", "seller": "", "products": []})
+        o = out.setdefault(oid, {"buyer": "", "seller": "", "products": [], "items": []})
         b = str(raw.get("Buyer Message") or "").strip()
         s = str(raw.get("Seller Note") or "").strip()
         if b and not o["buyer"]:
@@ -447,6 +447,12 @@ def csv_notes_by_order(csv_rows):
         lbl = product_label(r) if r.get("product") else ""
         if lbl and lbl not in o["products"]:
             o["products"].append(lbl)
+            q = str(r.get("quantity") or "1").strip()
+            # "items" feeds the gift button: it needs the name, variation, Seller SKU and quantity
+            o["items"].append({"label": lbl, "product": str(r.get("product") or "").strip(),
+                               "variation": str(r.get("variation") or "").strip(),
+                               "seller_sku": str(raw.get("Seller SKU") or "").strip(),
+                               "qty": int(q) if q.isdigit() and int(q) > 0 else 1})
     return out
 
 
@@ -926,9 +932,15 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
             else:
                 unlinked.append(sg)
 
+    placed = set()                       # note pieces that found their product on the slip
+
     def notes_for(name, variation):
         lbl = f"{name} ({variation})" if variation else name
-        return [sg["text"] for sg in by_label.get(norm(lbl), [])]
+        out = []
+        for sg in by_label.get(norm(lbl), []):
+            placed.add(id(sg))
+            out.append(sg["text"])
+        return out
 
     for k, it in enumerate(data["items"]):
         if k > 0:
@@ -947,6 +959,13 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
         else:
             draw_row(it["name"], it["variation"], it["seller_sku"], it["qty"], dot=it["qty"] > 1,
                      notes=notes_for(it["name"], it["variation"]))
+
+    # A piece linked to a product that is not on this slip (renamed, or a combo child) is
+    # never dropped: it goes to the bottom section with the unlinked ones.
+    if segs is not None:
+        for sg in segs:
+            if (sg.get("keys") or []) and id(sg) not in placed:
+                unlinked.append(sg)
 
     # Qty Total
     ts = st["total_size"]
@@ -968,7 +987,8 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                     continue
                 txt = clean_text(sg.get("text", ""), fonts.reg)
                 if txt:
-                    blocks.append(("Mensaje del cliente:" if sg.get("source") == "buyer" else "Nota del vendedor:", txt))
+                    src = sg.get("source")
+                    blocks.append(("Mensaje del cliente:" if src == "buyer" else "Aviso:" if src == "gift" else "Nota del vendedor:", txt))
         else:
             n = data["notes"].get(oid) or {}
             e = edits.get(oid) or {}
