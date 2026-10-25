@@ -2329,6 +2329,8 @@ function renderAll() {
   const anotado = allRecords.filter(r => r.Status === 'Anotado');
   const enviado = allRecords.filter(r => r.Status === 'Enviado');
   const archivo = allRecords.filter(r => r.Status === 'Archivado');
+  const giveaway = allRecords.filter(r => r.Channel === 'Manual' && (r.Notas === 'Giveaway' || r.Cliente === 'GIVEAWAY'));
+  document.getElementById('badge-giveaway').textContent = giveaway.length;
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
@@ -2363,7 +2365,7 @@ function renderAll() {
   // (archive = thousands of rows) is what froze clicks after a search.
   if (searchSelectedCliente) { renderSearchResults(); return; }
   const lists = { activos: [activos, 'activos-list', true], cobrar: [cobrar, 'cobrar-list', true], enviar: [enviar, 'enviar-list', true],
-                  anotado: [anotado, 'anotado-list', true], enviado: [enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false] };
+                                    anotado: [anotado, 'anotado-list', true], enviado: [enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false], giveaway: [giveaway, 'giveaway-list', true] };[enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false] };
   const cfg = lists[currentTab];
   if (!cfg || !document.getElementById(cfg[1])) return;
   if (currentTab === 'enviado' && !tabDataLoaded.enviado) return;   // its loader shows "Cargando…"
@@ -3020,7 +3022,7 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
-  ['activos', 'cobrar', 'enviar', 'anotado', 'enviado', 'archivo', 'tiktok', 'shopify-pend'].forEach(t => {
+  ['activos', 'cobrar', 'enviar', 'anotado', 'enviado', 'archivo', 'giveaway', 'tiktok', 'shopify-pend'].forEach(t => {
     const node = document.getElementById(`tab-${t}`);
     if (!node) return;
     node.style.display = t === tab ? 'block' : 'none';
