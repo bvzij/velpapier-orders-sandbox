@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.1';   // productos bulk photo page
+const SCRIPT_VERSION = '2026-10-25.2';   // productos sku/channel/sort
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -9497,10 +9497,15 @@ function catalogListAction(e) {
     const pd = ps.getDataRange().getValues();
     const ph = pd[0];
     const iPId = ph.indexOf('Parent ID'), iPName = ph.indexOf('Parent Name'), iPImg = ph.indexOf('Image URL');
+    const iPSku = ph.indexOf('SKU'), iPChan = ph.indexOf('Channel'), iPCreated = ph.indexOf('Created Date');
     for (let r = 1; r < pd.length; r++) {
       const id = String(pd[r][iPId] || '').trim();
       if (!id) continue;
       const entry = { parent_id: id, name: iPName >= 0 ? String(pd[r][iPName] || '') : '',
+                       sku: iPSku >= 0 ? String(pd[r][iPSku] || '') : '',
+                       channel: iPChan >= 0 ? String(pd[r][iPChan] || '') : '',
+                       created: iPCreated >= 0 ? String(pd[r][iPCreated] || '') : '',
+                       units_sold: 0,
                        image: iPImg >= 0 ? String(pd[r][iPImg] || '') : '', variants: [] };
       parents.push(entry);
       byParentId[id] = entry;
@@ -9529,6 +9534,20 @@ function catalogListAction(e) {
     }
   }
 
+  const orders = getOrdersSheet();
+  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
+  const catalogToParent = {};
+  parents.forEach(p => p.variants.forEach(v => { catalogToParent[v.catalog_id] = p; }));
+  for (let n = 1; n <= 30; n++) {
+    const cCol = oh.indexOf('Product ' + n + ' Catalog ID'), qCol = oh.indexOf('Product ' + n + ' Qty');
+    if (cCol < 0) break;
+    const ids = readColumn(orders, cCol), qtys = qCol >= 0 ? readColumn(orders, qCol) : [];
+    for (let i = 0; i < ids.length; i++) {
+      const cid = String(ids[i] || '').trim();
+      if (!cid || !catalogToParent[cid]) continue;
+      catalogToParent[cid].units_sold += parseInt(qtys[i], 10) || 1;
+    }
+  }
   parents.sort((a, b) => a.name.localeCompare(b.name, 'es'));
   parents.forEach(p => p.variants.sort((a, b) => a.variant_name.localeCompare(b.variant_name, 'es')));
   return jsonResponse({ parents: parents });
