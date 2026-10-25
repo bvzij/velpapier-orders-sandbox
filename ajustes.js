@@ -407,7 +407,7 @@ const AJ_BACKFILL_SKIP_SUBSTATUSES = ['Awaiting shipment', 'Unpaid'];
 function renderFuzzyReview(list) {
   if (!list || !list.length) return '';
   const rows = list.slice(0, 15).map(f =>
-    `<div class="aj-row-hint">@${VP.esc(f.username)} se parece a @${VP.esc(f.suggested_username || f.suggested_customer_id)} — guía ${VP.esc(f.tracking_id)}</div>`
+    `<div class="aj-row-hint">${VP.esc(f.username)} se parece a ${VP.esc(f.suggested_username || f.suggested_customer_id)} — guía ${VP.esc(f.tracking_id)}</div>`
   ).join('');
   return `<p class="aj-backfill-note">Estos pedidos quedan sin cliente asignado. Vincúlalos desde Pedidos si son la misma persona:</p>${rows}`;
 }
