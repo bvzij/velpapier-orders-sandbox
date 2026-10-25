@@ -28,6 +28,7 @@ let customerFilter = '';   // exact username once picked from the combo
 let allUsernames = [];
 let CUST_TEXT = {};   // Customer ID -> lowercase "primary alias1 alias2"
 let CUST_NAMES = {};  // Customer ID -> [primary, ...aliases]
+let CUST_ORDERS = {}; // username (lowercase) -> total orders, so the busiest customers come first
 
 // The username stored on a QC row is a snapshot from the day it was packed,
 // so one person can appear under several names after a merge or a
@@ -42,16 +43,19 @@ function addCustomerNamesToCombo() {
 async function loadCalidadCustomers() {
   try {
     const data = await VP.get('action=customers');
-    const text = {}, names = {};
+    const text = {}, names = {}, orders = {};
     (data.records || []).forEach(c => {
       const id = String(c['Customer ID'] || '').trim();
       if (!id) return;
+      const cnt = Number(c['Order Count'] !== undefined ? c['Order Count'] : c['Shipment Count']) || 0;
+      orders[String(c['Primary Username'] || '').trim().toLowerCase()] = cnt;
       const list = [String(c['Primary Username'] || '').trim(), ...String(c['Aliases'] || '').split(',').map(x => x.trim())].filter(Boolean);
       names[id] = list;
       text[id] = list.join(' ').toLowerCase();
     });
     CUST_TEXT = text;
     CUST_NAMES = names;
+    CUST_ORDERS = orders;
     addCustomerNamesToCombo();
     render();
   } catch (e) {
@@ -342,7 +346,11 @@ function wireCustomerCombo() {
 
   function renderOptions() {
     const q = input.value.trim().toLowerCase();
-    const matches = (q ? allUsernames.filter(u => u.toLowerCase().includes(q)) : allUsernames).slice(0, 40);
+    // starts-with matches first, then the most active customers (most orders in total)
+    const ranked = (q ? allUsernames.filter(u => u.toLowerCase().includes(q)) : allUsernames.slice())
+      .sort((x, y) => ((y.toLowerCase().startsWith(q) ? 1 : 0) - (x.toLowerCase().startsWith(q) ? 1 : 0)) ||
+        ((CUST_ORDERS[y.toLowerCase()] || 0) - (CUST_ORDERS[x.toLowerCase()] || 0)) || x.localeCompare(y, 'es'));
+    const matches = ranked.slice(0, 40);
     if (!matches.length) { hide(); return; }
     list.innerHTML = matches
       .map(u => `<div class="cal-combo-option" data-value="${VP.esc(u)}">${VP.esc(u)}</div>`)
