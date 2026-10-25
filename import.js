@@ -42,6 +42,8 @@ const S = {
   opts: null,          // print options for THIS import
   extraSel: {},        // order_id -> {checked, tid}
   notaEdit: {},        // NOTA-... -> {text, assigned}
+  giftUi: {},          // NOTA-... -> {open, q, recipient:{id,username}|null, newName}
+  giftBusy: false,
   render: null,        // {report, pdf, plan, at, manual}
   facts: null,
   factId: '',
@@ -223,7 +225,7 @@ async function runImport() {
 function resetImportUi() {
   ['summary-card', 'matches-section', 'new-customers-section', 'configure'].forEach(id => { $(id).style.display = 'none'; });
   Object.assign(S, { result: null, legacyPdf: '', combinedCsv: '', meta: [], ctx: null, log: {}, opts: null,
-    extraSel: {}, notaEdit: {}, render: null, factId: '', copies: null });
+    extraSel: {}, notaEdit: {}, giftUi: {}, render: null, factId: '', copies: null });
 }
 
 async function startImport(data, opts) {
@@ -570,7 +572,7 @@ function renderConfigure() {
       ${notas.map(n => {
         const i = list.find(x => x.tid === n.linked_shipment) || {};
         const ed = S.notaEdit[n.order_id] || { text: n.text, keys: parseList(n.assigned) };
-        const prods = parseList(n.candidates);
+        const prods = parseCands(n.candidates).map(c => c.label);
         return `<div class="imp-nota">
           <b>@${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
           ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
@@ -584,6 +586,7 @@ function renderConfigure() {
           <div class="imp-btns" style="margin-top:6px">
             <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
           </div>
+          ${giftBoxHtml(n, list)}
         </div>`;
       }).join('')}
     </div>` : '';
@@ -681,6 +684,148 @@ function markAll(cust) {
   renderConfigure();
 }
 function editNota(id, text) { (S.notaEdit[id] = S.notaEdit[id] || {}).text = text; }
+// ── Regalo: a note says a product is a gift for someone else ─────────────
+// Creates one Manual entry (Pagado, price 0) per product under the RECIPIENT. If she is in
+// this batch, the entry shows up in her pending list at once, ticked, and prints on her slip.
+function shortTitle(s) { return String(s || '').split(/\s+[-\u2013\u2014]\s+/)[0].trim(); }
+// Candidate products of an order: [{label, product, variation, seller_sku, qty}].
+// Older imports stored plain labels; those still work (no Seller SKU, qty 1).
+function parseCands(v) {
+  let a = v;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return [];
+    if (s[0] === '[') { try { a = JSON.parse(s); } catch (e) { a = s.split(';'); } } else a = s.split(';');
+  }
+  if (!Array.isArray(a)) return [];
+  return a.map(x => typeof x === 'string'
+    ? { label: x.trim(), product: x.trim(), variation: '', seller_sku: '', qty: 1 }
+    : { label: String(x.label || ''), product: String(x.product || x.label || ''), variation: String(x.variation || ''),
+        seller_sku: String(x.seller_sku || ''), qty: parseInt(x.qty, 10) || 1 }).filter(c => c.label);
+}
+function giftLine(gifter, c) {
+  const clean = t => String(t || '').replace(/;/g, ',').replace(/\s+/g, ' ').trim();
+  const parts = ['REGALO DE @' + clean(gifter), clean(shortTitle(c.product)), clean(c.variation), clean(c.seller_sku)].filter(Boolean);
+  return `${c.qty || 1}x ` + parts.join(' · ');
+}
+function giftItemsFor(n) {
+  const keys = (S.notaEdit[n.order_id] || {}).keys || [];
+  return parseCands(n.candidates).filter(c => keys.includes(c.label));
+}
+async function ensureCustomers() { if (!allCustomers.length) await fetchCustomersForModal(); }
+function giftResultsHtml(oid) {
+  const ui = S.giftUi[oid] || {};
+  const nq = normUser(ui.q || '');
+  if (nq.length < 2) return '<div class="imp-muted">Escribe al menos 2 letras del usuario…</div>';
+  if (!allCustomers.length) return '<div class="imp-muted">Cargando clientes…</div>';
+  const hits = allCustomers.filter(c => {
+    if (String(c['Primary Username'] || '').indexOf('(merged') >= 0) return false;
+    return normUser(c['Primary Username']).includes(nq) ||
+      String(c['Aliases'] || '').split(',').some(a => normUser(a).includes(nq));
+  }).slice(0, 8);
+  const exact = allCustomers.some(c => normUser(c['Primary Username']) === nq);
+  return hits.map(c => `<div class="imp-list-item"><button class="imp-mini" data-nota="${esc(oid)}" data-cid="${esc(c['Customer ID'])}" data-user="${esc(c['Primary Username'])}" onclick="IMP.giftPick(this.dataset.nota, this.dataset.cid, this.dataset.user)">Elegir</button>
+      @${esc(c['Primary Username'])} <span class="imp-muted">· ${esc(c['Customer ID'])} · ${plural(Number(c['Shipment Count']) || 0, 'envío', 'envíos')}</span></div>`).join('')
+    + (exact ? '' : `<div class="imp-list-item"><button class="imp-mini" data-nota="${esc(oid)}" onclick="IMP.giftPickNew(this.dataset.nota)">Crear cliente nuevo "@${esc((ui.q || '').trim())}"</button></div>`)
+    + (hits.length || !exact ? '' : '');
+}
+function giftBoxHtml(n, list) {
+  const g = n.gift;
+  if (g && (g.order_ids || []).length) {
+    const inBatch = list.filter(x => x.cust && x.cust === g.recipient);
+    return `<div style="margin-top:8px;padding:6px 8px;background:#e7f4df;border-radius:8px;font-size:13px;color:#2a4a14">
+      🎁 Regalo creado para <b>@${esc(g.username)}</b> (${plural(g.order_ids.length, 'producto', 'productos')})${inBatch.length ? ' · va en su paquete de este lote' : ' · queda pendiente para su próximo pedido'}
+      <button class="imp-mini" style="margin-left:6px" data-nota="${esc(n.order_id)}" onclick="IMP.giftUndo(this.dataset.nota)">Deshacer</button></div>`;
+  }
+  const ui = S.giftUi[n.order_id] || {};
+  if (!ui.open) {
+    return `<div class="imp-btns" style="margin-top:6px"><button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.giftOpen(this.dataset.nota)">🎁 Regalo para…</button></div>`;
+  }
+  const gifter = (list.find(x => x.tid === n.linked_shipment) || {}).username || '';
+  const items = giftItemsFor(n);
+  const who = ui.recipient ? `@${esc(ui.recipient.username)} <span class="imp-muted">(${esc(ui.recipient.id)})</span>`
+            : ui.newName ? `@${esc(ui.newName)} <span class="imp-muted">(cliente nuevo)</span>` : '';
+  const ready = items.length && (ui.recipient || ui.newName);
+  return `<div style="margin-top:8px;padding:8px;border:0.5px solid #d9c25a;border-radius:10px;background:#fffdf3">
+    <b>🎁 Regalo para…</b>
+    ${who ? `<div style="margin:6px 0">Destinatario: ${who} <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.giftChange(this.dataset.nota)">Cambiar</button></div>`
+          : `<div style="margin:6px 0"><input type="text" id="gift-q-${esc(n.order_id)}" value="${esc(ui.q || '')}" placeholder="Usuario del destinatario" style="width:100%;box-sizing:border-box;padding:6px 8px;border:0.5px solid #d9c25a;border-radius:8px;font:inherit;font-size:13px"
+              data-nota="${esc(n.order_id)}" oninput="IMP.giftSearch(this.dataset.nota, this.value)"><div id="gift-res-${esc(n.order_id)}">${giftResultsHtml(n.order_id)}</div></div>`}
+    <div style="font-size:12.5px;margin-top:4px"><b>Se creará en su lista (Manual, Pagado, $0):</b></div>
+    ${items.length ? items.map(c => `<div class="imp-list-item">• ${esc(giftLine(gifter, c))}</div>`).join('')
+                   : '<div class="imp-warn">Marca primero a qué producto(s) se refiere el regalo (casillas de arriba).</div>'}
+    <div class="imp-btns" style="margin-top:6px">
+      <button class="imp-btn primary" ${ready && !S.giftBusy ? '' : 'disabled'} data-nota="${esc(n.order_id)}" onclick="IMP.giftCreate(this.dataset.nota)">Crear regalo</button>
+      <button class="imp-btn" data-nota="${esc(n.order_id)}" onclick="IMP.giftClose(this.dataset.nota)">Cancelar</button>
+    </div></div>`;
+}
+async function giftOpen(oid) {
+  S.giftUi[oid] = { open: true, q: '', recipient: null, newName: '' };
+  renderConfigure();
+  try { await ensureCustomers(); const el = $('gift-res-' + oid); if (el) el.innerHTML = giftResultsHtml(oid); }
+  catch (e) { /* TROUBLESHOOT: customer list failed to load (Apps Script action=customers); the search shows "Cargando…" */ }
+}
+function giftClose(oid) { S.giftUi[oid] = {}; renderConfigure(); }
+function giftChange(oid) { const u = S.giftUi[oid] || {}; S.giftUi[oid] = { open: true, q: '', recipient: null, newName: '' }; renderConfigure(); }
+function giftSearch(oid, q) {
+  const ui = (S.giftUi[oid] = S.giftUi[oid] || { open: true });
+  ui.q = q;
+  const el = $('gift-res-' + oid);
+  if (el) el.innerHTML = giftResultsHtml(oid);
+}
+function giftPick(oid, cid, username) { const ui = S.giftUi[oid]; ui.recipient = { id: cid, username }; ui.newName = ''; renderConfigure(); }
+function giftPickNew(oid) { const ui = S.giftUi[oid]; ui.newName = String(ui.q || '').trim().replace(/^@/, ''); ui.recipient = null; renderConfigure(); }
+async function giftCreate(oid) {
+  if (S.giftBusy) return;
+  const n = (S.ctx.notas || []).find(x => x.order_id === oid);
+  const ui = S.giftUi[oid] || {};
+  if (!n) return;
+  const list = infos();
+  const gifterInfo = list.find(x => x.tid === n.linked_shipment) || {};
+  const items = giftItemsFor(n);
+  if (!items.length) { showToast('Marca primero a qué producto(s) se refiere el regalo', true); return; }
+  if (!ui.recipient && !ui.newName) { showToast('Elige al destinatario', true); return; }
+  if (ui.recipient && ui.recipient.id && ui.recipient.id === (gifterInfo.cust || n.customer_id)) {
+    showToast('El destinatario es el mismo cliente que hace el regalo', true); return;
+  }
+  S.giftBusy = true; renderConfigure();
+  try {
+    const r = await VP.post({
+      action: 'gift_create', nota_order_id: oid, gifter_username: gifterInfo.username || '',
+      recipient_customer_id: ui.recipient ? ui.recipient.id : '', new_username: ui.newName || '',
+      items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c) })),
+    });
+    S.giftUi[oid] = {};
+    if (r.created_customer) allCustomers = [];
+    await loadContext();                 // the new entries join this batch's pending list right now
+    initSelectionsKeep();
+    (r.order_ids || []).forEach(id => { if (S.extraSel[id]) S.extraSel[id].checked = true; });
+    const inBatch = infos().some(x => x.cust && x.cust === r.recipient_id);
+    if (S.render && inBatch) {
+      (S.render.giftNotice = S.render.giftNotice || []).push('@' + r.recipient_username);
+    }
+    showToast(inBatch ? `Regalo creado: ya está en la lista de @${r.recipient_username} para esta importación`
+                      : `Regalo creado para @${r.recipient_username}: queda pendiente para su próximo pedido`);
+  } catch (e) {
+    // TROUBLESHOOT: message comes from Apps Script gift_create. "ya tiene un regalo" = use Deshacer first.
+    showToast('No se pudo crear el regalo: ' + e.message, true);
+  }
+  S.giftBusy = false;
+  renderConfigure();
+}
+async function giftUndo(oid) {
+  if (!confirm('¿Deshacer el regalo? Se borran las entradas del destinatario que todavía no se han usado.')) return;
+  try {
+    const r = await VP.post({ action: 'gift_undo', nota_order_id: oid });
+    await loadContext();
+    initSelectionsKeep();
+    renderConfigure();
+    showToast((r.deleted || []).length
+      ? `Regalo deshecho (${plural(r.deleted.length, 'entrada borrada', 'entradas borradas')})${(r.kept || []).length ? `; ${plural(r.kept.length, 'se quedó', 'se quedaron')} porque ya se usaron` : ''}`
+      : 'No se borró nada: las entradas ya se usaron');
+  } catch (e) { showToast('No se pudo deshacer: ' + e.message, true); }
+}
+
 // Products are stored as a list of labels ("Product (Variation)") on each note piece.
 function parseList(v) {
   if (Array.isArray(v)) return v.map(String);
@@ -714,6 +859,12 @@ function buildPlan(mode) {
   const segsByTid = {};
   (S.ctx.notas || []).forEach(n => {
     const ed = S.notaEdit[n.order_id] || { text: n.text, keys: [] };
+    const g = n.gift;
+    if (g && (g.labels || []).length) {
+      // the gifted product does not go in the gifter's box: say so under that product
+      (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
+        order_id: n.nota_pedido, source: 'gift', text: `REGALO PARA @${g.username} – NO va en este paquete`, keys: g.labels });
+    }
     const text = String(ed.text == null ? n.text : ed.text).trim();
     if (!text) return;
     (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
@@ -870,6 +1021,7 @@ function renderReportHtml() {
     </div>
     ${basics.map(([t, x]) => { const i = list.find(z => z.tid === t) || {}; return `<div class="imp-bad">@${esc(i.username || '')} · ${esc(t)} — ${esc(x.reason)}${x.detail ? ': ' + esc(x.detail) : ''}</div>`; }).join('')}
     ${(rep.warnings || []).map(w => `<div class="imp-warn">${esc(w)}</div>`).join('')}
+    ${(r.giftNotice || []).length ? `<div class="imp-warn">⚠ El regalo para ${esc(r.giftNotice.join(', '))} se agregó después de generar el PDF. Vuelve a generar el PDF para que salga en su hoja.</div>` : ''}
     ${Object.keys(manual).length ? `<div class="imp-bad"><b>Anotar a mano (no se imprimió en la hoja):</b>
       ${Object.entries(manual).map(([k, m]) => `<div class="imp-fallback-cust">${esc(k)} · ${esc(m.name)}</div><ul>${m.items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`).join('')}
       <div class="imp-muted">Estos productos NO se marcaron como Anotado.</div></div>` : ''}
@@ -1504,6 +1656,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
   tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
