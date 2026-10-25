@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.6';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.7';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -8711,7 +8711,7 @@ function giftCreateAction(body) {
   const customersSheet = getCustomersSheet();
   let recipient = null, createdCustomer = false;
   if (body.giveaway) {
-    recipient = { id: '', username: 'GIVEAWAY' };
+    recipient = { id: '', username: '' };
   } else if (body.recipient_customer_id) {
     recipient = giftCustomerById_(body.recipient_customer_id);
     if (!recipient) return jsonResponse({ error: 'Cliente destinatario no encontrado' });
@@ -8739,7 +8739,7 @@ function giftCreateAction(body) {
   items.forEach(it => {
     const id = generateUUID();
     const v = { 'Order ID': id, 'Customer ID': recipient.id, 'Primary Username': recipient.username, 'Channel': 'Manual',
-                'Status': 'Pagado', 'Products': it.text, 'Price': 0, 'Notes': '', 'Created Date': nowISO(), 'Linked Shipment': '' };
+                'Status': 'Pagado', 'Products': it.text, 'Price': 0, 'Notes': body.giveaway ? 'Giveaway' : '', 'Created Date': nowISO(), 'Linked Shipment': '' };
     ids.push(id);
     rows.push(oh.map(h => (v[h] !== undefined ? v[h] : '')));
   });
