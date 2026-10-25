@@ -71,6 +71,16 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input type="text" id="pr-search" class="pr-search" placeholder="Buscar producto, SKU o variante…" oninput="vpProductos.render()">
     </div>
+    <select id="pr-channel" class="sort-select" onchange="vpProductos.render()">
+      <option value="all">Todos los canales</option>
+      <option value="tiktok">TikTok</option>
+      <option value="shopify">Shopify</option>
+    </select>
+    <select id="pr-sort" class="sort-select" onchange="vpProductos.render()">
+      <option value="name">Nombre A-Z</option>
+      <option value="created">Más reciente</option>
+      <option value="sold">Más vendidos</option>
+    </select>
     <div class="pr-stat" id="pr-stat"></div>
     <button class="refresh-btn" id="pr-refresh" onclick="vpProductos.load(true)">↻ Actualizar</button>
   </div>
