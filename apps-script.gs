@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.9';   // empacar pick list
+const SCRIPT_VERSION = '2026-10-25.1';   // productos bulk photo page
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -369,6 +369,7 @@ function doGet(e) {
     if (action === 'tiktok_order_lines') return getTikTokOrderLines(e);
     // Empacar pick list
     if (action === 'pick_lines') return pickLinesAction(e);
+    if (action === 'catalog_list') return catalogListAction(e);
     if (action === 'catalog_list') return catalogListAction(e);
     if (action === 'empacar_settings') return empacarSettingsGetAction(e, identity);
     if (action === 'batch_lines') return batchLinesAction(e);
@@ -9418,14 +9419,20 @@ function catalogSetFieldsAction(body) {
 // then saves the returned thumbnail URL into Image URL.
 const IMAGE_SERVICE_URL = 'https://img.srv2017849.hstgr.cloud';
 
+// body.type: 'variant' (default, key = Catalog ID) or 'parent' (key = Parent ID).
+// The VPS image service doesn't care which sheet a key belongs to -- it just
+// stores files under that key -- so parent and variant photos never collide
+// as long as their IDs don't (PARENT-7 vs VAR-7 -- they never do, see the ID
+// generators).
 function catalogUploadImageAction(body) {
-  const catalogId = pkStr_(body.catalog_id, 40);
-  if (!catalogId) return jsonResponse({ error: 'catalog_id es obligatorio' });                           // the line has no catalog match -> link its SKU in Catálogo first
+  const type = body.type === 'parent' ? 'parent' : 'variant';
+  const targetId = pkStr_(type === 'parent' ? body.parent_id : body.catalog_id, 40);
+  if (!targetId) return jsonResponse({ error: (type === 'parent' ? 'parent_id' : 'catalog_id') + ' es obligatorio' });   // the row has no id -> reload the page and try again
   const dataUrl = String(body.file_data || '');
   const m = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!m) return jsonResponse({ error: 'Formato de imagen no válido' });                                 // front end sent something other than a data URL -> hard refresh and try again
   const mime = m[1];
-  if (!/^image\/(jpeg|jpg|png|webp|gif)$/i.test(mime)) return jsonResponse({ error: 'Tipo de archivo no permitido: ' + mime });   // only common photo formats
+  if (!/^image\/(jpeg|jpg|png|webp)$/i.test(mime)) return jsonResponse({ error: 'Tipo de archivo no permitido: ' + mime });   // jpg/png/webp only -- gif and heic are not accepted yet
   let bytes;
   try { bytes = Utilities.base64Decode(m[2]); } catch (e) { return jsonResponse({ error: 'No se pudo leer el archivo' }); }        // corrupted upload -> try again
   if (bytes.length > 15 * 1024 * 1024) return jsonResponse({ error: 'La foto es demasiado grande (máx 15MB)' });
@@ -9436,7 +9443,7 @@ function catalogUploadImageAction(body) {
   const boundary = '----vpImg' + Utilities.getUuid().replace(/-/g, '');
   const fileName = pkStr_(body.file_name, 100) || 'photo.jpg';
   const parts = [];
-  parts.push(Utilities.newBlob('--' + boundary + '\r\nContent-Disposition: form-data; name="key"\r\n\r\n' + catalogId + '\r\n').getBytes());
+  parts.push(Utilities.newBlob('--' + boundary + '\r\nContent-Disposition: form-data; name="key"\r\n\r\n' + targetId + '\r\n').getBytes());
   parts.push(Utilities.newBlob('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName + '"\r\nContent-Type: ' + mime + '\r\n\r\n').getBytes());
   parts.push(bytes);
   parts.push(Utilities.newBlob('\r\n--' + boundary + '--\r\n').getBytes());
@@ -9462,19 +9469,69 @@ function catalogUploadImageAction(body) {
     return jsonResponse({ error: (data && data.detail) || ('El servicio de imágenes respondió con error ' + code) });   // see the image-service container logs on the VPS
   }
 
-  const vs = getProductVariantsSheet();
-  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });
-  const h = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
-  const iCat = h.indexOf('Catalog ID');
-  const row = iCat >= 0 ? findRowByColumn(vs, colLetter(iCat), catalogId) : null;
-  if (!row) return jsonResponse({ error: 'Variante no encontrada: ' + catalogId });                        // merged or deleted variant -> refresh the page and reopen
-  const col = ensureHeader(vs, 'Image URL') + 1;
-  const cell = vs.getRange(row, col);
+  const sheet = type === 'parent' ? getProductParentsSheet() : getProductVariantsSheet();
+  const sheetLabel = type === 'parent' ? 'Product Parents' : 'Product Variants';
+  if (!sheet) return jsonResponse({ error: 'No se encontró la hoja ' + sheetLabel });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idCol = h.indexOf(type === 'parent' ? 'Parent ID' : 'Catalog ID');
+  const row = idCol >= 0 ? findRowByColumn(sheet, colLetter(idCol), targetId) : null;
+  if (!row) return jsonResponse({ error: (type === 'parent' ? 'Producto no encontrado: ' : 'Variante no encontrada: ') + targetId });   // merged or deleted -> reload the page
+  const col = ensureHeader(sheet, 'Image URL') + 1;
+  const cell = sheet.getRange(row, col);
   const before = cell.getValue();
   cell.setNumberFormat('@').setValue(data.thumb_url);
-  logAudit('catalog_upload_image', 'Variant', catalogId, 'Image URL', before, data.thumb_url);
+  logAudit('catalog_upload_image', type === 'parent' ? 'Parent' : 'Variant', targetId, 'Image URL', before, data.thumb_url);
 
-  return jsonResponse({ ok: true, catalog_id: catalogId, thumb_url: data.thumb_url, full_url: data.full_url });
+  return jsonResponse({ ok: true, type: type, id: targetId, thumb_url: data.thumb_url, full_url: data.full_url });
+}
+
+// GET catalog_list -> every parent with its variants nested, for the
+// Productos photo page. One read of each sheet, joined in memory.
+function catalogListAction(e) {
+  const ps = getProductParentsSheet();
+  const vs = getProductVariantsSheet();
+  const parents = [];
+  const byParentId = {};
+
+  if (ps && ps.getLastRow() >= 2) {
+    const pd = ps.getDataRange().getValues();
+    const ph = pd[0];
+    const iPId = ph.indexOf('Parent ID'), iPName = ph.indexOf('Parent Name'), iPImg = ph.indexOf('Image URL');
+    for (let r = 1; r < pd.length; r++) {
+      const id = String(pd[r][iPId] || '').trim();
+      if (!id) continue;
+      const entry = { parent_id: id, name: iPName >= 0 ? String(pd[r][iPName] || '') : '',
+                       image: iPImg >= 0 ? String(pd[r][iPImg] || '') : '', variants: [] };
+      parents.push(entry);
+      byParentId[id] = entry;
+    }
+  }
+
+  if (vs && vs.getLastRow() >= 2) {
+    const vd = vs.getDataRange().getValues();
+    const vh = vd[0];
+    const iVId = vh.indexOf('Catalog ID'), iVPar = vh.indexOf('Parent ID'), iVName = vh.indexOf('Variant Name'),
+          iVSku = vh.indexOf('Your SKU'), iVImg = vh.indexOf('Image URL');
+    for (let r = 1; r < vd.length; r++) {
+      const id = String(vd[r][iVId] || '').trim();
+      if (!id) continue;
+      const parentId = iVPar >= 0 ? String(vd[r][iVPar] || '').trim() : '';
+      const v = { catalog_id: id, parent_id: parentId,
+                  variant_name: iVName >= 0 ? String(vd[r][iVName] || '') : '',
+                  sku: iVSku >= 0 ? String(vd[r][iVSku] || '') : '',
+                  image: iVImg >= 0 ? String(vd[r][iVImg] || '') : '' };
+      if (byParentId[parentId]) byParentId[parentId].variants.push(v);
+      else { // orphaned variant -- no matching Parent ID row (should not happen, but don't silently drop it)
+        const entry = { parent_id: parentId || ('(sin padre) ' + id), name: '(producto no encontrado)', image: '', variants: [v] };
+        parents.push(entry);
+        if (parentId) byParentId[parentId] = entry;
+      }
+    }
+  }
+
+  parents.sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  parents.forEach(p => p.variants.sort((a, b) => a.variant_name.localeCompare(b.variant_name, 'es')));
+  return jsonResponse({ parents: parents });
 }
 
 // ─── Dormant readers (admin) ───────────────────────────────────────────────
