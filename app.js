@@ -498,6 +498,7 @@ function renderSearchResults() {
   else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado');
   else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
   else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
+  else if (searchFilter === 'Giveaway') all = all.filter(r => r.Channel === 'Manual' && (r.Notas === 'Giveaway' || r.Cliente === 'GIVEAWAY'));
   // 'Todos' -- no filter
 
   results.innerHTML = '';
@@ -556,7 +557,7 @@ function renderSearchFilterBar(totalCount) {
   const bar = document.getElementById('search-filter-bar');
   if (!bar) return;
   if (!totalCount) { bar.innerHTML = ''; return; }
-  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Anotado', 'Enviado', 'Archivo', 'TikTok', 'Shopify'];
+  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Anotado', 'Enviado', 'Archivo', 'Giveaway', 'TikTok', 'Shopify'];
   bar.innerHTML = options.map(o =>
     `<button class="search-filter-btn${o === searchFilter ? ' active' : ''}" data-filter="${escapeHtml(o)}">${escapeHtml(o)}</button>`
   ).join('');
