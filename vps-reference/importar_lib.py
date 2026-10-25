@@ -713,9 +713,9 @@ def _rule(page, x0, x1, yy, width, style, color=(0, 0, 0)):
     sh.commit()
 
 
-def user_label_parts(ship):
+def user_label_parts(ship, with_nopostal=True):
     parts = [str(ship.get("username") or "").strip(), str(ship.get("count_label") or "").strip()]
-    if ship.get("no_postal"):
+    if with_nopostal and ship.get("no_postal"):
         parts.append("NO POSTAL")
     return [p for p in parts if p]
 
@@ -748,7 +748,7 @@ def _draw_bottom(pg, fonts, st, data, ship, page_no, page_count):
     W, H = page.rect.width, page.rect.height
     M = 8
     # username line (identical idea to the old output; red, bold)
-    label = "  ".join(clean_text(p, fonts.bold) for p in user_label_parts(ship))
+    label = "  ".join(clean_text(p, fonts.bold) for p in user_label_parts(ship, with_nopostal=False))
     if label.strip():
         _text(page, fonts, 10, H - 5, label, st["user_size"], True, (1, 0, 0))
     foot_h = st["deadline_size"] * 1.15 + 6
@@ -766,18 +766,42 @@ def _draw_bottom(pg, fonts, st, data, ship, page_no, page_count):
     _text(page, fonts, M + (half - _width(fonts, dl, size, True)) / 2, base, dl, size, True)
     ids = data.get("order_ids") or []
     id_lines = [f"Order ID: {i}" for i in ids] or ["Order ID: —"]
-    fs = st["footer_id_size"]
-    avail_h = foot_h - 4
-    while fs > 4 and (len(id_lines) * fs * 1.1 > avail_h or max(_width(fonts, t, fs) for t in id_lines) > half - 6):
-        fs -= 0.5
-    y = top + 3 + fs + max(0, (avail_h - len(id_lines) * fs * 1.1) / 2)
-    for t in id_lines:
-        _text(page, fonts, M + half + (half - _width(fonts, t, fs)) / 2, y, t, fs)
-        y += fs * 1.1
+    # The bottom-right corner is almost always free (the username line is short), so the IDs may
+    # use the whole height down to the page edge, and split into columns when there are many.
+    _draw_ids_block(page, fonts, id_lines, M + half, W - M, top + 2, H - 3, st["footer_id_size"])
     if page_count > 1:
         pn = f"{page_no}/{page_count}"
         _text(page, fonts, W - M - _width(fonts, pn, 7), 10, pn, 7)
     return top
+
+
+def _draw_ids_block(page, fonts, lines, x0, x1, y0, y1, fs_max):
+    """Order IDs in the bottom-right corner. Starts at fs_max; shrinks only as far as 6.5 pt,
+    then adds columns. Each ID stays on one line."""
+    h, w = y1 - y0, x1 - x0
+    fs = fs_max
+    best = None
+    while best is None:
+        for cols in (1, 2, 3):
+            per = -(-len(lines) // cols)
+            if per * fs * 1.15 <= h and max(_width(fonts, t, fs) for t in lines) <= (w / cols) - 4:
+                best = (cols, per, fs)
+                break
+        if best is None:
+            if fs <= 6.5:
+                best = (3, -(-len(lines) // 3), 6.5)
+            else:
+                fs -= 0.5
+    cols, per, fs = best
+    cw = w / cols
+    for c in range(cols):
+        chunk = lines[c * per:(c + 1) * per]
+        if not chunk:
+            break
+        yy = y0 + fs + max(0, (h - len(chunk) * fs * 1.15) / 2)
+        for t in chunk:
+            _text(page, fonts, x0 + c * cw + (cw - _width(fonts, t, fs)) / 2, yy, t, fs)
+            yy += fs * 1.15
 
 
 def _bottom_limit(st, H):
@@ -982,6 +1006,12 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
             if (sg.get("keys") or []) and id(sg) not in placed:
                 unlinked.append(sg)
 
+    # line between the last product and the Qty Total (same line as between products)
+    if data["items"]:
+        fit(item_w + 6)
+        _rule(pg.page, M, W - M, y + 1, item_w, item_style)
+        y += item_w + 3
+
     # Qty Total
     ts = st["total_size"]
     fit(ts * 1.4 + 4)
@@ -1074,22 +1104,33 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                         y += ns_note * 1.25
             y += 2
 
-    # Lápiz Infinito: centred in the free space between the content and the footer
+    # NO POSTAL and Lápiz Infinito: centred, stacked, in the free space between the content and the footer
+    mids = []
+    if ship.get("no_postal"):
+        mids.append(("NO POSTAL", (1, 0, 0)))
     if ship.get("lapiz"):
-        ls = st["lapiz_size"]
-        txt = clean_text(st["lapiz_text"] or "Lápiz Infinito", fonts.bold)
-        while ls > 8 and _width(fonts, txt, ls, True) > W - 2 * M:
-            ls -= 1
-        # the last page does not need the "continúa" strip, so it may use it
-        end = limit + 9
-        if end - y < ls * 1.6:
-            fitted = (end - y) / 1.6
-            if fitted >= 14:                 # shrink into the free space rather than add a page
-                ls = fitted
+        mids.append((clean_text(st["lapiz_text"] or "Lápiz Infinito", fonts.bold), (0, 0, 0)))
+    if mids:
+        sizes = []
+        for txt, _c in mids:
+            z = st["lapiz_size"]
+            while z > 8 and _width(fonts, txt, z, True) > W - 2 * M:
+                z -= 1
+            sizes.append(z)
+        end = limit + 9                       # the last page does not need the "continúa" strip
+        need = sum(z * 1.6 for z in sizes)
+        if end - y < need:
+            scale = (end - y) / need
+            if scale * min(sizes) >= 11:      # shrink into the free space rather than add a page
+                sizes = [z * scale for z in sizes]
             else:
                 pg, y = new_page(cont=True)
-        mid = y + (end - y) / 2
-        _text(pg.page, fonts, (W - _width(fonts, txt, ls, True)) / 2, mid + ls * 0.35, txt, ls, True)
+                end = limit + 9
+        total = sum(z * 1.6 for z in sizes)
+        cursor = y + max(0, ((end - y) - total) / 2)
+        for (txt, col), z in zip(mids, sizes):
+            _text(pg.page, fonts, (W - _width(fonts, txt, z, True)) / 2, cursor + z * 1.1, txt, z, True, col)
+            cursor += z * 1.6
 
     for k, p in enumerate(pages):
         _draw_bottom(p, fonts, st, data, ship, k + 1, len(pages))
