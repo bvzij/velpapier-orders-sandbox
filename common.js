@@ -270,6 +270,7 @@ window.VP = (function () {
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
     { id: 'mayoristas', href: 'mayoristas.html', label: 'Mayoristas', adminOnly: true, extraUsers: ['KARIN'] },
+    { id: 'productos', href: 'productos.html', label: 'Productos', adminOnly: true },
     { id: 'analisis',  href: 'analytics.html', label: 'Análisis',  adminOnly: true },
     { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes',   adminOnly: true },
   ];
