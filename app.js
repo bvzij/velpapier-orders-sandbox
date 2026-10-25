@@ -289,9 +289,97 @@ function renderBulkItems() {
   });
 }
 
+// ── GIVEAWAY POOL ────────────────────────────────────────────
+// A pool item is a Manual order with NO customer that is still available (Pagado / No Pagado):
+// created from the Giveaway tab, from the manual form (Giveaway box) or from an Importar note.
+// Older entries are recognised by "Giveaway" in Notas, the old GIVEAWAY username, or the
+// "GIVEAWAY DE" text in the product.
+function isGiveawayPool(r) {
+  if (r.Channel !== 'Manual' || r.CustomerId) return false;
+  if (r.Status !== 'Pagado' && r.Status !== 'No Pagado') return false;
+  const note = String(r.Notas || '').trim().toLowerCase();
+  return note.startsWith('giveaway') ||
+    String(r.Cliente || '').trim().toUpperCase() === 'GIVEAWAY' ||
+    /\bGIVEAWAY DE\b/i.test(String(r.Producto || ''));
+}
+// "2x Libreta" or "Libreta" -> "2x Libreta"; with a giver: "2x GIVEAWAY DE giver · Libreta"
+function giveawayText(line, giver) {
+  const m = String(line || '').trim().match(/^(\d+)\s*x\s+(.+)$/i);
+  const qty = m ? parseInt(m[1], 10) : 1;
+  const name = (m ? m[2] : String(line || '')).trim().replace(/;/g, ',');
+  const g = String(giver || '').trim().replace(/;/g, ',');
+  return `${qty}x ` + (g ? `GIVEAWAY DE ${g} · ` : '') + name;
+}
+function renderGiveawayTab(records) {
+  const list = document.getElementById('giveaway-list');
+  if (!list) return;
+  // the form is drawn once, so what is typed survives the list redraws
+  if (!document.getElementById('giveaway-form')) {
+    const f = document.createElement('div');
+    f.id = 'giveaway-form';
+    f.style.cssText = 'background:var(--surface);border:0.5px solid var(--border);border-radius:12px;padding:12px;margin:8px 0 14px';
+    f.innerHTML = `<div style="font-weight:600;margin-bottom:6px">Agregar productos al giveaway</div>
+      <textarea id="gw-products" rows="4" placeholder="Un producto por línea. Ej:&#10;2x Libreta A5 Cobre&#10;Washi Monet" style="width:100%;box-sizing:border-box;padding:8px;border:0.5px solid var(--border-strong);border-radius:8px;font:inherit;resize:none"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <input type="text" id="gw-giver" placeholder="De quién (opcional)" autocomplete="off" style="flex:1;min-width:180px;padding:7px 9px;border:0.5px solid var(--border-strong);border-radius:8px;font:inherit">
+        <button class="btn btn-primary" onclick="addGiveawayItems()">Agregar al giveaway</button>
+      </div>`;
+    list.parentNode.insertBefore(f, list);
+  }
+  list.innerHTML = '';
+  if (!records.length) { list.innerHTML = '<div class="empty-state">No hay productos en el giveaway</div>'; return; }
+  const units = records.reduce((n, r) => { const m = String(r.Producto || '').match(/(\d+)\s*x\b/i); return n + (m ? parseInt(m[1], 10) : 1); }, 0);
+  const head = document.createElement('div');
+  head.className = 'section-label';
+  head.textContent = `${records.length} producto${records.length > 1 ? 's' : ''} · ${units} pieza${units > 1 ? 's' : ''}`;
+  list.appendChild(head);
+  records.slice().sort((a, b) => new Date(b['Fecha Creación'] || 0) - new Date(a['Fecha Creación'] || 0))
+    .forEach(r => list.appendChild(renderOrderRow(r, true)));
+}
+async function addGiveawayItems() {
+  const ta = document.getElementById('gw-products'), gv = document.getElementById('gw-giver');
+  const giver = gv.value.trim();
+  const lines = ta.value.split('\n').map(x => x.trim()).filter(Boolean);
+  if (!lines.length) { showToast('Escribe al menos un producto'); return; }
+  ta.value = ''; gv.value = '';
+  const now = new Date().toISOString();
+  // show them at once (greyed), then save one at a time like the manual form does
+  const jobs = lines.map(line => {
+    const text = giveawayText(line, giver);
+    const key = 'local-' + (++localCreateCounter);
+    localCreates.set(key, { ID: key, Cliente: '', Channel: 'Manual', Producto: text, Precio: 0, Notas: 'Giveaway',
+      Status: 'Pagado', CustomerId: '', 'Fecha Creación': now, _local: true, _pending: true });
+    return { key, line, text };
+  });
+  rebuildAllRecords();
+  renderAll();
+  let failedAt = -1, errMsg = '';
+  for (let i = 0; i < jobs.length; i++) {
+    const rec = localCreates.get(jobs[i].key);
+    try {
+      const result = await apiPost({ action: 'create_order', username: '', channel: 'Manual', products: jobs[i].text,
+        price: 0, notes: 'Giveaway', shopify_order_id: '', status: 'Pagado' });
+      if (result.result !== 'created') throw new Error(result.error || 'Error');
+      rec.ID = result.order_id;
+      rec._pending = false;
+      rebuildAllRecords();
+      renderAll();
+    } catch (e) { failedAt = i; errMsg = e.message; break; }
+  }
+  if (failedAt === -1) { showToast(`✓ ${jobs.length} producto${jobs.length > 1 ? 's' : ''} agregado${jobs.length > 1 ? 's' : ''} al giveaway`); return; }
+  jobs.slice(failedAt).forEach(j => localCreates.delete(j.key));
+  rebuildAllRecords();
+  renderAll();
+  if (!ta.value.trim()) { ta.value = jobs.slice(failedAt).map(j => j.line).join('\n'); gv.value = giver; }
+  showToast('Error: ' + errMsg + ' — lo no guardado volvió al formulario');
+}
+
 function renderGiveawayToggle() {
   const on = document.getElementById('giveaway-checkbox').checked;
   const gift = document.getElementById('gift-checkbox');
+  // for a giveaway the username box means "who gave it" and is optional
+  const who = document.getElementById('new-cliente');
+  if (who) { if (!who.dataset.ph) who.dataset.ph = who.placeholder; who.placeholder = on ? 'De quién (opcional)' : who.dataset.ph; }
   if (on) {
     gift.checked = false;
     gift.disabled = true;
@@ -509,7 +597,6 @@ function renderSearchResults() {
   else if (searchFilter === 'Activos') all = all.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado');
   else if (searchFilter === 'TikTok') all = all.filter(r => r.Channel === 'TikTok');
   else if (searchFilter === 'Shopify') all = all.filter(r => r.Channel === 'Shopify');
-  else if (searchFilter === 'Giveaway') all = all.filter(r => r.Channel === 'Manual' && (r.Notas === 'Giveaway' || r.Cliente === 'GIVEAWAY'));
   // 'Todos' -- no filter
 
   results.innerHTML = '';
@@ -568,7 +655,7 @@ function renderSearchFilterBar(totalCount) {
   const bar = document.getElementById('search-filter-bar');
   if (!bar) return;
   if (!totalCount) { bar.innerHTML = ''; return; }
-  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Anotado', 'Enviado', 'Archivo', 'Giveaway', 'TikTok', 'Shopify'];
+  const options = ['Todos', 'Activos', 'Por cobrar', 'Por enviar', 'Anotado', 'Enviado', 'Archivo', 'TikTok', 'Shopify'];
   bar.innerHTML = options.map(o =>
     `<button class="search-filter-btn${o === searchFilter ? ' active' : ''}" data-filter="${escapeHtml(o)}">${escapeHtml(o)}</button>`
   ).join('');
@@ -1872,7 +1959,7 @@ async function createRecord() {
   const isGiveaway = document.getElementById('giveaway-checkbox').checked;
   const recipient = isGift ? (document.getElementById('gift-recipient').value || '').trim() : '';
 
-  if (!cliente) { showToast('Falta el usuario'); return; }
+  if (!cliente && !isGiveaway) { showToast('Falta el usuario'); return; }
   if (isGift && !recipient) { showToast('Falta el destinatario'); return; }
 
   saveBulkState();
@@ -1880,13 +1967,14 @@ async function createRecord() {
   if (!items.length) { showToast('Falta al menos un producto'); return; }
 
   // Snapshot + clear the form IMMEDIATELY, before any network call.
-  const snapshot = { cliente, channel, status, isGift, recipient };
+  const snapshot = { cliente, channel, status, isGift, isGiveaway, recipient };
   document.getElementById('new-cliente').value = '';
   document.getElementById('new-channel').value = 'Manual';
   document.getElementById('new-status').value = 'No Pagado';
   document.getElementById('gift-checkbox').checked = false;
   document.getElementById('giveaway-checkbox').checked = false;
   document.getElementById('gift-checkbox').disabled = false;
+  renderGiveawayToggle();
   document.getElementById('gift-recipient').value = '';
   document.getElementById('gift-recipient-section').style.display = 'none';
   bulkItems = [{ producto: '', precio: '', notas: '' }];
@@ -1910,8 +1998,8 @@ async function createRecord() {
   };
   items.forEach(item => {
     if (isGiveaway) {
-      // Giveaway: a Manual order with no customer, "Giveaway" in Notas (Pedidos pill)
-      addJob({ action: 'create_order', username: '', channel: 'Manual', products: 'GIVEAWAY DE ' + cliente + ' - ' + item.producto, price: 0, notes: 'Giveaway' + (item.notas ? ' · ' + item.notas : ''), shopify_order_id: '', status: 'Pagado' }, item);
+      // Giveaway: a Manual order with no customer, "Giveaway" in Notas (the Giveaway tab)
+      addJob({ action: 'create_order', username: '', channel: 'Manual', products: giveawayText(item.producto, cliente), price: 0, notes: 'Giveaway' + (item.notas ? ' · ' + item.notas : ''), shopify_order_id: '', status: 'Pagado' }, item);
       return;
     }
     if (isGift) {
@@ -1964,6 +2052,8 @@ async function createRecord() {
     document.getElementById('new-channel').value = snapshot.channel;
     document.getElementById('new-status').value = snapshot.status;
     document.getElementById('gift-checkbox').checked = snapshot.isGift;
+    document.getElementById('giveaway-checkbox').checked = !!snapshot.isGiveaway;
+    renderGiveawayToggle();
     document.getElementById('gift-recipient').value = snapshot.recipient;
     document.getElementById('gift-recipient-section').style.display = snapshot.isGift ? '' : 'none';
     bulkItems = unsavedItems.map(i => ({ ...i }));
@@ -2323,14 +2413,15 @@ function renderClientList() {
 function renderAll() {
   lastRenderStamp = Date.now();
   lastRenderDay = dayKey();
-  const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
-  const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
-  const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok'));
+  const activos = allRecords.filter(r => ACTIVE_STATUSES.includes(r.Status) && r.Status !== 'Anotado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok') && !isGiveawayPool(r));
+  const cobrar = allRecords.filter(r => r.Status === 'No Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok') && !isGiveawayPool(r));
+  const enviar = allRecords.filter(r => r.Status === 'Pagado' && (!HIDE_TIKTOK_FROM_MAIN_TABS || r.Channel !== 'TikTok') && !isGiveawayPool(r));
   const anotado = allRecords.filter(r => r.Status === 'Anotado');
   const enviado = allRecords.filter(r => r.Status === 'Enviado');
   const archivo = allRecords.filter(r => r.Status === 'Archivado');
-  const giveaway = allRecords.filter(r => r.Channel === 'Manual' && (r.Notas === 'Giveaway' || r.Cliente === 'GIVEAWAY'));
-  document.getElementById('badge-giveaway').textContent = giveaway.length;
+  const giveaway = allRecords.filter(isGiveawayPool);
+  const gwBadge = document.getElementById('badge-giveaway');
+  if (gwBadge) gwBadge.textContent = giveaway.length;
 
   document.getElementById('badge-activos').textContent = activos.length;
   document.getElementById('badge-cobrar').textContent = cobrar.length;
@@ -2364,8 +2455,10 @@ function renderAll() {
   // otherwise the visible tab. Drawing all six hidden tabs on every change
   // (archive = thousands of rows) is what froze clicks after a search.
   if (searchSelectedCliente) { renderSearchResults(); return; }
+  // The Giveaway pool is not a customer list: it has its own drawing (form + flat list)
+  if (currentTab === 'giveaway') { renderGiveawayTab(giveaway); return; }
   const lists = { activos: [activos, 'activos-list', true], cobrar: [cobrar, 'cobrar-list', true], enviar: [enviar, 'enviar-list', true],
-                                    anotado: [anotado, 'anotado-list', true], enviado: [enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false], giveaway: [giveaway, 'giveaway-list', true] };[enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false] };
+                  anotado: [anotado, 'anotado-list', true], enviado: [enviado, 'enviado-list', true], archivo: [archivo, 'archivo-list', false] };
   const cfg = lists[currentTab];
   if (!cfg || !document.getElementById(cfg[1])) return;
   if (currentTab === 'enviado' && !tabDataLoaded.enviado) return;   // its loader shows "Cargando…"
