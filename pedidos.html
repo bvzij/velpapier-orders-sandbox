@@ -82,6 +82,12 @@
       <button class="btn add-bulk-btn" onclick="addBulkItem()">+ Agregar otro producto</button>
       <div class="form-group" style="margin-bottom:8px">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="giveaway-checkbox" onchange="renderGiveawayToggle()" style="width:auto" />
+          <span>Giveaway (sin cliente: se empaca desde Pedidos)</span>
+        </label>
+      </div>
+      <div class="form-group" style="margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="gift-checkbox" onchange="renderGiftToggle()" style="width:auto" />
           <span>Es un regalo</span>
         </label>
