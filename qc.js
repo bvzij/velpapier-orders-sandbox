@@ -731,14 +731,14 @@ function renderPendingList() {
   const photoBadge = tid => {
     const qcRow = allQcRows.find(r => r['Tracking ID'] === tid);
     const n = qcRow ? ['Content1','Content2','Content3','Content4','Content5','Box1','Box2','Box3','Box4','Box5'].filter(c => qcRow[c]).length : 0;
-    return n > 0 ? `<div class="pending-progress">✓ ${n} foto${n !== 1 ? 's' : ''} guardada${n !== 1 ? 's' : ''}</div>` : '';
+    return (window.vpPick ? window.vpPick.cardNote(tid) : '') + (n > 0 ? `<div class="pending-progress">✓ ${n} foto${n !== 1 ? 's' : ''} guardada${n !== 1 ? 's' : ''}</div>` : '');
   };
   const openAttr = shipment => `onclick='openCapture(${JSON.stringify(shipment).replace(/'/g, "&apos;")})'`;
 
   list.innerHTML = [...urgentEntries, ...normalEntries].map(({ tid, orders, kind }) => {
     const first = orders[0];
     const username = first['Username'] || first['Primary Username'] || '—';
-    const urgentCls = urgentOf(tid) ? ' pending-card--urgent' : '';
+    const urgentCls = urgentOf(tid) ? ' pending-card--urgent' : (window.vpPick ? window.vpPick.problemCls(tid) : '');
 
     if (kind === 'mayorista') {
       const info = mayoristaNoteInfo(first);
