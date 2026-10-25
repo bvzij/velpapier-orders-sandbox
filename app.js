@@ -1901,6 +1901,80 @@ function requestRenameCliente(group) {
   });
 }
 
+// Giveaway pool -> winner: username autocomplete (same pattern as the rename-customer
+// modal), then the order is handed to that customer. The "GIVEAWAY DE giver · " prefix
+// is stripped from the product text, since it no longer applies once someone owns it.
+function stripGiveawayPrefix(text) {
+  // Accepts either separator seen in the wild: "GIVEAWAY DE x - producto" (the early manual-form
+  // format) and "GIVEAWAY DE x · producto" (the Importar gift format).
+  return String(text || '').replace(/^(\d+x\s*)?GIVEAWAY DE [^·\-]+[·\-]\s*/i, (m, qty) => qty || '').trim();
+}
+function showAssignGiveawayModal(id) {
+  const r = allRecords.find(x => x.ID === id);
+  if (!r) return;
+  const c = document.getElementById('modal-container');
+  c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Asignar giveaway a cliente</div>
+    <div class="edit-form" style="position:relative">
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">${escapeHtml(r.Producto || '')}</div>
+      <input type="text" id="assign-cliente" placeholder="Usuario del ganador" autocomplete="off" />
+      <div id="assign-autocomplete-list" class="autocomplete-list" style="display:none"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer">
+        <input type="checkbox" id="assign-strip-prefix" checked style="width:auto" />
+        <span>Quitar "GIVEAWAY DE …" del nombre del producto</span>
+      </label>
+    </div>
+    <div class="modal-actions"><button class="btn" id="assign-cancel-btn">Cancelar</button><button class="btn btn-primary" id="assign-save-btn">Asignar</button></div>
+  </div></div>`;
+  const input = document.getElementById('assign-cliente');
+  const list = document.getElementById('assign-autocomplete-list');
+  let picked = null;   // { name, customerId } once chosen from the list; typing again clears it
+  input.addEventListener('input', () => {
+    picked = null;
+    const val = input.value.trim().toLowerCase();
+    if (!val) { list.style.display = 'none'; return; }
+    const clientes = rankClientes(getUniqueClientes().filter(cl =>
+      cl.name.toLowerCase().includes(val) || (cl.aliases || []).some(a => a.toLowerCase().includes(val))), val).slice(0, 8);
+    if (!clientes.length) { list.style.display = 'none'; return; }
+    list.innerHTML = '';
+    clientes.forEach(cl => {
+      const item = document.createElement('div');
+      item.className = 'autocomplete-item';
+      item.innerHTML = clienteLabelHtml(cl);
+      item.addEventListener('mousedown', e => {
+        e.preventDefault();
+        input.value = cl.name; picked = { name: cl.name, customerId: cl.customerId || '' };
+        list.style.display = 'none';
+      });
+      list.appendChild(item);
+    });
+    list.style.display = 'block';
+  });
+  input.addEventListener('blur', () => { setTimeout(() => { list.style.display = 'none'; }, 150); });
+  document.getElementById('assign-cancel-btn').addEventListener('click', closeModal);
+  document.getElementById('assign-save-btn').addEventListener('click', async () => {
+    const typed = input.value.trim();
+    if (!typed) { showToast('Falta el usuario'); return; }
+    // Typing a name with no exact match in the list still assigns it (e.g. a brand-new
+    // customer) -- it just won't carry a Customer ID until the next customer sync links it.
+    const name = picked && picked.name === typed ? picked.name : typed;
+    const customerId = picked && picked.name === typed ? picked.customerId : '';
+    const strip = document.getElementById('assign-strip-prefix').checked;
+    const newProducto = strip ? stripGiveawayPrefix(r.Producto) : r.Producto;
+    closeModal();
+    try {
+      const fields = { Cliente: name, Producto: newProducto };
+      if (customerId) fields.CustomerId = customerId;
+      const result = await apiPost({ action: 'update_order', order_id: id, fields: mapToApiFields(fields) });
+      if (result.result !== 'updated') throw new Error(result.error || 'Error');
+      r.Cliente = name; r.Producto = newProducto;
+      if (customerId) r.CustomerId = customerId;
+      rebuildAllRecords();
+      renderAll();
+      showToast(`✓ Asignado a ${name}`);
+    } catch (e) { showToast('Error: ' + e.message); }
+  });
+}
+
 function requestDelete(id, producto) {
   const label = /^https?:\/\/admin\.shopify\.com\//.test(producto || '') ? 'este pedido de Shopify' : producto;
   showConfirmModal(`¿Eliminar <strong>${label}</strong>? Esta acción no se puede deshacer.`, async () => {
@@ -2131,6 +2205,14 @@ function renderOrderRow(r, showActions) {
       hoverZone.appendChild(openBtn);
     }
   } else {
+    // A giveaway-pool item (no customer) gets its own action: hand it to the winner.
+    if (isGiveawayPool(r)) {
+      const assignBtn = document.createElement('button');
+      assignBtn.className = 'btn btn-xs btn-edit'; assignBtn.textContent = 'Asignar a cliente';
+      assignBtn.addEventListener('click', () => showAssignGiveawayModal(id));
+      hoverZone.appendChild(assignBtn);
+    }
+
     const editBtn = document.createElement('button');
     editBtn.className = 'btn btn-xs btn-edit'; editBtn.textContent = 'Editar';
     editBtn.addEventListener('click', () => showEditModal(id));
