@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.5';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.6';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -8687,7 +8687,8 @@ function giftCreateAction(body) {
   const notaId = String(body.nota_order_id || '').trim();
   const items = (Array.isArray(body.items) ? body.items : [])
     .map(it => ({ label: String(it.label || '').trim(),
-                  text: String(it.text || '').replace(/[;\r\n]+/g, ', ').replace(/\s+/g, ' ').trim() }))
+                     text: String(it.text || '').replace(/[;\r\n]+/g, ', ').replace(/\s+/g, ' ').trim(),
+                     qty: parseInt(it.qty, 10) || 1, ordered: parseInt(it.ordered, 10) || parseInt(it.qty, 10) || 1 }))
     .filter(it => it.text);
   if (!notaId) return jsonResponse({ error: 'nota_order_id es obligatorio' });
   if (!items.length) return jsonResponse({ error: 'Marca al menos un producto para el regalo' });
@@ -8747,7 +8748,9 @@ function giftCreateAction(body) {
   sheet.getRange(start, 1, rows.length, oh.length).setValues(rows);
 
   const info = { giveaway: !!body.giveaway, recipient: recipient.id, username: recipient.username, gifter: String(body.gifter_username || ''),
-                 order_ids: ids, labels: items.map(it => it.label).filter(Boolean) };
+                    order_ids: ids, labels: items.map(it => it.label).filter(Boolean),
+                    qtys: Object.fromEntries(items.map(it => [it.label, it.qty])),
+                    ordered: Object.fromEntries(items.map(it => [it.label, it.ordered])) };
   sheet.getRange(notaRow, giftCol + 1).setValue(JSON.stringify(info));
   ids.forEach(id => logAuditEvent('gift_create', 'Order', id, { nota: notaId, recipient: recipient.id }));
   return jsonResponse({ result: 'created', giveaway: !!body.giveaway, order_ids: ids, recipient_id: recipient.id,
