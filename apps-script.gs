@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-24.3';   // importar-v2
+const SCRIPT_VERSION = '2026-10-24.4';   // importar-v2
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -967,6 +967,8 @@ function dispatchPostAction(action, body, role) {
     if (action === 'import_context') return importContextAction(body);
     if (action === 'import_finalize') return importFinalizeAction(body);
     if (action === 'nota_duplicate') return notaDuplicateAction(body);
+    if (action === 'gift_create') return giftCreateAction(body);
+    if (action === 'gift_undo') return giftUndoAction(body);
     if (action === 'import_log_save') return importLogSaveAction(body);
     if (action === 'import_file_save') return importFileSaveAction(body);
     if (action === 'importar_settings_save') return importarSettingsSaveAction(body);
@@ -2097,7 +2099,7 @@ function importTikTokOrders(body) {
   // importar-v2: deadline from the packing slip + the Nota data slots
   // (Nota Asignada = which product a note is about; filled by staff now,
   // possibly by an AI suggestion later -- nothing calls an AI today).
-  ['Ship By', 'Nota Original', 'Nota Fuente', 'Nota Pedido', 'Nota Productos', 'Nota Asignada'].forEach(n => ensureHeader(orders, n));
+  ['Ship By', 'Nota Original', 'Nota Fuente', 'Nota Pedido', 'Nota Productos', 'Nota Asignada', 'Nota Regalo'].forEach(n => ensureHeader(orders, n));
   const customersSheet = getCustomersSheet();
   const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
 
@@ -7894,7 +7896,7 @@ function importContextAction(body) {
     chan: c('Channel'), stat: c('Status'), prod: c('Products'), link: c('Linked Shipment'),
     created: c('Created Date'), notes: c('Notes'), shipBy: c('Ship By'), sNum: c('Shopify Order Number'),
     sId: c('Shopify Order ID'), nOrig: c('Nota Original'), nSrc: c('Nota Fuente'), nPed: c('Nota Pedido'),
-    nProd: c('Nota Productos'), nAsig: c('Nota Asignada'),
+    nProd: c('Nota Productos'), nAsig: c('Nota Asignada'), nGift: c('Nota Regalo'),
   };
   const val = (r, k) => (I[k] >= 0 ? r[I[k]] : '');
   const shippedCount = {};
@@ -7940,7 +7942,7 @@ function importContextAction(body) {
           order_id: String(val(r, 'oid')), linked_shipment: link, text: String(val(r, 'prod') || ''),
           original: String(val(r, 'nOrig') || ''), source: src, nota_pedido: String(val(r, 'nPed') || ''),
           candidates: String(val(r, 'nProd') || ''), assigned: String(val(r, 'nAsig') || ''), status: st,
-          customer_id: String(val(r, 'cust') || ''),
+          customer_id: String(val(r, 'cust') || ''), gift: giftParse_(val(r, 'nGift')),
         });
       }
       continue;
@@ -8615,9 +8617,140 @@ function notaDuplicateAction(body) {
   do { newId = oid + n; n++; } while (findOrderRow(sheet, newId));
   vals[iOid] = newId;
   if (iAsig >= 0) vals[iAsig] = '';
+  const iGiftCol = headers.indexOf('Nota Regalo');
+  if (iGiftCol >= 0) vals[iGiftCol] = '';
   const startRow = sheet.getLastRow() + 1;
   forceTextFormat(sheet, headers, ['Order ID'], startRow, 1);
   sheet.getRange(startRow, 1, 1, headers.length).setValues([vals]);
   logAuditEvent('nota_duplicate', 'Order', newId, { from: oid });
   return jsonResponse({ result: 'duplicated', order_id: newId, from: oid });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REGALO (2026-10-24): a buyer/seller note says a product is a gift for someone.
+// gift_create makes one Manual order (Pagado, price 0) per gifted product under
+// the RECIPIENT: "1x REGALO DE @gifter · title · SKU · Seller SKU" (the page builds
+// the text). Where it is recorded: column "Nota Regalo" on the Nota row, as JSON
+//   {"recipient":"CUST-1","username":"nad","gifter":"@x","order_ids":[...],"labels":[...]}
+// A note can have ONE gift; gift_undo removes the entries that are still untouched.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function giftParse_(raw) {
+  try {
+    const o = JSON.parse(String(raw || ''));
+    return (o && Array.isArray(o.order_ids)) ? o : null;
+  } catch (e) { return null; }
+}
+
+// Customer by Customer ID without reading the whole sheet.
+function giftCustomerById_(custId) {
+  const cs = getCustomersSheet();
+  if (cs.getLastRow() < 2) return null;
+  const ch = cs.getRange(1, 1, 1, cs.getLastColumn()).getValues()[0];
+  const iId = ch.indexOf('Customer ID'), iUser = ch.indexOf('Primary Username');
+  if (iId < 0 || iUser < 0) return null;
+  const hit = cs.getRange(2, iId + 1, cs.getLastRow() - 1, 1).createTextFinder(String(custId)).matchEntireCell(true).findNext();
+  if (!hit) return null;
+  return { id: String(custId), username: String(cs.getRange(hit.getRow(), iUser + 1).getValue() || '') };
+}
+
+// body: { nota_order_id, recipient_customer_id | new_username, gifter_username,
+//         items: [{ label, text }] }
+function giftCreateAction(body) {
+  const notaId = String(body.nota_order_id || '').trim();
+  const items = (Array.isArray(body.items) ? body.items : [])
+    .map(it => ({ label: String(it.label || '').trim(),
+                  text: String(it.text || '').replace(/[;\r\n]+/g, ', ').replace(/\s+/g, ' ').trim() }))
+    .filter(it => it.text);
+  if (!notaId) return jsonResponse({ error: 'nota_order_id es obligatorio' });
+  if (!items.length) return jsonResponse({ error: 'Marca al menos un producto para el regalo' });
+  if (!body.recipient_customer_id && !String(body.new_username || '').trim()) return jsonResponse({ error: 'Falta el destinatario' });
+
+  const sheet = getOrdersSheet();
+  const notaRow = findOrderRow(sheet, notaId);
+  if (!notaRow) return jsonResponse({ error: 'Nota no encontrada' });
+  const giftCol = ensureHeader(sheet, 'Nota Regalo');
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const nota = sheet.getRange(notaRow, 1, 1, oh.length).getValues()[0];
+  if (String(nota[oh.indexOf('Channel')]) !== 'Nota') return jsonResponse({ error: 'Solo las notas pueden tener un regalo' });
+  const existing = giftParse_(nota[giftCol]);
+  // TROUBLESHOOT: "ya tiene un regalo" = a gift was already made from this note. Use Deshacer
+  // on the page first, or clear the Nota Regalo cell of that Nota row if the entries are gone.
+  if (existing && existing.order_ids.length) return jsonResponse({ error: 'Esta nota ya tiene un regalo. Usa Deshacer primero.' });
+
+  // Recipient: an existing customer by ID, or by username (reuses an exact/alias match, else a stub).
+  const customersSheet = getCustomersSheet();
+  let recipient = null, createdCustomer = false;
+  if (body.recipient_customer_id) {
+    recipient = giftCustomerById_(body.recipient_customer_id);
+    if (!recipient) return jsonResponse({ error: 'Cliente destinatario no encontrado' });
+  } else {
+    const name = String(body.new_username).trim();
+    const res = findCustomerByUsername(sheetToObjects(customersSheet), name);
+    if (res && res.confidence !== 'fuzzy') {
+      recipient = { id: String(res.customer['Customer ID']), username: String(res.customer['Primary Username']) };
+    } else {
+      const ch = customersSheet.getRange(1, 1, 1, customersSheet.getLastColumn()).getValues()[0];
+      const id = generateCustomerID(customersSheet);
+      const stub = { 'Customer ID': id, 'Primary Username': name, 'First Order Date': nowISO(), 'Shipment Count': 0, 'Merge Flag': false };
+      customersSheet.appendRow(ch.map(h => (stub[h] !== undefined ? stub[h] : '')));
+      logAuditEvent('create_customer', 'Customer', id, { primary_username: name, source: 'gift' });
+      recipient = { id: id, username: name };
+      createdCustomer = true;
+    }
+  }
+  if (String(nota[oh.indexOf('Customer ID')]) && String(nota[oh.indexOf('Customer ID')]) === recipient.id) {
+    return jsonResponse({ error: 'El destinatario es el mismo cliente que hace el regalo' });
+  }
+
+  // One Manual order per gifted product, all written in one go.
+  const ids = [], rows = [];
+  items.forEach(it => {
+    const id = generateUUID();
+    const v = { 'Order ID': id, 'Customer ID': recipient.id, 'Primary Username': recipient.username, 'Channel': 'Manual',
+                'Status': 'Pagado', 'Products': it.text, 'Price': 0, 'Notes': '', 'Created Date': nowISO(), 'Linked Shipment': '' };
+    ids.push(id);
+    rows.push(oh.map(h => (v[h] !== undefined ? v[h] : '')));
+  });
+  const start = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, oh, ['Order ID', 'Tracking ID'], start, rows.length);
+  sheet.getRange(start, 1, rows.length, oh.length).setValues(rows);
+
+  const info = { recipient: recipient.id, username: recipient.username, gifter: String(body.gifter_username || ''),
+                 order_ids: ids, labels: items.map(it => it.label).filter(Boolean) };
+  sheet.getRange(notaRow, giftCol + 1).setValue(JSON.stringify(info));
+  ids.forEach(id => logAuditEvent('gift_create', 'Order', id, { nota: notaId, recipient: recipient.id }));
+  return jsonResponse({ result: 'created', order_ids: ids, recipient_id: recipient.id,
+                        recipient_username: recipient.username, created_customer: createdCustomer });
+}
+
+// body: { nota_order_id }. Removes the gift entries that are still Manual, unlinked and
+// Pagado / No Pagado; keeps (and reports) any that were already used.
+function giftUndoAction(body) {
+  const notaId = String(body.nota_order_id || '').trim();
+  const sheet = getOrdersSheet();
+  const notaRow = findOrderRow(sheet, notaId);
+  if (!notaRow) return jsonResponse({ error: 'Nota no encontrada' });
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const giftCol = oh.indexOf('Nota Regalo');
+  const info = giftCol >= 0 ? giftParse_(sheet.getRange(notaRow, giftCol + 1).getValue()) : null;
+  if (!info || !info.order_ids.length) return jsonResponse({ error: 'Esta nota no tiene regalo' });
+
+  const del = [], kept = [], gone = [];
+  info.order_ids.forEach(id => {
+    const r = findOrderRow(sheet, id);
+    if (!r) { gone.push(id); return; }
+    const v = sheet.getRange(r, 1, 1, oh.length).getValues()[0];
+    const st = String(v[oh.indexOf('Status')]), link = String(v[oh.indexOf('Linked Shipment')] || '').trim();
+    const snap = {}; oh.forEach((h, k) => { snap[h] = v[k] instanceof Date ? v[k].toISOString() : v[k]; });
+    if (String(v[oh.indexOf('Channel')]) === 'Manual' && (st === 'Pagado' || st === 'No Pagado') && !link) del.push({ id: id, row: r, snap: snap });
+    else kept.push({ order_id: id, reason: link ? 'ya está anotado en un envío' : 'estado ' + st });
+  });
+  // update the Nota row first (row numbers above it may shift after deleting)
+  if (kept.length) { info.order_ids = kept.map(k => k.order_id); sheet.getRange(notaRow, giftCol + 1).setValue(JSON.stringify(info)); }
+  else sheet.getRange(notaRow, giftCol + 1).setValue('');
+  del.sort((a, b) => b.row - a.row).forEach(d => sheet.deleteRow(d.row));
+  logAuditEvent('gift_undo', 'Order', notaId, { deleted: del.map(d => d.snap), kept: kept, already_gone: gone });
+  return jsonResponse({ result: 'undone', deleted: del.map(d => d.id), kept: kept });
 }
