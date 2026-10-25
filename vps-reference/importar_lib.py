@@ -467,32 +467,30 @@ def verify_block(parsed, csv_rows, tracking_id, created_raw=""):
         raise SlipError("NOT_IN_CSV", tracking_id)
     items, total = compute_items(parsed["rows"])
 
-    pdf_keys = Counter(_row_key(it["name"], it["variation"], it["seller_sku"], it["qty"]) for it in items)
+    # Quantities are compared per PRODUCT, as totals. TikTok merges identical items of a
+    # combined shipment into ONE slip line (qty = total of all orders), while the CSV has
+    # one row per order. Comparing row by row gave a false mismatch (2 rows of qty 1 vs 1 line of qty 2).
+    pdf_keys = Counter()
+    for it in items:
+        pdf_keys[_row_key(it["name"], it["variation"], it["seller_sku"], 0)] += int(it["qty"])
     csv_keys = Counter()
     for r in csv_rows:
         if not r.get("product"):
             continue
         q = r.get("quantity") or "1"
-        csv_keys[_row_key(r["product"], r.get("variation", ""), (r.get("raw_row") or {}).get("Seller SKU", ""),
-                          int(q) if str(q).isdigit() else -1)] += 1
+        csv_keys[_row_key(r["product"], r.get("variation", ""), (r.get("raw_row") or {}).get("Seller SKU", ""), 0)] += int(q) if str(q).isdigit() else 0
     if pdf_keys != csv_keys:
-        only_pdf = list((pdf_keys - csv_keys).elements())
-        only_csv = list((csv_keys - pdf_keys).elements())
+        bad = [k for k in sorted(set(pdf_keys) | set(csv_keys)) if pdf_keys.get(k, 0) != csv_keys.get(k, 0)]
         def show(k):
             for it in items:
-                if _row_key(it["name"], it["variation"], it["seller_sku"], it["qty"]) == k:
-                    return f"{it['qty']}× {it['name'][:45]} ({it['variation'][:25]})"
+                if _row_key(it["name"], it["variation"], it["seller_sku"], 0) == k:
+                    return f"{it['name'][:45]} ({it['variation'][:25]})"
             for r in csv_rows:
-                q = r.get("quantity") or "1"
-                if _row_key(r["product"], r.get("variation", ""), (r.get("raw_row") or {}).get("Seller SKU", ""),
-                            int(q) if str(q).isdigit() else -1) == k:
-                    return f"{q}× {r['product'][:45]} ({r.get('variation', '')[:25]})"
+                if _row_key(r["product"], r.get("variation", ""), (r.get("raw_row") or {}).get("Seller SKU", ""), 0) == k:
+                    return f"{r['product'][:45]} ({r.get('variation', '')[:25]})"
             return k
-        detail = []
-        if only_pdf:
-            detail.append("solo en PDF: " + show(only_pdf[0]))
-        if only_csv:
-            detail.append("solo en CSV: " + show(only_csv[0]))
+        k = bad[0]
+        detail = [f"cantidad total en PDF {pdf_keys.get(k, 0)} / en CSV {csv_keys.get(k, 0)}: {show(k)}"]
         raise SlipError("PRODUCTS_MISMATCH", "; ".join(detail))
 
     if parsed.get("printed_total") is not None and parsed["printed_total"] != total:
