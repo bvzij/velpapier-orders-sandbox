@@ -10,6 +10,7 @@ window.vpArchivos = (function () {
   const toast = (m, e) => VP.toast(m, !!e);
 
   let folderId = 'root';
+  let pendingFolder = [];   // [{id, name, thumb_url}] -- photos dragged in, not yet saved to a new folder
   let data = null;               // /api/list response
   let view = 'folder';           // folder | trash | search
   let searchResults = null;
@@ -47,7 +48,7 @@ window.vpArchivos = (function () {
   async function open(id) {
     folderId = id || 'root';
     view = 'folder'; searchResults = null;
-    selected.clear(); selectedFolders.clear();
+    selected.clear(); selectedFolders.clear(); pendingFolder = [];
     document.getElementById('ar-search').value = '';
     try { history.replaceState(null, '', folderId === 'root' ? 'archivos.html' : '#' + folderId); } catch (e) { /* ignore */ }
     await refresh();
@@ -81,13 +82,77 @@ window.vpArchivos = (function () {
   function tileFile(f, showPath) {
     const sel = selected.has(f.id);
     const icon = f.kind === 'video' ? '▶' : f.kind === 'pdf' ? 'PDF' : (f.name.split('.').pop() || '').toUpperCase().slice(0, 4);
-    return '<div class="ar-tile' + (sel ? ' is-sel' : '') + '" data-file="' + esc(f.id) + '">' +
+    return '<div class="ar-tile' + (sel ? ' is-sel' : '') + '" data-file="' + esc(f.id) + '" draggable="true">' +
       '<input type="checkbox" class="ar-check" data-check="' + esc(f.id) + '"' + (sel ? ' checked' : '') + '>' +
       '<div class="ar-img">' + (f.thumb_url ? '<img src="' + esc(f.thumb_url) + '" loading="lazy" alt="">' : '<span class="ar-icon">' + esc(icon) + '</span>') +
         (f.kind === 'video' && f.thumb_url ? '<span class="ar-play">▶</span>' : '') + '</div>' +
       '<div class="ar-name" title="' + esc(f.name) + '">' + esc(f.name) + '</div>' +
       '<div class="ar-meta">' + (showPath ? esc(f.folder_path || 'Archivos') + ' · ' : '') + fmtSize(f.size) + ' · ' + esc(f.uploaded_by || '') + (f.public ? '' : ' · 🔒') + '</div>' +
       '</div>';
+  }
+
+  // Drag-photos-to-make-a-folder strip. Nothing here touches the server
+  // until "Guardar carpeta" -- dragging and dropping only builds up
+  // `pendingFolder` in memory, so it's free to undo (Cancelar / page nav)
+  // right up to that one save call.
+  function renderDropStrip() {
+    const el = document.getElementById('ar-dropstrip');
+    if (!el) return;
+    if (view !== 'folder') { el.style.display = 'none'; return; }
+    el.style.display = '';
+    if (!pendingFolder.length) {
+      el.innerHTML = '<div class="ar-ds-empty">Arrastra fotos aquí para crear una carpeta nueva</div>';
+      return;
+    }
+    el.innerHTML = '<div class="ar-ds-row">' +
+      '<div class="ar-ds-thumbs">' + pendingFolder.map(f => '<div class="ar-ds-thumb"><img src="' + esc(f.thumb_url || '') + '" alt=""><button class="ar-ds-x" data-ds-remove="' + esc(f.id) + '">✕</button></div>').join('') + '</div>' +
+      '<input type="text" id="ar-ds-name" class="ar-ds-name" placeholder="Nombre de la carpeta" value="' + esc(pendingFolder.name || '') + '">' +
+      '<button class="btn btn-primary" id="ar-ds-save">Guardar carpeta</button>' +
+      '<button class="ls-mini" id="ar-ds-cancel">Cancelar</button>' +
+      '</div>';
+  }
+  function dropStripAdd(f) {
+    if (pendingFolder.some(x => x.id === f.id)) { toast('Esa foto ya está agregada', true); return; }
+    pendingFolder.push({ id: f.id, name: f.name, thumb_url: f.thumb_url });
+    renderDropStrip();
+  }
+  function dropStripRemove(id) {
+    pendingFolder = pendingFolder.filter(x => x.id !== id);
+    renderDropStrip();
+  }
+  function dropStripCancel() {
+    pendingFolder = [];
+    renderDropStrip();
+  }
+  async function dropStripSave() {
+    const input = document.getElementById('ar-ds-name');
+    let name = (input ? input.value : '').trim();
+    if (!name) { toast('Escribe un nombre para la carpeta', true); return; }
+    const fileIds = pendingFolder.map(f => f.id);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        await api('/api/folder_from_files', { method: 'POST', body: { name: name, parent_id: folderId, file_ids: fileIds } });
+        pendingFolder = [];
+        toast('✓ Carpeta creada');
+        refresh();
+        return;
+      } catch (e) {
+        if (/ya existe/i.test(e.message) && attempt === 0) {
+          // name taken -> offer "(1)" instead of just failing silently
+          if (!confirm('Ya existe una carpeta llamada «' + name + '» aquí. ¿Usar «' + name + ' (1)» en su lugar?')) { renderDropStrip(); return; }
+          name = name + ' (1)';
+          continue;
+        }
+        if (/ya existe/i.test(e.message)) {
+          const m = name.match(/^(.*) \((\d+)\)$/);
+          name = m ? m[1] + ' (' + (Number(m[2]) + 1) + ')' : name + ' (1)';
+          continue;
+        }
+        toast(e.message, true);
+        renderDropStrip();
+        return;
+      }
+    }
   }
 
   function render() {
@@ -105,6 +170,7 @@ window.vpArchivos = (function () {
         .concat(data.files.map(f => '<div class="ar-trash-row">' + (f.thumb_url ? '<img src="' + esc(f.thumb_url) + '" alt="">' : '📄') + ' <b>' + esc(f.name) + '</b> <span class="ar-sub">' + fmtSize(f.size) + ' · borrado por ' + esc(f.trashed_by || '') + ' ' + esc(VP.fmtRel(f.trashed_at)) + '</span><button class="ls-mini" onclick="vpArchivos.restore(\'' + esc(f.id) + '\')">Restaurar</button></div>'));
       grid.innerHTML = items.length ? items.join('') : '<div class="pr-empty-state">La papelera está vacía</div>';
       renderSel();
+      renderDropStrip();
       return;
     }
 
@@ -115,6 +181,7 @@ window.vpArchivos = (function () {
         (r.files.length ? '<div class="ar-files">' + r.files.map(f => tileFile(f, true)).join('') + '</div>' : '') ||
         '<div class="pr-empty-state">Sin resultados</div>';
       renderSel();
+      renderDropStrip();
       return;
     }
 
@@ -130,6 +197,7 @@ window.vpArchivos = (function () {
     grid.innerHTML = (folders ? '<div class="ar-folders">' + folders + '</div>' : '') +
       (files ? '<div class="ar-files">' + files + '</div>' : '<div class="ar-drop-hint">Arrastra archivos aquí o toca <b>Subir</b>.<br><small>Fotos, videos, PDF… hasta 4 GB por archivo.</small></div>');
     renderSel();
+    renderDropStrip();
   }
 
   function renderSel() {
@@ -339,6 +407,31 @@ window.vpArchivos = (function () {
         render(); return;
       }
       preview(t.dataset.file);
+    });
+    // Drag a tile from the grid onto the drop strip -> add to pendingFolder.
+    // Uses a custom drag type (not "Files") so it never collides with the
+    // OS-file-drop-to-upload handling below.
+    grid.addEventListener('dragstart', e => {
+      const t = e.target.closest('[data-file]');
+      if (!t) { e.preventDefault(); return; }
+      const f = fileById(t.dataset.file);
+      if (!f) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('application/x-vp-file', JSON.stringify({ id: f.id, name: f.name, thumb_url: f.thumb_url }));
+    });
+    const strip = document.getElementById('ar-dropstrip');
+    strip.addEventListener('dragover', e => { if (Array.from(e.dataTransfer.types || []).indexOf('application/x-vp-file') >= 0) e.preventDefault(); });
+    strip.addEventListener('drop', e => {
+      const raw = e.dataTransfer.getData('application/x-vp-file');
+      if (!raw) return;
+      e.preventDefault();
+      try { dropStripAdd(JSON.parse(raw)); } catch (err) { /* ignore malformed drag data */ }
+    });
+    strip.addEventListener('click', e => {
+      const rm = e.target.closest('[data-ds-remove]');
+      if (rm) { dropStripRemove(rm.dataset.dsRemove); return; }
+      if (e.target.id === 'ar-ds-save') dropStripSave();
+      if (e.target.id === 'ar-ds-cancel') dropStripCancel();
     });
     const page = document.body;
     let dragDepth = 0;
