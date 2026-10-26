@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.5';   // productos: fichas, exportar TikTok/Shopify, IA, SKU matching
+const SCRIPT_VERSION = '2026-10-25.6';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -386,6 +386,7 @@ function doGet(e) {
     if (action === 'search_products_for_merge') return requireAdmin(role) ? searchProductsForMerge(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'manual_product_pair') return requireAdmin(role) ? getManualProductPair(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'product_merge_history') return requireAdmin(role) ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'product_categories') return requireAdmin(role) ? getProductCategoriesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'orders_index') return requireAdmin(role) ? ordersIndexAction(e) : jsonResponse({ error: 'unauthorized' });
@@ -972,6 +973,7 @@ function dispatchPostAction(action, body, role) {
     if (action === 'update_order_status') return mayoreoAfterOrderChange(updateOrderStatus(body), body.order_id);
     if (action === 'update_order') return mayoreoAfterOrderChange(updateOrder(body), body.order_id);
     if (action === 'mayoreo_save_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoSavePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'save_product_categories') return requireAdmin(role) ? saveProductCategoriesAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_delete_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoDeletePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
@@ -2942,6 +2944,61 @@ function getProductVariantsSheet() {
 
 function getCatalogSuggestionsSheet() {
   return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Catalog Suggestions');
+}
+
+function getProductCategoriesSheet() {
+  return openSheetCached(PRODUCT_CATALOG_SHEET_ID).getSheetByName('Product Categories');
+}
+
+// ─── ONE-OFF SETUP (run once from the Apps Script editor, then delete) ────
+// Creates the 'Product Categories' tab (seeded with the starting list),
+// and adds 'Category' / 'Review Flag' headers to Product Parents if they
+// don't already exist. Safe to re-run -- skips anything already present.
+function setupOrganizarSheets() {
+  const ss = openSheetCached(PRODUCT_CATALOG_SHEET_ID);
+
+  let catSheet = ss.getSheetByName('Product Categories');
+  if (!catSheet) {
+    catSheet = ss.insertSheet('Product Categories');
+    catSheet.getRange(1, 1, 1, 1).setValues([['Name']]);
+    const seed = ['Marcadores', 'Washis', 'Stickers', 'Libretas', 'Cuadernos', 'Agendas',
+      'Lápices y Colores', 'Plumas y Boligrafos', 'Papelería', 'Kits de Dibujo', 'Accesorios', 'Otros'];
+    catSheet.getRange(2, 1, seed.length, 1).setValues(seed.map(s => [s]));
+    catSheet.setFrozenRows(1);
+  }
+
+  const parentsSheet = getProductParentsSheet();
+  ensureHeader(parentsSheet, 'Category');
+  ensureHeader(parentsSheet, 'Review Flag');
+
+  return 'Listo: hoja Product Categories creada (o ya existía), columnas Category / Review Flag en Product Parents listas.';
+}
+
+// GET product_categories -> { categories: ['Marcadores', ...] }
+function getProductCategoriesAction(e) {
+  const sheet = getProductCategoriesSheet();
+  if (!sheet || sheet.getLastRow() < 2) return jsonResponse({ categories: [] });
+  const vals = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  const categories = vals.map(r => String(r[0] || '').trim()).filter(Boolean);
+  return jsonResponse({ categories: categories });
+}
+
+// POST save_product_categories (admin) -- { categories: ['Marcadores', 'Washis', ...] }
+// Full replace of the list (add/rename/delete all happen client-side as
+// list edits, then the whole list is saved back in one call). Renaming a
+// category here does NOT rewrite existing Parents already set to the old
+// name -- those become free text until re-assigned, same as any dropdown
+// value change elsewhere in the sheet.
+function saveProductCategoriesAction(body) {
+  const categories = Array.isArray(body.categories) ? body.categories.map(c => String(c || '').trim()).filter(Boolean) : null;
+  if (!categories || !categories.length) return jsonResponse({ error: 'La lista de categorías no puede estar vacía' });
+  const sheet = getProductCategoriesSheet();
+  if (!sheet) return jsonResponse({ error: "No se encontró la hoja 'Product Categories'. Corre setupOrganizarSheets() primero." });
+  const before = getProductCategoriesAction({}).categories || [];
+  sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), 1).clearContent();
+  sheet.getRange(2, 1, categories.length, 1).setValues(categories.map(c => [c]));
+  logAuditEvent('save_product_categories', 'ProductCategories', 'ALL', { before: before, after: categories });
+  return jsonResponse({ ok: true, categories: categories });
 }
 
 function generateParentID(existingParents) {
