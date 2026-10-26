@@ -53,15 +53,6 @@ window.vpListados = (function () {
 
   function templateById(id) { return (boot.templates || []).find(t => t.template_id === id) || null; }
   function activeTemplates() { return (boot.templates || []).filter(t => t.active && t.platform === 'tiktok'); }
-  function skuCodeFor(tplId) {
-    const s = boot.settings || {};
-    if (tplId && s.sku_codes && s.sku_codes[tplId]) return s.sku_codes[tplId];
-    const t = templateById(tplId);
-    const base = t ? (t.name || t.category_path.split('/').pop()) : '';
-    const code = base.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase();
-    return code || 'VP';
-  }
-
   // ── List view ────────────────────────────────────────────────────────────
   function renderList() {
     const el = document.getElementById('ls-list');
@@ -149,7 +140,7 @@ window.vpListados = (function () {
       const k = (v.option1 || '') + '||' + (v.option2 || '');
       if (l.option1_name && combos[k]) errors.push(n + ': combinación repetida');
       combos[k] = true;
-      if (!v.sku) warnings.push(n + ': sin SKU (se creará uno al guardar)');
+      if (!v.sku) warnings.push(n + ': sin SKU — TikTok la puede rechazar sin un código de proveedor');
     });
     (l.images || []).forEach((im, i) => {
       const d = imgDims[im.full || im.thumb];
@@ -311,7 +302,7 @@ window.vpListados = (function () {
           (boot.images_enabled ? '<input type="file" accept="image/jpeg,image/png,image/webp" onchange="vpListados.uploadVariantImg(this,' + i + ')">' : '') + '</label></td>' +
         '<td><input class="ls-cell" data-vf="option1"' + vi + ' value="' + esc(v.option1) + '" placeholder="' + esc(draft.option1_name || 'Sin variantes') + '"' + (draft.option1_name ? '' : ' disabled') + '></td>' +
         (two ? '<td><input class="ls-cell" data-vf="option2"' + vi + ' value="' + esc(v.option2) + '" placeholder="' + esc(draft.option2_name) + '"></td>' : '') +
-        '<td><input class="ls-cell ls-sku" data-vf="sku"' + vi + ' value="' + esc(v.sku) + '" placeholder="automático"></td>' +
+        '<td><input class="ls-cell ls-sku" data-vf="sku"' + vi + ' value="' + esc(v.sku) + '" placeholder="código del proveedor"><span class="ls-sku-hint" data-sku-hint="' + i + '"></span></td>' +
         '<td><input class="ls-cell ls-num" data-vf="price"' + vi + ' value="' + esc(v.price) + '" inputmode="decimal" placeholder="$"></td>' +
         '<td><input class="ls-cell ls-num" data-vf="compare_at"' + vi + ' value="' + esc(v.compare_at) + '" inputmode="decimal"></td>' +
         '<td><input class="ls-cell ls-num" data-vf="cost"' + vi + ' value="' + esc(v.cost) + '" inputmode="decimal"></td>' +
@@ -329,8 +320,7 @@ window.vpListados = (function () {
         '<button class="ls-mini" onclick="vpListados.addVariant()">+ Variante</button>' +
         '<button class="ls-mini" onclick="vpListados.combos()">Generar combinaciones</button>' +
         '<button class="ls-mini" onclick="vpListados.fillDown()">Copiar precio/stock de la 1ª a todas</button>' +
-        '<button class="ls-mini" onclick="vpListados.autoSkus()">SKU automáticos</button>' +
-      '</div><div class="ls-help">SKU vacío = se crea solo al guardar (' + esc(skuCodeFor(draft.template_id)) + '-número del producto-01). El SKU liga los pedidos de TikTok y Shopify con este producto.</div></div>';
+      '</div><div class="ls-help">El SKU es el código del proveedor, tal cual, incluso si repite el mismo código en varias variantes. Puede quedar vacío. Liga los pedidos de TikTok y Shopify con este producto.</div></div>';
 
     // F. shipping
     const shipHtml = '<div class="ls-card"><div class="ls-card-title">Paquete (para el envío)</div><div class="ls-grid">' +
@@ -429,7 +419,10 @@ window.vpListados = (function () {
     }
     if (t.dataset.vf) {
       const v = draft.variants[Number(t.dataset.vi)];
-      if (v) { v[t.dataset.vf] = t.dataset.vf === 'sku' ? t.value.trim().toUpperCase().replace(/\s+/g, '') : t.value; markDirty(); }
+      if (!v) return;
+      v[t.dataset.vf] = t.dataset.vf === 'sku' ? t.value.trim().toUpperCase().replace(/\s+/g, '') : t.value;
+      markDirty();
+      if (t.dataset.vf === 'sku' && ev.type === 'change') skuBlurCheck(Number(t.dataset.vi), v.sku);   // on blur/tab, not every keystroke
       return;
     }
     if (t.dataset.tp) {
@@ -460,6 +453,31 @@ window.vpListados = (function () {
     }
   }
 
+  // Quiet "this SKU already exists" preview while editing -- the save()/
+  // askSkuDecision() flow is the one that actually blocks or confirms;
+  // this is just an early heads-up so it's not a surprise at save time.
+  let skuCheckSeq = 0;
+  async function skuBlurCheck(vi, sku) {
+    const hint = document.querySelector('[data-sku-hint="' + vi + '"]');
+    if (!hint) return;
+    if (!sku) { hint.textContent = ''; return; }
+    const mine = draft.listing_id ? (boot.listings.find(l => l.listing_id === draft.listing_id) || {}).parent_id : '';
+    const myOwn = draft.variants.filter((v, i) => i !== vi).some(v => (v.sku || '').toUpperCase() === sku);
+    if (myOwn || (draft.sku_links && draft.sku_links[sku])) { hint.textContent = ''; return; }   // already ours, or already resolved
+    const seq = ++skuCheckSeq;
+    hint.textContent = '…';
+    try {
+      const r = await VP.get('action=prod_sku_lookup&sku=' + encodeURIComponent(sku));
+      if (seq !== skuCheckSeq) return;   // a newer check superseded this one
+      if (r.found && r.parent_id !== draft.parent_id && r.parent_id !== mine) {
+        hint.textContent = '⚠ ya existe en ' + r.parent_name;
+        hint.title = 'Se te preguntará al guardar si es el mismo producto';
+      } else {
+        hint.textContent = '';
+      }
+    } catch (e) { hint.textContent = ''; }
+  }
+
   // ── Variants actions ─────────────────────────────────────────────────────
   function addVariant() {
     const last = draft.variants[draft.variants.length - 1] || {};
@@ -476,20 +494,6 @@ window.vpListados = (function () {
   function fillDown() {
     const f = draft.variants[0];
     draft.variants.forEach(v => { v.price = f.price; v.stock = f.stock; v.compare_at = f.compare_at; v.cost = f.cost; });
-    markDirty(); renderEditor();
-  }
-  function autoSkus() {
-    if (!draft.parent_id) { toast('El producto aún no tiene número de catálogo: los SKU vacíos se crean solos al guardar'); return; }
-    const code = skuCodeFor(draft.template_id);
-    const pn = (draft.parent_id.match(/(\d+)$/) || ['', draft.parent_id])[1];
-    const taken = Object.assign({}, boot.skus || {});
-    draft.variants.forEach(v => { if (v.sku) taken[v.sku.toUpperCase()] = 1; });
-    let n = 1;
-    draft.variants.forEach(v => {
-      if (v.sku) return;
-      let c; do { c = code + '-' + pn + '-' + String(n++).padStart(2, '0'); } while (taken[c]);
-      taken[c] = 1; v.sku = c;
-    });
     markDirty(); renderEditor();
   }
   function combos() {
@@ -743,9 +747,13 @@ window.vpListados = (function () {
     draft.status = document.getElementById('ls-status-sel').value;
     try {
       const payload = clone(draft);
-      payload.sku_code = skuCodeFor(draft.template_id);
+      payload.sku_links = Object.assign({}, draft.sku_links || {});
       payload.variants = payload.variants.filter((v, i) => i === 0 || v.option1 || v.option2 || v.price || v.sku || v.catalog_id);
-      const res = await VP.post({ action: 'prod_save', listing: payload });
+      const res = await VP.post({ action: 'prod_save', listing: payload }, { passErrors: ['sku_conflict'] });
+      if (res && res.error === 'sku_conflict') {
+        saving = false; btn.disabled = false; btn.textContent = 'Guardar';
+        return askSkuDecision(res.sku, res.existing_parent_id);
+      }
       const saved = res.listing;
       saved.variants_hint = draft.variants_hint;
       const idx = boot.listings.findIndex(l => l.listing_id === saved.listing_id);
@@ -760,6 +768,33 @@ window.vpListados = (function () {
     } finally {
       saving = false; btn.disabled = false; btn.textContent = 'Guardar';
     }
+  }
+
+  // The SKU on a variant already belongs to a different catalog parent.
+  // Ask once: same product (link this listing to that parent and retry the
+  // save) or a different product (remember that choice and retry, which
+  // then creates a new parent as usual).
+  async function askSkuDecision(sku, existingParentId) {
+    let parent = null;
+    try { parent = (await loadCatalog()).find(p => p.parent_id === existingParentId); } catch (e) { /* preview is best-effort */ }
+    const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">El SKU «' + esc(sku) + '» ya existe</div>' +
+      (parent ? '<div class="pp-item" style="cursor:default">' + (parent.image ? '<img src="' + esc(parent.image) + '" alt="">' : '<span class="pp-noimg"></span>') +
+        '<span><b>' + esc(parent.name) + '</b><br><small>' + esc(existingParentId) + ' · ' + (parent.variants || []).length + ' variante(s): ' + esc((parent.variants || []).map(v => v.variant_name).filter(Boolean).join(', ')) + '</small></span></div>'
+        : '<div class="ls-help">' + esc(existingParentId) + '</div>') +
+      '<div class="ls-help" style="margin:10px 0">¿Es el mismo producto (otro lote comprado después), o es un producto distinto que por casualidad comparte el SKU del proveedor?</div>' +
+      '<div class="ls-ai-actions"><button class="btn btn-primary" id="sd-same">Sí, es el mismo producto</button><button class="btn" id="sd-diff">No, es distinto</button></div>', { maxWidth: '520px' });
+    m.el.querySelector('#sd-same').onclick = () => {
+      draft.sku_links = draft.sku_links || {};
+      draft.sku_links[sku] = existingParentId;
+      m.close(); save();
+    };
+    m.el.querySelector('#sd-diff').onclick = () => {
+      // Remembering "different" for this exact SKU+parent pair stops the same
+      // prompt from reappearing on retry, without silently linking anything.
+      draft.sku_links = draft.sku_links || {};
+      draft.sku_links[sku] = '__different__';
+      m.close(); save();
+    };
   }
   async function archiveToggle() {
     if (!draft || !draft.listing_id) return;
@@ -945,9 +980,6 @@ window.vpListados = (function () {
       inp('st-weight', 'Peso por defecto (g)', s.default_weight_g, 'ej. 250') +
       inp('st-dims', 'Medidas por defecto (cm, largo x ancho x alto)', s.default_dims_cm, 'ej. 20 x 15 x 5') +
       '</div></div>' +
-      '<div class="ls-card"><div class="ls-card-title">Códigos de SKU por plantilla</div><div class="ls-help" style="margin-bottom:8px">Los SKU automáticos son CÓDIGO-número del producto-01 (ej. ART-123-01). Máx. 6 letras/números.</div><div class="ls-grid">' +
-      (tpls.length ? tpls.map(t => inp('st-sku-' + t.template_id, t.name, (s.sku_codes || {})[t.template_id] || skuCodeFor(t.template_id))).join('') : '<div class="ls-help">Sube una plantilla primero.</div>') +
-      '</div></div>' +
       '<div class="ls-card"><div class="ls-card-title">Campos de TikTok que casi siempre son iguales</div><div class="ls-help" style="margin-bottom:8px">Se usan en cada producto nuevo y al exportar, salvo que el producto tenga otro valor.</div><div class="ls-grid">' +
       Object.keys(propOpts).map(k => '<label class="ls-field ls-half"><span class="ls-label">' + esc(propLabel[k]) + '</span><select class="ls-input" data-tdef="' + esc(k) + '"><option value="">—</option>' +
         propOpts[k].map(o => '<option' + ((s.tiktok_defaults || {})[k] === o ? ' selected' : '') + '>' + esc(o) + '</option>').join('') + '</select></label>').join('') +
@@ -962,9 +994,8 @@ window.vpListados = (function () {
       brand_default: document.getElementById('st-brand').value, shopify_vendor: document.getElementById('st-vendor').value,
       shopify_status: document.getElementById('st-status').value, default_weight_g: document.getElementById('st-weight').value,
       default_dims_cm: document.getElementById('st-dims').value, ai_voice: document.getElementById('st-voice').value,
-      sku_codes: {}, tiktok_defaults: {},
+      tiktok_defaults: {},
     };
-    (boot.templates || []).forEach(t => { const i = document.getElementById('st-sku-' + t.template_id); if (i && i.value.trim()) s.sku_codes[t.template_id] = i.value.trim(); });
     document.querySelectorAll('[data-tdef]').forEach(sel => { if (sel.value) s.tiktok_defaults[sel.dataset.tdef] = sel.value; });
     try {
       const res = await VP.post({ action: 'prod_settings_save', settings: s });
@@ -994,7 +1025,7 @@ window.vpListados = (function () {
 
   return {
     tab, load, renderList, open, close, save, archiveToggle, selectAllVisible, clearSel, exportDialog,
-    addVariant, removeVariant, fillDown, autoSkus, combos, uploadImgs, uploadVariantImg, moveImg, removeImg,
+    addVariant, removeVariant, fillDown, combos, uploadImgs, uploadVariantImg, moveImg, removeImg,
     pasteImg, useCatalogPhotos, pickFromArchivos, pickParent, unlinkParent, runAi, undoAi,
     readTemplate, saveTemplate, toggleTemplate, saveSettings, preflight,
   };
