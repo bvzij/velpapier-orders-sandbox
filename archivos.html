@@ -27,6 +27,17 @@
     .ar-fcheck { position: absolute; top: 10px; right: 10px; z-index: 2; }
     .ar-folder { width: 100%; text-align: left; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 10px 30px 10px 12px; font-family: inherit; font-size: 14px; font-weight: 600; color: var(--text); cursor: pointer; }
     .ar-folder.drag-over { border-color: #1f8a4c; background: var(--surface2); }
+    .ar-folder--tiktok { border: 2px solid #3B5FA0; }
+    .ar-folder--shopify { border: 2px solid #4A6B24; }
+    .ar-folder--both { border: 2px solid; border-image: linear-gradient(90deg, #3B5FA0 50%, #4A6B24 50%) 1; }
+    .ar-tile--tiktok { box-shadow: 0 0 0 2px #3B5FA0; }
+    .ar-tile--shopify { box-shadow: 0 0 0 2px #4A6B24; }
+    .ar-tile--both { box-shadow: 0 0 0 2px #3B5FA0, 0 0 0 4px #4A6B24; }
+    .ar-usage-tab { position: absolute; top: -1px; right: -1px; z-index: 2; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 0 6px 0 6px; color: #fff; }
+    .ar-usage-tiktok { background: #3B5FA0; }
+    .ar-usage-shopify { background: #4A6B24; }
+    .ar-usage-both { background: linear-gradient(90deg, #3B5FA0 50%, #4A6B24 50%); }
+    .ar-group-label { font-size: 12px; font-weight: 700; color: var(--text-muted); margin: 14px 0 6px; }
     .ar-folder:hover { background: var(--surface2); }
     .ar-folder small { display: block; font-weight: 400; font-size: 11px; color: var(--text-faint); margin-top: 2px; }
     .ar-files { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
@@ -88,6 +99,15 @@
 
   <div class="ar-toolbar">
     <input type="search" id="ar-search" class="ar-search" placeholder="Buscar archivos o carpetas…" oninput="vpArchivos.search(this.value)">
+    <select id="ar-sort" class="sort-select" onchange="vpArchivos.setSort(this.value)">
+      <option value="new">Más reciente</option>
+      <option value="old">Más antiguo</option>
+    </select>
+    <select id="ar-group" class="sort-select" onchange="vpArchivos.setGroup(this.value)">
+      <option value="none">Sin agrupar</option>
+      <option value="used">Usadas primero</option>
+      <option value="unused">Sin usar primero</option>
+    </select>
     <label class="btn btn-primary" id="ar-upload-btn" style="cursor:pointer">⬆ Subir<input type="file" multiple style="display:none" onchange="vpArchivos.addFiles(this.files);this.value=''"></label>
     <button class="btn" id="ar-newfolder-btn" onclick="vpArchivos.newFolder()">+ Carpeta</button>
     <button class="btn" id="ar-trash-btn" onclick="vpArchivos.toggleTrash()">🗑 Papelera</button>
