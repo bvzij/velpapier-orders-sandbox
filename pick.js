@@ -572,8 +572,20 @@
     const standaloneMay = (shipment.order_ids || []).length === 1 && shipment.order_ids[0].channel === 'Mayorista' && /^MAY-\d+$/.test(shipment.tracking_id || '');
     S.visible = !standaloneMay;   // a standalone wholesale order already shows its own contents list
     S.pre = null;
-    if (S.visible && S.flags.pickListEnabled) { try { const q = pickQs(); S.pre = { qs: q, p: VP.get(q) }; S.pre.p.catch(() => {}); } catch (e) { S.pre = null; } }   // loads silently in the background; the button just shows it
-    renderSection(); updateHint(); refreshSubmit();
+    S.pre = null;
+    // Delayed, not immediate: openCapture's own order-detail / polling calls
+    // fire at the same moment, and every Apps Script call pays the same
+    // ~0.3-7s redirect dispatch -- firing ours alongside them just adds to
+    // the queue. Waiting lets those finish first, so this one actually goes
+    // out fast once it does. If the order is closed before the delay is up,
+    // the stale-generation check below drops the result.
+    if (S.visible && S.flags.pickListEnabled) {
+      const gen = typeof captureGen !== 'undefined' ? captureGen : 0;
+      setTimeout(() => {
+        if (gen !== (typeof captureGen !== 'undefined' ? captureGen : 0) || S.loaded) return;   // order changed, or the button was already tapped
+        try { const q = pickQs(); S.pre = { qs: q, p: VP.get(q) }; S.pre.p.catch(() => {}); } catch (e) { S.pre = null; }
+      }, 900);
+    }    renderSection(); updateHint(); refreshSubmit();
   };
   PK.onClose = function () {
     resetState(); S.visible = false;
