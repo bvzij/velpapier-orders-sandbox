@@ -89,6 +89,7 @@ function prodDispatchGet(action, e, identity) {
     if (action === 'prod_bootstrap') return prodBootstrapAction_();
     if (action === 'prod_template_file') return prodTemplateFileAction_(e);
     if (action === 'prod_catalog') return prodCatalogAction_(e);
+    if (action === 'prod_file_usage') return prodFileUsageAction_();
     if (action === 'prod_sku_lookup') return prodSkuLookupAction_(e);
     return jsonResponse({ error: 'Acción desconocida: ' + action });   // frontend newer than backend -> deploy products.gs again
   } catch (err) {
@@ -323,6 +324,42 @@ function prodVariantOut_(r, cat) {
 
 // GET prod_catalog -> catalog_list (parents, variants, units sold) plus the
 // full-size photo URLs, for the "link to an existing product" picker.
+// GET prod_file_usage -> { "<photo url>": ["tiktok","shopify"] , ... }
+// A URL only counts as used once the listing has actually been exported to
+// that platform (not just added to a draft) -- matches the file: used/not
+// used marking in Archivos, same files.srv2017849.hstgr.cloud URLs stored
+// verbatim in Listings.Images / Listing Variants.Image URL.
+function prodFileUsageAction_() {
+  const lt = prodTable_('listings'), vt = prodTable_('variants');
+  const usage = {};
+  function mark(url, platform) {
+    if (!url) return;
+    if (!usage[url]) usage[url] = {};
+    usage[url][platform] = true;
+  }
+  lt.rows.forEach(r => {
+    const tt = !!String(r['Last Export TikTok'] || '');
+    const sp = !!String(r['Last Export Shopify'] || '');
+    if (!tt && !sp) return;
+    (prodJson_(r['Images'], []) || []).forEach(im => {
+      if (tt) mark(im.full, 'tiktok');
+      if (sp) mark(im.full, 'shopify');
+    });
+  });
+  const byListing = {};
+  lt.rows.forEach(r => { byListing[String(r['Listing ID'])] = { tt: !!String(r['Last Export TikTok'] || ''), sp: !!String(r['Last Export Shopify'] || '') }; });
+  vt.rows.forEach(r => {
+    const l = byListing[String(r['Listing ID'])];
+    if (!l || (!l.tt && !l.sp)) return;
+    const url = String(r['Full Image URL'] || '');
+    if (l.tt) mark(url, 'tiktok');
+    if (l.sp) mark(url, 'shopify');
+  });
+  const out = {};
+  Object.keys(usage).forEach(u => { out[u] = Object.keys(usage[u]); });
+  return jsonResponse({ usage: out });
+}
+
 function prodCatalogAction_(e) {
   const base = JSON.parse(catalogListAction(e).getContent());
   const ps = getProductParentsSheet(), vs = getProductVariantsSheet();
