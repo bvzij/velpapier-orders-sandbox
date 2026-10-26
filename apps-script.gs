@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.3';   // productos sku/channel/sort
+const SCRIPT_VERSION = '2026-10-25.4';   // pick list speed
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -8963,7 +8963,40 @@ function empacarSetupAction(body) {
 
 // One read of Product Variants + Product Parents. Columns Image URL / Barcode /
 // Stock / Low Stock At are optional: a missing column just reads as blank.
+// Big-value cache: Apps Script caps one cache entry at 100KB, so the catalog is split in chunks.
+function pkCacheGetBig_(name) {
+  try {
+    const c = CacheService.getScriptCache();
+    const n = parseInt(c.get(name + '_n'), 10);
+    if (!n) return null;
+    const keys = [];
+    for (let i = 0; i < n; i++) keys.push(name + '_' + i);
+    const got = c.getAll(keys);
+    let s = '';
+    for (let i = 0; i < n; i++) { if (!got[name + '_' + i]) return null; s += got[name + '_' + i]; }
+    return JSON.parse(s);
+  } catch (e) { return null; }   // cache miss or corrupt entry -> read the sheet instead
+}
+function pkCachePutBig_(name, obj, ttl) {
+  try {
+    const s = JSON.stringify(obj), size = 30000, n = Math.ceil(s.length / size), put = {};
+    for (let i = 0; i < n; i++) put[name + '_' + i] = s.substr(i * size, size);
+    put[name + '_n'] = String(n);
+    CacheService.getScriptCache().putAll(put, ttl);
+  } catch (e) { /* too big or cache full: the next call just reads the sheet again */ }
+}
+function pkCacheClear_(name) { try { CacheService.getScriptCache().remove(name + '_n'); } catch (e) {} }
+
+// Catalog is cached 5 min; any photo/barcode/stock write clears it right away.
 function pkCatalogIndex_() {
+  const hit = pkCacheGetBig_('pkcat');
+  if (hit) return hit;
+  const idx = pkCatalogIndexRead_();
+  pkCachePutBig_('pkcat', idx, 300);
+  return idx;
+}
+
+function pkCatalogIndexRead_() {
   const idx = { bySku: {}, byCatalog: {}, parentName: {}, parentImage: {} };
   const vs = getProductVariantsSheet();
   if (!vs || vs.getLastRow() < 2) return idx;
@@ -9211,15 +9244,23 @@ function pickLinesAction(e) {
   const tracking = String(e.parameter.tracking_id || '').trim();
   const ttIds = pkSplitIds_(e.parameter.ids);
   const addons = pkParseAddons_(e.parameter.addons);
+  // saved=0 means the list knows this shipment was never saved: skip the QC + Pack Log reads.
+  const hasSaved = String(e.parameter.saved || '') === '1';
+  const t0 = Date.now(), T = {};
   const lines = pkBuildLines_(ttIds, addons);
-  const saved = pkSavedState_(tracking);
+  T.lines_ms = Date.now() - t0;
+  const saved = hasSaved ? pkSavedState_(tracking) : { map: {}, by: '', at: '' };
+  T.saved_ms = Date.now() - t0 - T.lines_ms;
+  const qc = hasSaved ? pkQcSummary_(tracking) : { status: '', problems: '', by: '', at: '' };
+  T.qc_ms = Date.now() - t0 - T.lines_ms - T.saved_ms;
   return jsonResponse({
     lines: lines,
     saved: saved.map,
     saved_by: saved.by,
     saved_at: saved.at,
-    qc: pkQcSummary_(tracking),
+    qc: qc,
     flags: pkFlags_(),
+    timings: T,
   });
 }
 
@@ -9371,6 +9412,7 @@ function catalogSetFieldsAction(body) {
     cell.setValue(n === 'Stock' || n === 'Low Stock At' ? (clean[n] === '' ? '' : Number(clean[n])) : clean[n]);
     logAudit('catalog_set_field', 'Variant', catalogId, n, before, clean[n]);
   });
+  pkCacheClear_('pkcat');
   return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
 }
 
@@ -9483,6 +9525,7 @@ function catalogUploadImageAction(body) {
   const fullCol = ensureHeader(sheet, 'Full Image URL') + 1;
   sheet.getRange(row, fullCol).setNumberFormat('@').setValue(data.full_url);
   logAudit('catalog_upload_image', type === 'parent' ? 'Parent' : 'Variant', targetId, 'Image URL', before, data.thumb_url);
+  pkCacheClear_('pkcat');
 
   return jsonResponse({ ok: true, type: type, id: targetId, thumb_url: data.thumb_url, full_url: data.full_url });
 }
@@ -9655,4 +9698,11 @@ function batchLinesAction(e) {
 
 function checkVersion() {
   Logger.log(SCRIPT_VERSION);
+}
+
+function debugCheckColumns() {
+  const ps = getProductParentsSheet();
+  const vs = getProductVariantsSheet();
+  Logger.log('Parents headers: ' + JSON.stringify(ps.getRange(1,1,1,ps.getLastColumn()).getValues()[0]));
+  Logger.log('Variants headers: ' + JSON.stringify(vs.getRange(1,1,1,vs.getLastColumn()).getValues()[0]));
 }
