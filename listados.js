@@ -93,6 +93,13 @@ window.vpListados = (function () {
       renderList();
       const h = (location.hash || '').replace('#', '');
       if (h === 'plantillas' || h === 'ajustes') { renderTemplates(); renderSettings(); }
+      // Handoff from Archivos "Crear producto con fotos seleccionadas".
+      if (new URLSearchParams(location.search).get('from_archivos') === '1') {
+        const raw = sessionStorage.getItem('vp_prod_from_archivos');
+        sessionStorage.removeItem('vp_prod_from_archivos');
+        try { history.replaceState(null, '', 'productos.html'); } catch (e) { /* ignore */ }
+        if (raw) { try { open(null, JSON.parse(raw)); } catch (e) { /* bad payload, ignore */ } }
+      }
     } catch (e) {
       if (list) list.innerHTML = '<div class="pr-empty-state">No se pudo cargar: ' + esc(e.message || e) + '<br><br>' +
         '<span style="font-size:12px">Si dice «Acción desconocida», falta pegar <b>products.gs</b> en Apps Script y publicar.</span></div>';
@@ -227,9 +234,14 @@ window.vpListados = (function () {
     };
   }
 
-  function open(id) {
+  function open(id, preset) {
     const l = id ? boot.listings.find(x => x.listing_id === id) : null;
     draft = l ? clone(l) : blankListing();
+    if (preset) {
+      if (preset.images && preset.images.length) draft.images = preset.images.slice(0, 9);
+      if (preset.option1_name) draft.option1_name = preset.option1_name;
+      if (preset.variants && preset.variants.length) draft.variants = preset.variants.map(v => Object.assign({ catalog_id: '', option2: '', compare_at: '', barcode: '', image_full: '' }, v));
+    }
     if (!draft.variants || !draft.variants.length) draft.variants = blankListing().variants;
     draft.variants_hint = draft.variants_hint || '';
     dirty = false; aiUndo = null;
@@ -759,38 +771,59 @@ window.vpListados = (function () {
     if (!added) toast('El catálogo no tiene fotos nuevas para este producto'); else markDirty();
     renderEditor();
   }
-  // Shared Archivos browser. onPick(file) decides what happens when a tile is
-  // tapped; the modal stays open so several can be picked in a row (gallery
-  // use) unless onPick itself closes it (single-slot use, like a variant photo).
+  async function archivosFetch_(path) {
+    const r = await fetch(FILES_API + path, { headers: { Authorization: 'Bearer ' + VP.token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+  // Shared Archivos browser: folder navigation (click a folder to open it,
+  // breadcrumb to go back up) plus a search box that searches site-wide once
+  // 2+ characters are typed. onPick(file, modal, tileEl) decides what happens
+  // when a photo tile is tapped; the modal stays open so several can be
+  // picked in a row (gallery use) unless onPick itself closes it.
   async function browseArchivos(title, onPick) {
-    let data;
-    try {
-      const r = await fetch(FILES_API + '/api/recent?kind=image&limit=300', { headers: { Authorization: 'Bearer ' + VP.token } });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      data = await r.json();
-    } catch (e) {
-      toast('Archivos no responde todavía (¿ya se instaló vp-files en el VPS?)', true);
-      // TROUBLESHOOT: the vp-files container is not running or files.srv2017849.hstgr.cloud does not resolve -> run the VPS install script.
-      return;
-    }
-    const files = (data.files || []).filter(f => f.public);
     const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">' + esc(title) + '</div>' +
-      '<input class="ls-input" id="pa-q" placeholder="Buscar por nombre o carpeta…" style="margin-bottom:10px">' +
-      '<div class="ls-help" style="margin-bottom:8px">Solo fotos de carpetas públicas.</div>' +
-      '<div class="pa-grid" id="pa-grid"></div>', { maxWidth: '760px' });
+      '<input class="ls-input" id="pa-q" placeholder="Buscar en todo Archivos…" style="margin-bottom:8px">' +
+      '<div id="pa-crumbs" class="pa-crumbs"></div>' +
+      '<div class="pa-grid" id="pa-grid"><div class="pr-empty-state">Cargando…</div></div>', { maxWidth: '760px' });
     const grid = m.el.querySelector('#pa-grid');
-    const paint = q => {
-      const list = files.filter(f => !q || (f.name + ' ' + (f.folder_path || '')).toLowerCase().indexOf(q) >= 0).slice(0, 200);
-      grid.innerHTML = list.length ? list.map((f, i) => '<button class="pa-tile" data-i="' + files.indexOf(f) + '"><img src="' + esc(f.thumb_url) + '" loading="lazy" alt=""><span>' + esc(f.name) + '</span></button>').join('')
-        : '<div class="pr-empty-state">No hay fotos públicas</div>';
+    const crumbs = m.el.querySelector('#pa-crumbs');
+    let files = [];
+    const paintFiles = list => {
+      files = list;
+      grid.innerHTML = list.length ? list.map((f, i) => '<button class="pa-tile" data-i="' + i + '"><img src="' + esc(f.thumb_url) + '" loading="lazy" alt=""><span>' + esc(f.name) + '</span></button>').join('')
+        : '<div class="pr-empty-state">No hay fotos aquí</div>';
     };
-    paint('');
-    m.el.querySelector('#pa-q').oninput = e => paint(e.target.value.trim().toLowerCase());
-    grid.onclick = e => {
-      const b = e.target.closest('.pa-tile');
-      if (!b) return;
-      onPick(files[Number(b.dataset.i)], m, b);
-    };
+    async function openFolder(id) {
+      let data;
+      try { data = await archivosFetch_('/api/list?folder=' + encodeURIComponent(id)); }
+      catch (e) {
+        toast('Archivos no responde todavía (¿ya se instaló vp-files en el VPS?)', true);
+        // TROUBLESHOOT: the vp-files container is not running or files.srv2017849.hstgr.cloud does not resolve -> run the VPS install script.
+        return;
+      }
+      crumbs.innerHTML = data.path.map((p, i) => i === data.path.length - 1 ? '<b>' + esc(p.name) + '</b>' : '<a href="#" data-go="' + esc(p.id) + '">' + esc(p.name) + '</a>').join(' <span class="ar-sub">/</span> ');
+      const folders = (data.folders || []).filter(f => f.public);
+      const imgs = (data.files || []).filter(f => f.public && f.kind === 'image');
+      paintFiles(imgs);
+      if (folders.length) grid.innerHTML = folders.map(f => '<button class="pa-folder" data-go="' + esc(f.id) + '">📁 ' + esc(f.name) + '</button>').join('') + grid.innerHTML;
+    }
+    async function doSearch(q) {
+      if (q.length < 2) { openFolder('root'); return; }
+      crumbs.innerHTML = '';
+      let data;
+      try { data = await archivosFetch_('/api/search?q=' + encodeURIComponent(q)); } catch (e) { return; }
+      paintFiles((data.files || []).filter(f => f.public && f.kind === 'image'));
+    }
+    let qTimer = null;
+    m.el.querySelector('#pa-q').oninput = e => { clearTimeout(qTimer); const q = e.target.value.trim(); qTimer = setTimeout(() => doSearch(q), 250); };
+    m.el.addEventListener('click', e => {
+      const go = e.target.closest('[data-go]');
+      if (go) { e.preventDefault(); m.el.querySelector('#pa-q').value = ''; openFolder(go.dataset.go); return; }
+      const tile = e.target.closest('.pa-tile');
+      if (tile) onPick(files[Number(tile.dataset.i)], m, tile);
+    });
+    openFolder('root');
   }
   function pickFromArchivos() {
     browseArchivos('Elegir de Archivos', (f, m, b) => {
