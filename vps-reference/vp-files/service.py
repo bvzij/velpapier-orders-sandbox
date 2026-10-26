@@ -386,6 +386,30 @@ def create_folder(body: dict = Body(...), authorization: str = Header(None)):
     return {"ok": True, "id": fid}
 
 
+@app.post("/api/folder_from_files")
+def folder_from_files(body: dict = Body(...), authorization: str = Header(None)):
+    # Archivos "drag photos to make a folder" flow: create the folder and
+    # move the dropped files into it in one transaction, so a mid-way failure
+    # never leaves a half-made folder or half-moved files.
+    ident = need_user(authorization)
+    name = safe_name(body.get("name"))[:80]
+    parent = body.get("parent_id") or "root"
+    file_ids = body.get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No hay fotos para mover")
+    with _db_lock, db() as con:
+        p = folder_row(con, parent)
+        if not p or p["trashed_at"]:
+            raise HTTPException(404, "Carpeta no encontrada")
+        if con.execute("SELECT 1 FROM folders WHERE parent_id=? AND name=? AND trashed_at IS NULL", (parent, name)).fetchone():
+            raise HTTPException(400, "Ya existe una carpeta con ese nombre aquí")
+        fid = new_id("D")
+        con.execute("INSERT INTO folders VALUES (?,?,?,?,?,?,NULL,NULL)", (fid, parent, name, p["public"], ident["name"], now_iso()))
+        for file_id in file_ids:
+            con.execute("UPDATE files SET folder_id=? WHERE id=?", (fid, file_id))
+    return {"ok": True, "id": fid}
+
+
 @app.post("/api/rename")
 def rename(body: dict = Body(...), authorization: str = Header(None)):
     need_user(authorization)
