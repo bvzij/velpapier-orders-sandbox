@@ -285,7 +285,12 @@ window.vpProductos = (function () {
     });
   }
 
-  document.addEventListener('DOMContentLoaded', () => { wire(); load(); });
+  document.addEventListener('DOMContentLoaded', () => {
+    wire();
+    const list = document.getElementById('pr-list');
+    if (list) list.innerHTML = '<div class="pr-empty-state">Cargando catálogo…</div>';
+    load();
+  });
 
   return { load, render, saveAll, discardAll, discardOne };
 })();
