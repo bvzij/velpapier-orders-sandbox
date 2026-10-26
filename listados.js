@@ -358,7 +358,7 @@ window.vpListados = (function () {
     imgs.forEach(im => measure(im.full || im.thumb));
     const photosHtml = '<div class="ls-card"><div class="ls-card-title">Fotos <span class="ls-help" style="display:inline">' + imgs.length + ' / 9 · la primera es la principal (fondo blanco, proporción 3:4 a 4:3)</span></div>' +
       '<div class="ls-gallery">' + imgs.map((im, i) =>
-        '<div class="ls-gimg">' + (i === 0 ? '<span class="ls-gmain">Principal</span>' : '') +
+        '<div class="ls-gimg" draggable="true" data-gimg="' + i + '">' + (i === 0 ? '<span class="ls-gmain">Principal</span>' : '') +
         '<img src="' + esc(im.thumb || im.full) + '" alt="" onclick="VP.lightbox(\'' + esc(im.full || im.thumb) + '\')">' +
         '<div class="ls-gbtns"><button title="Mover a la izquierda" onclick="vpListados.moveImg(' + i + ',-1)">◀</button>' +
         '<button title="Quitar" onclick="vpListados.removeImg(' + i + ')">✕</button>' +
@@ -1248,6 +1248,28 @@ window.vpListados = (function () {
       if (!box || !draft) return;
       e.preventDefault();
       dropOnGallery_(e.dataTransfer);
+    });
+    // Reorder gallery photos by dragging a tile onto another -- uses its own
+    // drag type so it never collides with the OS-file-drop handling above.
+    ed.addEventListener('dragstart', e => {
+      const t = e.target.closest('[data-gimg]');
+      if (!t) return;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('application/x-vp-gimg', t.dataset.gimg);
+    });
+    ed.addEventListener('dragover', e => {
+      if (e.target.closest('[data-gimg]') && Array.from(e.dataTransfer.types || []).indexOf('application/x-vp-gimg') >= 0) e.preventDefault();
+    });
+    ed.addEventListener('drop', e => {
+      const t = e.target.closest('[data-gimg]');
+      const raw = e.dataTransfer.getData('application/x-vp-gimg');
+      if (!t || !raw || !draft) return;
+      e.preventDefault();
+      const from = Number(raw), to = Number(t.dataset.gimg);
+      if (from === to) return;
+      const [moved] = draft.images.splice(from, 1);
+      draft.images.splice(to, 0, moved);
+      markDirty(); renderEditor();
     });
     document.addEventListener('keydown', e => {
       if (!draft) return;
