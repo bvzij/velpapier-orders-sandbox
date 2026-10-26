@@ -1368,6 +1368,7 @@ function renderFactsPane() {
       <button class="imp-mini" title="Subir" onclick="IMP.ffOp({op:'move',id:'${esc(f['ID'])}',dir:-1})">↑</button>
       <button class="imp-mini" title="Bajar" onclick="IMP.ffOp({op:'move',id:'${esc(f['ID'])}',dir:1})">↓</button>
       <button class="imp-mini" onclick="IMP.ffOp({op:'edit',id:'${esc(f['ID'])}'})">Editar</button>
+      <button class="imp-mini" onclick="IMP.ffpOpen('${esc(f['ID'])}')">Imprimir</button>
       <button class="imp-mini" onclick="IMP.ffOp({op:'delete',id:'${esc(f['ID'])}'})">Borrar</button></div>`).join('')
     : 'El pool está vacío.';
   $('ff-used').innerHTML = used.length ? used.map(f => `
@@ -1375,6 +1376,76 @@ function renderFactsPane() {
       <div class="imp-muted">${esc(VP.fmtDateTime(f['Used Date']))} · ${esc(f['Used Import'] || '')}</div></div>
       <button class="imp-mini" onclick="IMP.ffOp({op:'restore',id:'${esc(f['ID'])}'})">Devolver al pool</button></div>`).join('')
     : '—';
+}
+
+// ── Imprimir dato curioso manualmente desde el Pool ─────────────────────────
+let ffpFactId = null, ffpOrigTitle = '', ffpOrigAnswer = '';
+function ffpOpen(id) {
+  const f = (S.facts || []).find(x => x['ID'] === id);
+  if (!f) return;
+  ffpFactId = id;
+  ffpOrigTitle = f['Title'] || '';
+  ffpOrigAnswer = f['Answer'] || '';
+  $('ffp-title').value = ffpOrigTitle;
+  $('ffp-answer').value = ffpOrigAnswer;
+  $('ffp-copies').value = 1;
+  const m = (S.settings && S.settings.sticker) || {};
+  $('ffp-margin-top').value = m.margin_top != null ? m.margin_top : 0;
+  $('ffp-margin-right').value = m.margin_right != null ? m.margin_right : 0;
+  $('ffp-margin-bottom').value = m.margin_bottom != null ? m.margin_bottom : 0;
+  $('ffp-margin-left').value = m.margin_left != null ? m.margin_left : 0;
+  $('ffp-mark-used').checked = true;
+  $('ff-print-modal').style.display = 'flex';
+}
+function ffpClose() { $('ff-print-modal').style.display = 'none'; ffpFactId = null; }
+function ffpStickerSettings() {
+  return Object.assign({}, (S.settings && S.settings.sticker) || {}, {
+    margin_top: parseFloat($('ffp-margin-top').value) || 0,
+    margin_right: parseFloat($('ffp-margin-right').value) || 0,
+    margin_bottom: parseFloat($('ffp-margin-bottom').value) || 0,
+    margin_left: parseFloat($('ffp-margin-left').value) || 0,
+  });
+}
+async function ffpTest() {
+  const title = $('ffp-title').value.trim();
+  const answer = $('ffp-answer').value.trim();
+  try {
+    const r = await callImporter({ op: 'funfacts', test: true, copies: 1, fact: { title, answer }, settings: { sticker: ffpStickerSettings() } });
+    openPdf(r.pdf_base64, 'stickers_prueba.pdf');
+  } catch (e) { showToast('Error: ' + e.message, true); }
+}
+async function ffpPrint() {
+  if (!ffpFactId) return;
+  const title = $('ffp-title').value.trim();
+  const answer = $('ffp-answer').value.trim();
+  const copies = Math.max(0, parseInt($('ffp-copies').value, 10) || 0);
+  const markUsed = $('ffp-mark-used').checked;
+  if (!title || !copies) { showToast('Falta título o copias', true); return; }
+  try {
+    const stickerSettings = ffpStickerSettings();
+    // save margins as new defaults
+    const s = JSON.parse(JSON.stringify(S.settings));
+    s.sticker = Object.assign({}, s.sticker, {
+      margin_top: stickerSettings.margin_top, margin_right: stickerSettings.margin_right,
+      margin_bottom: stickerSettings.margin_bottom, margin_left: stickerSettings.margin_left,
+    });
+    await VP.post({ action: 'importar_settings_save', settings: s });
+    S.settings = s;
+    // if text changed, update it in the sheet
+    if (title !== ffpOrigTitle || answer !== ffpOrigAnswer) {
+      const r2 = await VP.post({ action: 'funfacts_save', ops: [{ op: 'edit', id: ffpFactId, title, answer }] });
+      S.facts = r2.facts || S.facts;
+    }
+    const r = await callImporter({ op: 'funfacts', copies, fact: { title, answer }, settings: { sticker: stickerSettings } });
+    openPdf(r.pdf_base64, `stickers_manual_${ffpFactId}.pdf`);
+    if (markUsed) {
+      await VP.post({ action: 'funfacts_mark_used', id: ffpFactId, import_id: 'manual' });
+    }
+    await loadFacts();
+    renderFactsPane();
+    ffpClose();
+    showToast('✓ Impreso');
+  } catch (e) { showToast('Error: ' + e.message, true); }
 }
 
 // ── Ajustes pane ──────────────────────────────────────────────────────────
@@ -1746,6 +1817,7 @@ window.IMP = {
   giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
+  ffpOpen, ffpClose, ffpTest, ffpPrint,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
 };
 
