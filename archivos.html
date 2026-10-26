@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
+  <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Archivos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .ar-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .ar-search { flex: 1; min-width: 200px; padding: 9px 10px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--text); font-family: inherit; }
+    .ar-usage { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted); margin-bottom: 14px; flex-wrap: wrap; }
+    .ar-meter { width: 140px; height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; }
+    .ar-meter div { height: 100%; }
+    .ar-crumbs { font-size: 15px; margin-bottom: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .ar-crumbs a { color: var(--text-muted); text-decoration: none; }
+    .ar-sub { color: var(--text-faint); font-size: 12px; }
+    .ar-badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 600; }
+    .ar-badge--pub { background: var(--green-bg); color: var(--green-text); }
+    .ar-badge--priv { background: var(--amber-bg); color: var(--amber-text); }
+    .ar-folders { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin-bottom: 14px; }
+    .ar-folder-wrap { position: relative; }
+    .ar-fcheck { position: absolute; top: 10px; right: 10px; z-index: 2; }
+    .ar-folder { width: 100%; text-align: left; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 10px 30px 10px 12px; font-family: inherit; font-size: 14px; font-weight: 600; color: var(--text); cursor: pointer; }
+    .ar-folder:hover { background: var(--surface2); }
+    .ar-folder small { display: block; font-weight: 400; font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+    .ar-files { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .ar-tile { position: relative; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 6px; cursor: pointer; }
+    .ar-tile.is-sel { border-color: var(--text); box-shadow: 0 0 0 1.5px var(--text); }
+    .ar-check { position: absolute; top: 10px; left: 10px; z-index: 2; width: 18px; height: 18px; opacity: 0.25; transition: opacity .12s; }
+    .ar-tile:hover .ar-check, .ar-tile.is-sel .ar-check { opacity: 1; }
+    @media (hover: none) { .ar-check { opacity: 0.9; } }
+    .ar-img { position: relative; aspect-ratio: 1 / 1; border-radius: 6px; overflow: hidden; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+    .ar-img img { width: 100%; height: 100%; object-fit: cover; }
+    .ar-icon { font-size: 14px; font-weight: 700; color: var(--text-faint); }
+    .ar-play { position: absolute; width: 34px; height: 34px; border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 13px; }
+    .ar-name { font-size: 12px; font-weight: 600; margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ar-meta { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ar-drop-hint { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
+    .ar-selbar { position: sticky; top: 56px; z-index: 40; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+    .ar-selbar .grow { flex: 1; font-size: 13px; font-weight: 600; }
+    .ar-trash-row { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 8px 12px; margin-bottom: 6px; font-size: 13px; flex-wrap: wrap; }
+    .ar-trash-row img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; }
+    .ar-trash-row .ls-mini { margin-left: auto; }
+    .ar-queue { position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: 0 8px 30px rgba(0,0,0,.18); padding: 10px 12px; z-index: 200; font-size: 12px; }
+    .ar-q-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .ar-q-row { padding: 5px 0; border-top: 0.5px solid var(--border); }
+    .ar-q-name { display: inline-block; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+    .ar-q-st { float: right; font-weight: 700; }
+    .ar-q-st.done { color: var(--green-text); }
+    .ar-q-st.error { color: var(--red-text); }
+    .ar-q-err { color: var(--amber-text); font-size: 11px; }
+    .ar-q-bar { height: 3px; background: var(--surface2); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+    .ar-q-bar div { height: 100%; background: var(--green-text); transition: width .2s; }
+    .ar-dropzone { position: fixed; inset: 0; z-index: 250; background: rgba(31,138,76,.12); border: 3px dashed var(--green-text); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; color: var(--green-text); pointer-events: none; }
+    .ls-mini { background: none; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 5px 10px; font-size: 12px; font-family: inherit; cursor: pointer; color: var(--text); }
+    .ls-ai-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .pp-item { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; background: none; border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 6px; cursor: pointer; font-family: inherit; color: var(--text); font-size: 13px; }
+    .pp-item:hover { background: var(--surface2); }
+    .pr-empty-state { padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<main class="vp-shell vp-shell--wide">
+  <section class="vp-hero" style="padding-bottom:1.25rem">
+    <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Archivos</h1>
+    <div class="vp-hero-date">Fotos, videos y documentos del equipo — en calidad original</div>
+  </section>
+
+  <div class="ar-toolbar">
+    <input type="search" id="ar-search" class="ar-search" placeholder="Buscar archivos o carpetas…" oninput="vpArchivos.search(this.value)">
+    <label class="btn btn-primary" id="ar-upload-btn" style="cursor:pointer">⬆ Subir<input type="file" multiple style="display:none" onchange="vpArchivos.addFiles(this.files);this.value=''"></label>
+    <button class="btn" id="ar-newfolder-btn" onclick="vpArchivos.newFolder()">+ Carpeta</button>
+    <button class="btn" id="ar-trash-btn" onclick="vpArchivos.toggleTrash()">🗑 Papelera</button>
+    <button class="refresh-btn" onclick="vpArchivos.refresh()">↻</button>
+  </div>
+  <div class="ar-usage" id="ar-usage"></div>
+
+  <div class="ar-selbar" id="ar-selbar" style="display:none">
+    <span class="grow" id="ar-seltext"></span>
+    <button class="btn" id="ar-sel-download" onclick="vpArchivos.download()">Descargar</button>
+    <button class="btn" id="ar-sel-link" onclick="vpArchivos.linkSelected()">Copiar enlace</button>
+    <button class="btn" id="ar-sel-rename" onclick="vpArchivos.renameSelected()">Renombrar</button>
+    <button class="btn" onclick="vpArchivos.moveSelected()">Mover</button>
+    <button class="btn btn-danger" onclick="vpArchivos.trashSelected()">Papelera</button>
+    <button class="ls-mini" onclick="vpArchivos.clearSel()">✕</button>
+  </div>
+
+  <div class="ar-crumbs" id="ar-crumbs"></div>
+  <div id="ar-grid"><div class="pr-empty-state">Cargando…</div></div>
+</main>
+
+<div class="ar-queue" id="ar-queue" style="display:none"></div>
+<div class="ar-dropzone" id="ar-dropzone" style="display:none">Suelta los archivos para subirlos aquí</div>
+<div class="toast" id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+  (async function () {
+    await VP.ensureToken();
+    VP.mountNav('archivos');
+  })();
+</script>
+<script src="archivos.js"></script>
+</body>
+</html>

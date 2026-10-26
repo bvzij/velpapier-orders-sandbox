@@ -56,6 +56,99 @@
       .pr-variants { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
     }
   </style>
+  <style>
+    /* ── Productos: tabs, listings, editor (listados.js) ── */
+    .pr-tabs { max-width: 620px; }
+    .ls-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .ls-selbar { position: sticky; top: 56px; z-index: 40; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 1rem; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+    .ls-selbar .grow { flex: 1; font-size: 13px; font-weight: 600; }
+    .ls-row { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 8px; }
+    .ls-row.is-selected { border-color: var(--text-muted); background: var(--surface2); }
+    .ls-check { width: 18px; height: 18px; flex: 0 0 auto; cursor: pointer; }
+    .ls-thumb { width: 52px; height: 52px; flex: 0 0 auto; border-radius: var(--radius-sm); background: var(--bg); border: 0.5px solid var(--border); overflow: hidden; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 10px; color: var(--text-faint); }
+    .ls-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .ls-main { flex: 1; min-width: 0; cursor: pointer; }
+    .ls-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ls-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .ls-when { font-size: 11px; color: var(--text-faint); white-space: nowrap; width: 70px; text-align: right; }
+    .ls-dot { min-width: 22px; height: 22px; border-radius: 11px; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; padding: 0 6px; }
+    .ls-dot--red { background: var(--red-bg); color: var(--red-text); }
+    .ls-dot--amber { background: var(--amber-bg); color: var(--amber-text); }
+    .ls-dot--green { background: var(--green-bg); color: var(--green-text); }
+    .ls-pill--Borrador { background: var(--surface2); color: var(--text-muted); }
+    .ls-pill--Listo { background: var(--blue-bg); color: var(--blue-text); }
+    .ls-pill--Exportado { background: var(--green-bg); color: var(--green-text); }
+    .ls-pill--Archivado { background: var(--surface2); color: var(--text-faint); text-decoration: line-through; }
+
+    .ls-editor { position: fixed; inset: 0; z-index: 300; background: var(--bg); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .ls-editor-head { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface); border-bottom: 0.5px solid var(--border); padding: 10px 16px; }
+    .ls-editor-head .grow { flex: 1; min-width: 160px; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ls-dirty { font-size: 12px; color: var(--amber-text); }
+    .ls-editor-body { max-width: 980px; margin: 0 auto; padding: 16px; }
+    .ls-card { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 12px; }
+    .ls-card-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+    .ls-ai { border-color: var(--purple-text); background: linear-gradient(0deg, var(--surface), var(--purple-bg)); }
+    .ls-grid { display: flex; flex-wrap: wrap; gap: 0 12px; }
+    .ls-field { display: block; width: 100%; margin-bottom: 10px; }
+    .ls-half { width: calc(50% - 6px); }
+    .ls-third { width: calc(25% - 9px); }
+    .ls-label { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; text-transform: capitalize; }
+    .ls-input { width: 100%; padding: 8px 10px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: inherit; }
+    textarea.ls-input { resize: vertical; line-height: 1.45; }
+    .ls-help { display: block; font-size: 11.5px; color: var(--text-faint); margin-top: 3px; line-height: 1.4; }
+    .ls-count { font-weight: 500; color: var(--text-faint); text-transform: none; }
+    .ls-count.over { color: var(--red-text); font-weight: 700; }
+    .ls-ai-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .ls-mini { background: none; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 5px 10px; font-size: 12px; font-family: inherit; cursor: pointer; color: var(--text); }
+    .ls-mini:hover { background: var(--surface2); }
+    .ls-link { font-size: 13px; }
+    .ls-preflight { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 10px 16px; margin-bottom: 12px; font-size: 12.5px; }
+    .ls-preflight ul { margin: 6px 0 0 18px; }
+    .pf-head { font-weight: 700; }
+    .pf-ok { color: var(--green-text); }
+    .pf-err { color: var(--red-text); }
+    .pf-warn { color: var(--amber-text); }
+    .ls-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+    .ls-gimg, .ls-gadd { position: relative; aspect-ratio: 1 / 1; border-radius: var(--radius-md); overflow: hidden; border: 0.5px solid var(--border); background: var(--bg); }
+    .ls-gimg img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; display: block; }
+    .ls-gmain { position: absolute; top: 4px; left: 4px; background: var(--text); color: var(--surface); font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 99px; }
+    .ls-gbtns { position: absolute; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between; background: rgba(0,0,0,0.45); }
+    .ls-gbtns button { background: none; border: none; color: #fff; padding: 4px 8px; cursor: pointer; font-size: 12px; }
+    .ls-gadd { border: 1.5px dashed var(--border-strong); display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 12px; color: var(--text-muted); text-align: center; padding: 6px; }
+    .ls-gadd input { display: none; }
+    .ls-table-wrap { overflow-x: auto; }
+    .ls-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .ls-table th { text-align: left; font-size: 11px; color: var(--text-faint); font-weight: 600; padding: 4px; white-space: nowrap; }
+    .ls-table td { padding: 3px 4px; border-top: 0.5px solid var(--border); vertical-align: middle; }
+    .ls-cell { width: 100%; min-width: 80px; padding: 6px 8px; font-size: 13px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: inherit; }
+    .ls-cell:disabled { opacity: 0.5; }
+    .ls-num { min-width: 64px; max-width: 90px; text-align: center; }
+    .ls-sku { min-width: 120px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    .ls-vimg { width: 40px; height: 40px; border-radius: var(--radius-sm); border: 1px dashed var(--border-strong); display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; color: var(--text-faint); }
+    .ls-vimg img { width: 100%; height: 100%; object-fit: cover; }
+    .ls-vimg input { display: none; }
+    .ls-x { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 14px; padding: 4px 6px; }
+    .ls-x:hover { color: var(--red-text); }
+    .ls-details summary { cursor: pointer; font-size: 13px; padding: 4px 0; }
+    .ls-details[open] summary { margin-bottom: 8px; }
+    .pp-list { max-height: 60vh; overflow-y: auto; }
+    .pp-item { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; background: none; border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 6px; cursor: pointer; font-family: inherit; color: var(--text); font-size: 13px; }
+    .pp-item:hover { background: var(--surface2); }
+    .pp-item img, .pp-noimg { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: var(--bg); flex: 0 0 auto; }
+    .pa-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; max-height: 60vh; overflow-y: auto; }
+    .pa-tile { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); padding: 4px; cursor: pointer; font-family: inherit; color: var(--text); font-size: 11px; overflow: hidden; }
+    .pa-tile img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 4px; display: block; margin-bottom: 3px; }
+    .pa-tile span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pa-tile.is-picked { border-color: var(--green-text); background: var(--green-bg); }
+    .ex-list { margin: 0 0 8px 18px; font-size: 13px; }
+    .ex-blocked { background: var(--red-bg); color: var(--red-text); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12.5px; }
+    .ex-blocked ul { margin: 6px 0 0 18px; }
+    @media (max-width: 640px) {
+      .ls-half, .ls-third { width: 100%; }
+      .ls-when { display: none; }
+      .ls-editor-body { padding: 10px; }
+    }
+  </style>
 </head>
 <body>
 
@@ -63,39 +156,102 @@
 
   <section class="vp-hero" style="padding-bottom:1.25rem">
     <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Productos</h1>
-    <div class="vp-hero-date">Fotos del catálogo — arrastra una imagen o toca para elegir</div>
+    <div class="vp-hero-date">Fichas para TikTok y Shopify, fotos del catálogo y plantillas</div>
   </section>
 
-  <div class="pr-toolbar">
-    <div class="pr-search-wrap">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input type="text" id="pr-search" class="pr-search" placeholder="Buscar producto, SKU o variante…" oninput="vpProductos.render()">
-    </div>
-    <select id="pr-channel" class="sort-select" onchange="vpProductos.render()">
-      <option value="all">Todos los canales</option>
-      <option value="tiktok">TikTok</option>
-      <option value="shopify">Shopify</option>
-    </select>
-    <select id="pr-sort" class="sort-select" onchange="vpProductos.render()">
-      <option value="name">Nombre A-Z</option>
-      <option value="created">Más reciente</option>
-      <option value="sold">Más vendidos</option>
-    </select>
-    <div class="pr-stat" id="pr-stat"></div>
-    <button class="refresh-btn" id="pr-refresh" onclick="vpProductos.load(true)">↻ Actualizar</button>
+  <div class="tabs pr-tabs">
+    <button class="tab" data-pr-tab="listados" onclick="vpListados.tab('listados')">Fichas</button>
+    <button class="tab" data-pr-tab="fotos" onclick="vpListados.tab('fotos')">Fotos del catálogo</button>
+    <button class="tab" data-pr-tab="plantillas" onclick="vpListados.tab('plantillas')">Plantillas</button>
+    <button class="tab" data-pr-tab="ajustes" onclick="vpListados.tab('ajustes')">Ajustes</button>
   </div>
 
-  <div class="pr-save-bar is-empty" id="pr-save-bar">
-    <div class="pr-save-text" id="pr-save-text"></div>
-    <div style="display:flex;gap:8px">
-      <button class="pr-discard-btn" id="pr-discard-btn" onclick="vpProductos.discardAll()">Descartar</button>
-      <button class="pr-save-btn" id="pr-save-btn" onclick="vpProductos.saveAll()">Guardar todo</button>
+  <!-- ── Fichas (listados.js) ── -->
+  <section data-pr-panel="listados">
+    <div class="ls-toolbar">
+      <div class="pr-search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="ls-search" class="pr-search" placeholder="Buscar título, SKU, LST-… o PARENT-…" oninput="vpListados.renderList()">
+      </div>
+      <select id="ls-status" class="sort-select" onchange="vpListados.renderList()">
+        <option value="activos">Activos</option>
+        <option value="Borrador">Borradores</option>
+        <option value="Listo">Listos</option>
+        <option value="Exportado">Exportados</option>
+        <option value="Archivado">Archivados</option>
+        <option value="todos">Todos</option>
+      </select>
+      <div class="pr-stat" id="ls-stat"></div>
+      <button class="refresh-btn" onclick="vpListados.load()">↻ Actualizar</button>
+      <button class="btn btn-primary" onclick="vpListados.open()">+ Nuevo producto</button>
     </div>
-  </div>
+    <div class="ls-selbar" id="ls-selbar" style="display:none">
+      <span class="grow" id="ls-seltext"></span>
+      <button class="ls-mini" onclick="vpListados.selectAllVisible()">Seleccionar todos los visibles</button>
+      <button class="ls-mini" onclick="vpListados.clearSel()">Quitar selección</button>
+      <button class="btn btn-primary" onclick="vpListados.exportDialog('tiktok')">Exportar a TikTok</button>
+      <button class="btn" onclick="vpListados.exportDialog('shopify')">Exportar a Shopify</button>
+    </div>
+    <div id="ls-list"><div class="pr-empty-state">Cargando…</div></div>
+  </section>
 
-  <div id="pr-list"></div>
+  <!-- ── Fotos del catálogo (productos.js, unchanged) ── -->
+  <section data-pr-panel="fotos" style="display:none">
+    <div class="pr-toolbar">
+      <div class="pr-search-wrap">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="pr-search" class="pr-search" placeholder="Buscar producto, SKU o variante…" oninput="vpProductos.render()">
+      </div>
+      <select id="pr-channel" class="sort-select" onchange="vpProductos.render()">
+        <option value="all">Todos los canales</option>
+        <option value="tiktok">TikTok</option>
+        <option value="shopify">Shopify</option>
+      </select>
+      <select id="pr-sort" class="sort-select" onchange="vpProductos.render()">
+        <option value="name">Nombre A-Z</option>
+        <option value="created">Más reciente</option>
+        <option value="sold">Más vendidos</option>
+      </select>
+      <div class="pr-stat" id="pr-stat"></div>
+      <button class="refresh-btn" id="pr-refresh" onclick="vpProductos.load(true)">↻ Actualizar</button>
+    </div>
+
+    <div class="pr-save-bar is-empty" id="pr-save-bar">
+      <div class="pr-save-text" id="pr-save-text"></div>
+      <div style="display:flex;gap:8px">
+        <button class="pr-discard-btn" id="pr-discard-btn" onclick="vpProductos.discardAll()">Descartar</button>
+        <button class="pr-save-btn" id="pr-save-btn" onclick="vpProductos.saveAll()">Guardar todo</button>
+      </div>
+    </div>
+
+    <div id="pr-list"></div>
+  </section>
+
+  <!-- ── Plantillas ── -->
+  <section data-pr-panel="plantillas" style="display:none"><div id="tp-body"><div class="pr-empty-state">Cargando…</div></div></section>
+
+  <!-- ── Ajustes ── -->
+  <section data-pr-panel="ajustes" style="display:none"><div id="aj-body"><div class="pr-empty-state">Cargando…</div></div></section>
 
 </main>
+
+<!-- ── Editor (full screen) ── -->
+<div class="ls-editor" id="ls-editor" style="display:none">
+  <div class="ls-editor-head">
+    <button class="ls-mini" onclick="vpListados.close()">← Volver</button>
+    <span class="grow" id="ls-editor-title"></span>
+    <span class="ls-dirty" id="ls-dirty"></span>
+    <select id="ls-status-sel" class="sort-select" title="Estado">
+      <option value="Borrador">Borrador</option>
+      <option value="Listo">Listo</option>
+      <option value="Exportado">Exportado</option>
+      <option value="Archivado">Archivado</option>
+    </select>
+    <button class="ls-mini" id="ls-archive-btn" onclick="vpListados.archiveToggle()">Archivar</button>
+    <button class="btn btn-primary" id="ls-save-btn" onclick="vpListados.save()">Guardar</button>
+  </div>
+  <div class="ls-editor-body" id="ls-editor-body"></div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -107,6 +263,9 @@
     VP.mountNav('productos');
   })();
 </script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="exportadores.js"></script>
 <script src="productos.js"></script>
+<script src="listados.js"></script>
 </body>
 </html>
