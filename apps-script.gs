@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.7';
+const SCRIPT_VERSION = '2026-10-26.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -360,8 +360,8 @@ function doGet(e) {
     if (!identity) return jsonResponse({ error: 'unauthorized' });
     const role = identity.role;
     if (!serviceActionAllowed(identity, action)) return jsonResponse({ error: 'unauthorized' });
-    if (action === 'ping') return jsonResponse({ ok: true, role: role, name: identity.name });
-    if (action === 'whoami') return jsonResponse({ role: role, name: identity.name });
+    if (action === 'ping') return jsonResponse({ ok: true, role: role, name: identity.name, scopes: scopesForResponse_(identity) });
+    if (action === 'whoami') return jsonResponse({ role: role, name: identity.name, scopes: scopesForResponse_(identity) });
     if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
@@ -389,6 +389,7 @@ function doGet(e) {
     if (action === 'product_categories') return requireAdmin(role) ? getProductCategoriesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'get_staff_scopes') return requireAdmin(role) ? getStaffScopesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'orders_index') return requireAdmin(role) ? ordersIndexAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'health_report') return requireAdmin(role) ? healthReportAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_redo_status') return undoRedoStatusAction(e);
@@ -1019,8 +1020,9 @@ function dispatchPostAction(action, body, role) {
     if (action === 'save_pick') return savePickAction(body);
     if (action === 'user_settings_save') return userSettingsSaveAction(body);
     if (action === 'empacar_settings_save') return requireAdmin(role) ? empacarSettingsSaveAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'catalog_set_fields') return requireAdmin(role) ? catalogSetFieldsAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'catalog_upload_image') return requireAdmin(role) ? catalogUploadImageAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_set_fields') return hasScope(identity, 'productos') ? catalogSetFieldsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_upload_image') return hasScope(identity, 'productos') ? catalogUploadImageAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'set_staff_scope') return requireAdmin(role) ? setStaffScopeAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'empacar_setup') return requireAdmin(role) ? empacarSetupAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'logout') return logoutAction(body);
     if (action === 'import_qc_history') return requireAdmin(role) ? importQcHistoryAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -2029,6 +2031,86 @@ function authOk(t) {
 // token is a VALID token (authOk passes) but not allowed to reach these.
 function requireAdmin(role) {
   return role === 'admin';
+}
+
+// ─── Page access scopes (per person) ───────────────────────────────────
+// Admins always have every scope. Staff get a page only when an admin
+// switched it on in Ajustes -> "Acceso a páginas". Stored in Script
+// Properties as SCOPES_<NAME> = "productos,archivos".
+// To make another page toggleable: add it to SCOPEABLE_PAGES, give its NAV
+// entry in common.js a matching `scope`, call VP.requirePage('<id>') on the
+// page, and gate its backend actions with hasScope(identity, '<id>').
+const SCOPEABLE_PAGES = [
+  { id: 'productos', label: 'Productos' },
+  { id: 'archivos',  label: 'Archivos' },
+];
+
+let _scopesMemo = {};
+
+function parseScopes_(raw) {
+  const valid = SCOPEABLE_PAGES.map(p => p.id);
+  return String(raw || '').split(',').map(s => s.trim()).filter(s => valid.indexOf(s) >= 0);
+}
+
+function getScopesFor_(name) {
+  const key = String(name || '').toUpperCase();
+  if (!key) return [];
+  if (_scopesMemo[key] === undefined) {
+    _scopesMemo[key] = parseScopes_(PropertiesService.getScriptProperties().getProperty('SCOPES_' + key));
+  }
+  return _scopesMemo[key];
+}
+
+function hasScope(identity, scope) {
+  if (!identity) return false;
+  if (identity.role === 'admin') return true;
+  return getScopesFor_(identity.name).indexOf(scope) >= 0;
+}
+
+function scopesForResponse_(identity) {
+  if (identity && identity.role === 'admin') return SCOPEABLE_PAGES.map(p => p.id);
+  return getScopesFor_(identity ? identity.name : '');
+}
+
+// GET get_staff_scopes (admin) -> { pages, users:[{name, scopes}] } for the Ajustes modal. Staff only.
+function getStaffScopesAction(e) {
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const users = Object.keys(props).filter(k => k.indexOf('USER_') === 0).map(k => ({
+    name: k.slice(5),
+    role: parseUserProp(props[k]).role,
+    scopes: parseScopes_(props['SCOPES_' + k.slice(5)]),
+  })).filter(u => u.role !== 'admin').sort((a, b) => a.name.localeCompare(b.name));
+  return jsonResponse({ pages: SCOPEABLE_PAGES, users: users });
+}
+
+// POST set_staff_scope (admin) { person_name | '*', scope, enabled }. '*' = every staff member.
+function setStaffScopeAction(body) {
+  const scope = String(body.scope || '');
+  const enabled = body.enabled === true || body.enabled === 'true';
+  if (!SCOPEABLE_PAGES.some(p => p.id === scope)) return jsonResponse({ error: 'Página desconocida: ' + scope });   // TROUBLESHOOT: scope id is not in SCOPEABLE_PAGES -> frontend and apps-script.gs are out of sync; redeploy Apps Script.
+  const store = PropertiesService.getScriptProperties();
+  const props = store.getProperties();
+  const who = String(body.person_name || '').trim().toUpperCase();
+  let names;
+  if (who === '*') {
+    names = Object.keys(props).filter(k => k.indexOf('USER_') === 0 && parseUserProp(props[k]).role !== 'admin').map(k => k.slice(5));
+  } else {
+    if (!props['USER_' + who]) return jsonResponse({ error: 'No existe ningún usuario llamado ' + who + '.' });   // TROUBLESHOOT: person_name must match a USER_<NAME> Script Property exactly (the part after "USER_").
+    if (parseUserProp(props['USER_' + who]).role === 'admin') return jsonResponse({ error: 'Los administradores ya tienen acceso a todo.' });   // TROUBLESHOOT: admins never need scopes; the Ajustes modal only lists staff.
+    names = [who];
+  }
+  let changed = 0;
+  names.forEach(name => {
+    const current = parseScopes_(props['SCOPES_' + name]);
+    if ((current.indexOf(scope) >= 0) === enabled) return;
+    const next = enabled ? current.concat([scope]) : current.filter(s => s !== scope);
+    if (next.length) store.setProperty('SCOPES_' + name, next.join(','));
+    else store.deleteProperty('SCOPES_' + name);
+    logAuditEvent('set_staff_scope', 'User', name, { scope: scope, enabled: enabled });
+    changed++;
+  });
+  _scopesMemo = {};
+  return jsonResponse({ result: 'done', changed: changed });
 }
 
 // ─── Roles modal (Ajustes, admin-only) ─────────────────────────────────
