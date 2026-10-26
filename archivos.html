@@ -43,6 +43,14 @@
     .ar-drop-hint { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
     .ar-selbar { position: sticky; top: 56px; z-index: 40; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
     .ar-selbar .grow { flex: 1; font-size: 13px; font-weight: 600; }
+    .ar-dropstrip { margin-bottom: 12px; }
+    .ar-ds-empty { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 14px; text-align: center; font-size: 12.5px; color: var(--text-faint); }
+    .ar-ds-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface); border: 1.5px dashed #1f8a4c; border-radius: var(--radius-lg); padding: 10px 14px; }
+    .ar-ds-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .ar-ds-thumb { position: relative; width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: var(--bg); }
+    .ar-ds-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .ar-ds-x { position: absolute; top: 0; right: 0; width: 16px; height: 16px; border: none; background: rgba(0,0,0,.6); color: #fff; font-size: 10px; cursor: pointer; line-height: 1; }
+    .ar-ds-name { flex: 1; min-width: 140px; padding: 7px 10px; font-size: 13px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-family: inherit; }
     .ar-trash-row { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); padding: 8px 12px; margin-bottom: 6px; font-size: 13px; flex-wrap: wrap; }
     .ar-trash-row img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; }
     .ar-trash-row .ls-mini { margin-left: auto; }
@@ -92,6 +100,7 @@
   </div>
 
   <div class="ar-crumbs" id="ar-crumbs"></div>
+  <div id="ar-dropstrip" class="ar-dropstrip"></div>
   <div id="ar-grid"><div class="pr-empty-state">Cargando…</div></div>
 </main>
 
