@@ -83,6 +83,7 @@ function prodDispatchGet(action, e, identity) {
     if (action === 'prod_bootstrap') return prodBootstrapAction_();
     if (action === 'prod_template_file') return prodTemplateFileAction_(e);
     if (action === 'prod_catalog') return prodCatalogAction_(e);
+    if (action === 'prod_sku_lookup') return prodSkuLookupAction_(e);
     return jsonResponse({ error: 'Acción desconocida: ' + action });   // frontend newer than backend -> deploy products.gs again
   } catch (err) {
     return jsonResponse({ error: err.message });
@@ -185,7 +186,7 @@ function prodSettings_() {
   const s = prodJson_(raw, {}) || {};
   return Object.assign({
     brand_default: 'No brand', shopify_vendor: 'Vel Papier', shopify_status: 'Draft',
-    sku_codes: {}, tiktok_defaults: {}, ai_voice: '', default_weight_g: '', default_dims_cm: '',
+    tiktok_defaults: {}, ai_voice: '', default_weight_g: '', default_dims_cm: '',
   }, s);
 }
 
@@ -211,8 +212,17 @@ function prodCatalog_() {
     const m = name.match(/\(merged→([^)]+)\)/);
     if (m) mergedTo[id] = m[1].trim();
     const sku = vh.indexOf('Your SKU') >= 0 ? String(vd[r][vh.indexOf('Your SKU')] || '').trim() : '';
-    variants[id] = { row: r + 1, id: id, parent: String(vd[r][vh.indexOf('Parent ID')] || '').trim(), name: name, sku: sku, merged: !!m };
-    if (sku && !m) skuOwner[sku.toUpperCase()] = id;
+    const parent = String(vd[r][vh.indexOf('Parent ID')] || '').trim();
+    variants[id] = { row: r + 1, id: id, parent: parent, name: name, sku: sku, merged: !!m };
+    // Seller SKUs routinely repeat across a product's own variants (one vendor
+    // code for several colors/styles), so this is PARENT ownership, not a
+    // one-to-one lookup: many catalog variants, one parent, as long as they
+    // all agree on which parent that is.
+    if (sku && !m) {
+      const k = sku.toUpperCase();
+      if (!skuOwner[k]) skuOwner[k] = { parentId: parent, variantIds: [] };
+      skuOwner[k].variantIds.push(id);
+    }
   }
   return { ps: ps, vs: vs, ph: ph, vh: vh, parents: parents, variants: variants, mergedTo: mergedTo, skuOwner: skuOwner };
 }
@@ -246,7 +256,7 @@ function prodBootstrapAction_() {
     uploaded_by: String(r['Uploaded By']), uploaded: String(r['Uploaded Date']), config: prodJson_(r['Config'], {}),
   }));
   const skus = {};
-  Object.keys(cat.skuOwner).forEach(k => { skus[k] = cat.skuOwner[k]; });
+  Object.keys(cat.skuOwner).forEach(k => { skus[k] = cat.skuOwner[k].parentId; });
   const props = PropertiesService.getScriptProperties();
   return jsonResponse({
     listings: listings, templates: templates, settings: prodSettings_(), skus: skus,
@@ -312,6 +322,21 @@ function prodCatalogAction_(e) {
   return jsonResponse(base);
 }
 
+// GET prod_sku_lookup&sku=A1234 -> which parent (if any) already owns this
+// Seller SKU, with enough to show in the "is this the same product?" prompt.
+// Called when a SKU field loses focus in the editor, not on every keystroke.
+function prodSkuLookupAction_(e) {
+  const sku = prodStr_(e.parameter.sku, 60).toUpperCase();
+  if (!sku) return jsonResponse({ found: false });
+  const cat = prodCatalog_();
+  const owner = cat.skuOwner[sku];
+  if (!owner) return jsonResponse({ found: false });
+  const p = cat.parents[owner.parentId];
+  if (!p) return jsonResponse({ found: false });   // orphaned row, shouldn't happen
+  const names = owner.variantIds.map(id => cat.variants[id]).filter(Boolean).map(v => v.name).filter(Boolean);
+  return jsonResponse({ found: true, parent_id: p.id, parent_name: p.name, parent_image: p.image, variant_names: names });
+}
+
 // Distinct values per attribute (most used first) so the AI reuses existing
 // words instead of inventing synonyms ("acuarela" vs "watercolor").
 function prodAttributeVocab_() {
@@ -340,29 +365,38 @@ function prodSaveAction_(body) {
   if (!title && !prodStr_(inL.key_features, 50)) return jsonResponse({ error: 'Escribe al menos un título o las características clave' });   // empty form
   const inVariants = Array.isArray(inL.variants) ? inL.variants.slice(0, 200) : [];
 
-  // ---- validate SKUs (unique across the catalog and inside this listing)
+  // ---- validate SKUs. A Seller SKU is the vendor's own code, typed as-is:
+  // never auto-generated, and allowed to repeat across this listing's own
+  // variants (the vendor often uses one code for several colors/styles).
+  // It only becomes a problem if it already belongs to a DIFFERENT parent --
+  // and even then, the fix is usually to link this listing to that parent
+  // (the same product, bought in a later batch), not to reject the save.
   const cat = prodCatalog_();
   const lt = prodTable_('listings'), vt = prodTable_('variants');
   const listingId = prodStr_(inL.listing_id, 20) || prodNextId_(lt.rows, 'Listing ID', 'LST-', 4);
   const isNew = !lt.rows.some(r => String(r['Listing ID']) === listingId);
-  const seen = {};
-  const otherListingSku = {};
-  vt.rows.forEach(r => { if (String(r['Listing ID']) !== listingId && r['Your SKU']) otherListingSku[String(r['Your SKU']).toUpperCase()] = String(r['Listing ID']); });
+  const skuLinks = (inL.sku_links && typeof inL.sku_links === 'object') ? inL.sku_links : {};   // { "A1234": "PARENT-041" } -- user already said "same product"
+  const myParentIn = prodStr_(inL.parent_id, 40);
+  let forcedParentId = '';   // set below if a confirmed link overrides inL.parent_id
   for (let i = 0; i < inVariants.length; i++) {
     const sku = prodStr_(inVariants[i].sku, 60);
     if (!sku) continue;
     if (/\s/.test(sku)) return jsonResponse({ error: 'El SKU «' + sku + '» no puede tener espacios' });
     const k = sku.toUpperCase();
-    if (seen[k]) return jsonResponse({ error: 'El SKU «' + sku + '» está repetido en este producto' });
-    seen[k] = true;
-    const owner = cat.skuOwner[k];
-    const mine = inVariants[i].catalog_id ? prodLiveCatalogId_(cat, String(inVariants[i].catalog_id)) : '';
-    if (owner && owner !== mine) return jsonResponse({ error: 'El SKU «' + sku + '» ya lo usa la variante ' + owner + ' del catálogo' });   // pick another SKU, or link this variant to that catalog variant
-    if (otherListingSku[k]) return jsonResponse({ error: 'El SKU «' + sku + '» ya lo usa el producto ' + otherListingSku[k] });
+    const owner = cat.skuOwner[k];   // { parentId, variantIds[] } | undefined
+    if (!owner) continue;
+    if (owner.parentId === myParentIn || owner.parentId === forcedParentId) continue;   // already our product
+    if (skuLinks[sku] === '__different__' || skuLinks[k] === '__different__') continue;   // user confirmed: coincidence, different product
+    if (skuLinks[sku] === owner.parentId || skuLinks[k] === owner.parentId) { forcedParentId = owner.parentId; continue; }   // user confirmed: same product
+    // Stable error code ('sku_conflict') so the frontend can catch this one
+    // case and show the "same product?" prompt -- the human text is separate
+    // because it varies per SKU and VP.post()'s passErrors matches on `error`.
+    return jsonResponse({ error: 'sku_conflict', message: 'El SKU «' + sku + '» ya existe en otro producto del catálogo',
+      sku: sku, existing_parent_id: owner.parentId });
   }
 
   // ---- parent: link to an existing catalog product or create a new one
-  let parentId = prodStr_(inL.parent_id, 40);
+  let parentId = forcedParentId || myParentIn;
   const newParentRows = [];
   if (parentId && !cat.parents[parentId]) return jsonResponse({ error: 'El producto del catálogo ' + parentId + ' ya no existe' });   // merged or deleted -> pick it again
   if (!parentId) {
@@ -372,22 +406,7 @@ function prodSaveAction_(body) {
     cat.parents[parentId] = { id: parentId, name: p['Parent Name'], image: '' };
   }
 
-  // ---- blank SKUs get one automatically: CODE-<parent number>-NN (e.g. ART-123-01)
   const variantsIn = inVariants.length ? inVariants : [{ option1: '', option2: '' }];
-  const skuCode = prodStr_(inL.sku_code, 6).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'VP';
-  const parentNum = (parentId.match(/(\d+)$/) || ['', parentId.replace(/[^A-Z0-9]/gi, '')])[1];
-  const takenSku = {};
-  Object.keys(cat.skuOwner).forEach(k => { takenSku[k] = true; });
-  Object.keys(otherListingSku).forEach(k => { takenSku[k] = true; });
-  variantsIn.forEach(v => { if (prodStr_(v.sku, 60)) takenSku[prodStr_(v.sku, 60).toUpperCase()] = true; });
-  let skuSeq = 1;
-  variantsIn.forEach(v => {
-    if (prodStr_(v.sku, 60)) return;
-    let cand;
-    do { cand = skuCode + '-' + parentNum + '-' + String(skuSeq++).padStart(2, '0'); } while (takenSku[cand]);
-    takenSku[cand] = true;
-    v.sku = cand;
-  });
 
   // ---- variants: create missing catalog variants, keep SKU/photo in sync
   const allVarIds = Object.keys(cat.variants).map(id => ({ catalogId: id }));
@@ -651,15 +670,11 @@ function prodSettingsSaveAction_(body) {
     brand_default: prodStr_(s.brand_default, 120) || 'No brand',
     shopify_vendor: prodStr_(s.shopify_vendor, 120) || 'Vel Papier',
     shopify_status: s.shopify_status === 'Active' ? 'Active' : 'Draft',
-    sku_codes: {}, tiktok_defaults: {},
+    tiktok_defaults: {},
     ai_voice: prodStr_(s.ai_voice, 3000),
     default_weight_g: prodNum_(s.default_weight_g),
     default_dims_cm: prodStr_(s.default_dims_cm, 40),
   };
-  Object.keys(s.sku_codes || {}).forEach(k => {
-    const v = prodStr_(s.sku_codes[k], 6).toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (v) clean.sku_codes[prodStr_(k, 20)] = v;
-  });
   Object.keys(s.tiktok_defaults || {}).forEach(k => {
     const v = prodStr_(s.tiktok_defaults[k], 200);
     if (v) clean.tiktok_defaults[prodStr_(k, 80)] = v;
