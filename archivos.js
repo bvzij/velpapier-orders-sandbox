@@ -249,6 +249,49 @@ window.vpArchivos = (function () {
     toast('Preparando el ZIP… la descarga empieza sola');
   }
   function linkSelected() { const f = fileById(Array.from(selected)[0]); if (f) copyLink(f); }
+  // "Crear producto con fotos seleccionadas": assign each photo to the
+  // listing gallery (max 9) and/or a variant, name option 1, then hand the
+  // whole thing to Productos via sessionStorage (simplest reliable way to
+  // pass this across a page navigation without a backend round trip).
+  function createProduct() {
+    const files = Array.from(selected).map(id => fileById(id)).filter(Boolean);
+    if (!files.length) return;
+    const state = {}; // id -> { listing: bool, variantName: string }
+    files.forEach(f => { state[f.id] = { listing: true, variantName: '' }; });
+    const row = f => '<div class="cp-row" data-id="' + esc(f.id) + '">' +
+      '<img src="' + esc(f.thumb_url) + '" alt="">' +
+      '<span class="cp-name">' + esc(f.name) + '</span>' +
+      '<label><input type="checkbox" data-cp-listing="' + esc(f.id) + '" checked> Foto del listado</label>' +
+      '<input type="text" class="ls-input cp-variant" data-cp-variant="' + esc(f.id) + '" placeholder="Variante (opcional), ej. Rojo">' +
+      '</div>';
+    const m = VP.showModal('<div class="modal-title" style="margin-bottom:6px">Crear producto</div>' +
+      '<div class="ls-help" style="margin-bottom:10px">Marca «Foto del listado» para la galería principal (máx. 9). Escribe una variante si la foto es de una variante específica (puede ser ambas).</div>' +
+      '<label class="ls-field"><span class="ls-label">Nombre de la opción 1 (ej. Color)</span><input type="text" class="ls-input" id="cp-opt1"></label>' +
+      '<div class="cp-rows">' + files.map(row).join('') + '</div>' +
+      '<div class="ls-ai-actions" style="margin-top:12px"><button class="btn btn-primary" id="cp-go">Crear producto</button></div>', { maxWidth: '620px' });
+    m.el.addEventListener('input', e => {
+      if (e.target.dataset.cpListing !== undefined) state[e.target.dataset.cpListing].listing = e.target.checked;
+      if (e.target.dataset.cpVariant !== undefined) state[e.target.dataset.cpVariant].variantName = e.target.value;
+    });
+    m.el.addEventListener('change', e => {
+      if (e.target.dataset.cpListing !== undefined) state[e.target.dataset.cpListing].listing = e.target.checked;
+    });
+    m.el.querySelector('#cp-go').onclick = () => {
+      const listingCount = Object.values(state).filter(s => s.listing).length;
+      if (listingCount > 9) { toast('Máximo 9 fotos para el listado', true); return; }
+      const images = files.filter(f => state[f.id].listing).map(f => ({ thumb: f.thumb_url, full: f.web_url || f.url }));
+      const byVariant = {};
+      files.forEach(f => {
+        const name = state[f.id].variantName.trim();
+        if (!name) return;
+        if (!byVariant[name]) byVariant[name] = { thumb: f.thumb_url, full: f.web_url || f.url };
+      });
+      const variants = Object.keys(byVariant).map(name => Object.assign({ option1: name, sku: '', price: '', stock: '' }, byVariant[name]));
+      const payload = { images: images, option1_name: m.el.querySelector('#cp-opt1').value.trim(), variants: variants };
+      sessionStorage.setItem('vp_prod_from_archivos', JSON.stringify(payload));
+      location.href = 'productos.html?from_archivos=1';
+    };
+  }
   async function renameSelected() {
     const f = fileById(Array.from(selected)[0]);
     if (!f) return;
@@ -473,6 +516,6 @@ window.vpArchivos = (function () {
   document.addEventListener('DOMContentLoaded', wire);
 
   return { open, refresh, addFiles, newFolder, renameFolder, toggleVisibility, toggleTrash, restore, emptyTrash, search,
-    download, linkSelected, renameSelected, trashSelected, moveSelected, clearQueue, retry,
+    download, linkSelected, renameSelected, trashSelected, moveSelected, createProduct, clearQueue, retry,
     clearSel: () => { selected.clear(); selectedFolders.clear(); render(); } };
 })();
