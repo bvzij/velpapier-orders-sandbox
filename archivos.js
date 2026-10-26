@@ -11,6 +11,38 @@ window.vpArchivos = (function () {
 
   let folderId = 'root';
   let pendingFolder = [];   // [{id, name, thumb_url}] -- photos dragged in, not yet saved to a new folder
+  let sortOrder = 'new';    // 'new' | 'old'
+  let groupBy = 'none';     // 'none' | 'used' | 'unused'
+  let usageMap = null;      // url -> ['tiktok','shopify'] -- from Apps Script, cached per page load
+
+  async function loadUsageMap_() {
+    if (usageMap) return usageMap;
+    try { usageMap = (await VP.get('action=prod_file_usage')).usage || {}; }
+    catch (e) { usageMap = {}; }
+    return usageMap;
+  }
+  function usageOf(f) {
+    const u = usageMap || {};
+    return u[f.web_url] || u[f.url] || [];
+  }
+  function usageBadgeHtml(platforms) {
+    if (!platforms.length) return '';
+    const cls = platforms.length === 2 ? 'ar-usage-both' : (platforms[0] === 'tiktok' ? 'ar-usage-tiktok' : 'ar-usage-shopify');
+    const label = platforms.length === 2 ? 'TikTok + Shopify' : (platforms[0] === 'tiktok' ? 'TikTok' : 'Shopify');
+    return '<span class="ar-usage-tab ' + cls + '">' + label + '</span>';
+  }
+  function sortFiles_(list) {
+    const sorted = list.slice().sort((a, b) => String(a.uploaded_at).localeCompare(String(b.uploaded_at)));
+    return sortOrder === 'old' ? sorted : sorted.reverse();
+  }
+  function groupFiles_(list) {
+    if (groupBy === 'none') return [{ label: '', files: list }];
+    const used = list.filter(f => usageOf(f).length);
+    const unused = list.filter(f => !usageOf(f).length);
+    return groupBy === 'used'
+      ? [{ label: 'Usadas en un listado (' + used.length + ')', files: used }, { label: 'Sin usar (' + unused.length + ')', files: unused }]
+      : [{ label: 'Sin usar (' + unused.length + ')', files: unused }, { label: 'Usadas en un listado (' + used.length + ')', files: used }];
+  }
   let data = null;               // /api/list response
   let view = 'folder';           // folder | trash | search
   let searchResults = null;
@@ -51,8 +83,11 @@ window.vpArchivos = (function () {
     selected.clear(); selectedFolders.clear(); pendingFolder = [];
     document.getElementById('ar-search').value = '';
     try { history.replaceState(null, '', folderId === 'root' ? 'archivos.html' : '#' + folderId); } catch (e) { /* ignore */ }
+    await loadUsageMap_();
     await refresh();
   }
+  function setSort(v) { sortOrder = v; render(); }
+  function setGroup(v) { groupBy = v; render(); }
 
   async function refresh() {
     const grid = document.getElementById('ar-grid');
@@ -82,7 +117,10 @@ window.vpArchivos = (function () {
   function tileFile(f, showPath) {
     const sel = selected.has(f.id);
     const icon = f.kind === 'video' ? '▶' : f.kind === 'pdf' ? 'PDF' : (f.name.split('.').pop() || '').toUpperCase().slice(0, 4);
-    return '<div class="ar-tile' + (sel ? ' is-sel' : '') + '" data-file="' + esc(f.id) + '" draggable="true">' +
+    const used = usageOf(f);
+    const usedCls = used.length === 2 ? ' ar-tile--both' : used.length ? (used[0] === 'tiktok' ? ' ar-tile--tiktok' : ' ar-tile--shopify') : '';
+    return '<div class="ar-tile' + (sel ? ' is-sel' : '') + usedCls + '" data-file="' + esc(f.id) + '" draggable="true">' +
+      usageBadgeHtml(used) +
       '<input type="checkbox" class="ar-check" data-check="' + esc(f.id) + '"' + (sel ? ' checked' : '') + '>' +
       '<div class="ar-img">' + (f.thumb_url ? '<img src="' + esc(f.thumb_url) + '" loading="lazy" alt="">' : '<span class="ar-icon">' + esc(icon) + '</span>') +
         (f.kind === 'video' && f.thumb_url ? '<span class="ar-play">▶</span>' : '') + '</div>' +
@@ -191,13 +229,37 @@ window.vpArchivos = (function () {
       (admin && f.id !== 'root' ? ' <button class="ls-mini" onclick="vpArchivos.toggleVisibility()">' + (f.public ? 'Hacer privada' : 'Hacer pública') + '</button>' : '') +
       (f.id !== 'root' ? ' <button class="ls-mini" onclick="vpArchivos.renameFolder()">Renombrar</button>' : '');
 
-    const folders = data.folders.map(x => '<div class="ar-folder-wrap"><input type="checkbox" class="ar-fcheck" data-fcheck="' + esc(x.id) + '"' + (selectedFolders.has(x.id) ? ' checked' : '') + '>' +
-      '<button class="ar-folder" data-folder-id="' + esc(x.id) + '" onclick="vpArchivos.open(\'' + esc(x.id) + '\')">' + (x.public ? '📁' : '🔒') + ' ' + esc(x.name) + '<small>' + x.files + ' archivo' + (x.files !== 1 ? 's' : '') + '</small></button></div>').join('');
-    const files = data.files.map(x => tileFile(x, false)).join('');
+    const folders = data.folders.map(x => '<div class="ar-folder-wrap" id="ar-fw-' + esc(x.id) + '"><input type="checkbox" class="ar-fcheck" data-fcheck="' + esc(x.id) + '"' + (selectedFolders.has(x.id) ? ' checked' : '') + '>' +
+      '<button class="ar-folder" data-folder-id="' + esc(x.id) + '" onclick="vpArchivos.open(\'' + esc(x.id) + '\')">' + (x.public ? '📁' : '🔒') + ' ' + esc(x.name) +
+      '<small>' + x.files + ' archivo' + (x.files !== 1 ? 's' : '') + (x.subfolders ? ' · ' + x.subfolders + ' carpeta' + (x.subfolders !== 1 ? 's' : '') : '') + '</small></button></div>').join('');
+    const groups = groupFiles_(sortFiles_(data.files));
+    const filesHtml = groups.map(g => (g.label ? '<div class="ar-group-label">' + esc(g.label) + '</div>' : '') +
+      (g.files.length ? '<div class="ar-files">' + g.files.map(x => tileFile(x, false)).join('') + '</div>' : '')).join('');
     grid.innerHTML = (folders ? '<div class="ar-folders">' + folders + '</div>' : '') +
-      (files ? '<div class="ar-files">' + files + '</div>' : '<div class="ar-drop-hint">Arrastra archivos aquí o toca <b>Subir</b>.<br><small>Fotos, videos, PDF… hasta 4 GB por archivo.</small></div>');
+      (data.files.length ? filesHtml : '<div class="ar-drop-hint">Arrastra archivos aquí o toca <b>Subir</b>.<br><small>Fotos, videos, PDF… hasta 4 GB por archivo.</small></div>');
     renderSel();
     renderDropStrip();
+    markFolderUsage_(data.folders);
+  }
+  // A folder gets the same colored outline only when EVERY image inside it
+  // (recursively, one level is enough in practice) is used on the same
+  // platform(s). Fetched lazily per visible folder since /api/list only
+  // returns the current folder's own files.
+  async function markFolderUsage_(folders) {
+    await loadUsageMap_();
+    for (const fo of folders) {
+      let d;
+      try { d = await api('/api/list?folder=' + encodeURIComponent(fo.id)); } catch (e) { continue; }
+      const imgs = (d.files || []).filter(f => f.kind === 'image');
+      if (!imgs.length) continue;
+      const sets = imgs.map(f => usageOf(f));
+      if (sets.some(s => !s.length)) continue;   // at least one unused photo -> no badge
+      const common = sets[0].filter(p => sets.every(s => s.includes(p)));
+      if (!common.length) continue;
+      const el = document.getElementById('ar-fw-' + fo.id);
+      const btn = el && el.querySelector('.ar-folder');
+      if (btn) btn.classList.add(common.length === 2 ? 'ar-folder--both' : (common.includes('tiktok') ? 'ar-folder--tiktok' : 'ar-folder--shopify'));
+    }
   }
 
   function renderSel() {
@@ -515,7 +577,7 @@ window.vpArchivos = (function () {
 
   document.addEventListener('DOMContentLoaded', wire);
 
-  return { open, refresh, addFiles, newFolder, renameFolder, toggleVisibility, toggleTrash, restore, emptyTrash, search,
+  return { open, refresh, addFiles, newFolder, renameFolder, toggleVisibility, toggleTrash, restore, emptyTrash, search, setSort, setGroup,
     download, linkSelected, renameSelected, trashSelected, moveSelected, createProduct, clearQueue, retry,
     clearSel: () => { selected.clear(); selectedFolders.clear(); render(); } };
 })();
