@@ -282,7 +282,7 @@
 <script>
   (async function () {
     await VP.ensureToken();
-    VP.requireAdminPage();
+    VP.requirePage('productos');
     VP.mountNav('productos');
   })();
 </script>
