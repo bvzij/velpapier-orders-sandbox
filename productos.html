@@ -180,6 +180,7 @@
   <div class="tabs pr-tabs">
     <button class="tab" data-pr-tab="listados" onclick="vpListados.tab('listados')">Fichas</button>
     <button class="tab" data-pr-tab="fotos" onclick="vpListados.tab('fotos')">Fotos del catálogo</button>
+    <button class="tab" data-pr-tab="organizar" onclick="vpListados.tab('organizar')">Organizar</button>
     <button class="tab" data-pr-tab="plantillas" onclick="vpListados.tab('plantillas')">Plantillas</button>
     <button class="tab" data-pr-tab="ajustes" onclick="vpListados.tab('ajustes')">Ajustes</button>
   </div>
@@ -245,6 +246,9 @@
     <div id="pr-list"></div>
   </section>
 
+  <!-- ── Organizar (organizar.js) ── -->
+  <section data-pr-panel="organizar" style="display:none"><div id="org-body"></div></section>
+
   <!-- ── Plantillas ── -->
   <section data-pr-panel="plantillas" style="display:none"><div id="tp-body"><div class="pr-empty-state">Cargando…</div></div></section>
 
@@ -272,6 +276,7 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<div id="modal-container"></div>
 
 <script src="common.js"></script>
 <script>
@@ -285,5 +290,6 @@
 <script src="exportadores.js"></script>
 <script src="productos.js"></script>
 <script src="listados.js"></script>
+<script src="organizar.js"></script>
 </body>
 </html>
