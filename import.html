@@ -628,7 +628,32 @@
         <div class="imp-btns"><button class="imp-btn primary" id="ff-add-btn" onclick="IMP.ffAdd()" disabled>Agregar al pool</button></div>
       </div>
       <div class="imp-card"><h3>Pool <small id="ff-count"></small></h3><div id="ff-list" class="imp-muted">Cargando…</div></div>
-      <div class="imp-card"><h3>Usados</h3><div id="ff-used" class="imp-muted">—</div></div>
+
+      <div class="modal-overlay" id="ff-print-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:600;align-items:center;justify-content:center;padding:20px">
+        <div style="background:var(--surface);border-radius:var(--radius-lg);padding:20px;width:100%;max-width:380px;max-height:90vh;overflow:auto">
+          <div style="font-size:15px;font-weight:700;margin-bottom:12px">Imprimir dato curioso</div>
+          <div class="modal-field"><div class="modal-field-label">Título</div>
+            <input type="text" id="ffp-title" style="width:100%;padding:8px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit"></div>
+          <div class="modal-field"><div class="modal-field-label">Respuesta</div>
+            <textarea id="ffp-answer" rows="3" style="width:100%;padding:8px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit"></textarea></div>
+          <div class="modal-field"><div class="modal-field-label">Copias</div>
+            <input type="number" id="ffp-copies" min="0" step="1" style="width:100%;padding:8px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm);font-family:inherit"></div>
+          <hr class="modal-divider">
+          <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">MÁRGENES (mm)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <div><div class="modal-field-label">Arriba</div><input type="number" id="ffp-margin-top" step="0.5" style="width:100%;padding:6px 8px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm)"></div>
+            <div><div class="modal-field-label">Derecha</div><input type="number" id="ffp-margin-right" step="0.5" style="width:100%;padding:6px 8px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm)"></div>
+            <div><div class="modal-field-label">Abajo</div><input type="number" id="ffp-margin-bottom" step="0.5" style="width:100%;padding:6px 8px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm)"></div>
+            <div><div class="modal-field-label">Izquierda</div><input type="number" id="ffp-margin-left" step="0.5" style="width:100%;padding:6px 8px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm)"></div>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin:10px 0"><input type="checkbox" id="ffp-mark-used" checked> Marcar como usado</label>
+          <div class="modal-actions">
+            <button class="modal-btn" onclick="IMP.ffpClose()">Cerrar</button>
+            <button class="modal-btn" onclick="IMP.ffpTest()">Imprimir prueba</button>
+            <button class="modal-btn confirm" onclick="IMP.ffpPrint()">Imprimir</button>
+          </div>
+        </div>
+      </div>      <div class="imp-card"><h3>Usados</h3><div id="ff-used" class="imp-muted">—</div></div>
     </div>
 
     <!-- ═══ AJUSTES ═══ -->
