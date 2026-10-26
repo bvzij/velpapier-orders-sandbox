@@ -1,401 +1,720 @@
-# fixpack-20261019 + importar-v2 2026-10-23 (+ test slip 2026-10-24)
 """
-service.py - Vel Papier TikTok Import FastAPI Service
-"""
+vp-files — Vel Papier team file sharing ("Archivos" page in the dashboard).
 
-import base64
-import io
+Runs as its own Docker container next to tiktok-import / image-service / n8n,
+behind the same Traefik. Files live on a bind-mounted folder (/data):
+
+  /data/orig/<yyyy>/<mm>/<id><ext>   original, untouched
+  /data/web/<id>.jpg                 images: longest side 1200 px (TikTok-safe)
+  /data/thumb/<id>.jpg               400 px preview (videos: first frame)
+  /data/tmp/                         chunked uploads in progress
+  /data/db/files.sqlite              index (folders + files)
+  /data/backup_status.json           written by /root/vp-files/backup.sh
+
+Auth: the browser sends the normal dashboard token (Authorization: Bearer …
+or ?t=… for plain links). It is checked once against Apps Script
+(?action=whoami) and cached for 5 minutes. No separate passwords.
+
+Public URLs (/f/, /w/, /t/) carry a random token per file, so they can't be
+guessed. Files in a PRIVATE folder are only served to logged-in users.
+"""
+import hashlib
 import json
-import os
 import logging
+import mimetypes
+import os
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
 import time
-import traceback
+import urllib.parse
+import urllib.request
 import zipfile
+from datetime import datetime, timezone
 
-from pydantic import BaseModel
-
-
-class EnrichApplyBody(BaseModel):
-    items: list = []
-
-import requests
-from fastapi import Body, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image, ImageOps
 
-import csv as _csv
-import io as _io
-
-from tiktok_lib import (
-    annotate_pdf,
-    build_shipments_csv,
-    group_shipments,
-    parse_csv,
-    parse_pdf_addresses,
-    resolve_identity,
-)
-import importar_lib
+try:
+    import pillow_heif  # iPhone HEIC photos
+    pillow_heif.register_heif_opener()
+except Exception:  # pragma: no cover
+    pillow_heif = None
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("vp-tiktok")
+log = logging.getLogger("vp-files")
 
-APP_TOKEN = os.environ["SERVICE_KEY"]
-API_URL   = os.environ["API_URL"]
-API_TOKEN = os.environ["API_TOKEN"]
-BATCH     = 200
+DATA = os.environ.get("DATA_DIR", "/data")
+API_URL = os.environ["API_URL"]                       # Apps Script /exec URL (same as the dashboard)
+PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")
+ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+CHUNK = 8 * 1024 * 1024
+MAX_FILE = 4 * 1024 ** 3
+TRASH_DAYS = 30
+WEB_MAX = 1200
+THUMB_MAX = 400
 
-app = FastAPI(title="Vel Papier TikTok Import", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["POST", "GET"])
+for sub in ("orig", "web", "thumb", "tmp", "db"):
+    os.makedirs(os.path.join(DATA, sub), exist_ok=True)
+
+DB_PATH = os.path.join(DATA, "db", "files.sqlite")
+_db_lock = threading.Lock()
 
 
+def db():
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def init_db():
+    with _db_lock, db() as con:
+        con.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS folders (
+            id TEXT PRIMARY KEY, parent_id TEXT, name TEXT NOT NULL, public INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT, created_at TEXT, trashed_at TEXT, trashed_by TEXT);
+        CREATE TABLE IF NOT EXISTS files (
+            id TEXT PRIMARY KEY, folder_id TEXT NOT NULL, name TEXT NOT NULL, ext TEXT, mime TEXT,
+            size INTEGER, width INTEGER, height INTEGER, duration REAL, sha256 TEXT, token TEXT NOT NULL,
+            orig_path TEXT NOT NULL, has_web INTEGER DEFAULT 0, has_thumb INTEGER DEFAULT 0,
+            uploaded_by TEXT, uploaded_at TEXT, trashed_at TEXT, trashed_by TEXT);
+        CREATE TABLE IF NOT EXISTS uploads (
+            id TEXT PRIMARY KEY, name TEXT, size INTEGER, mime TEXT, folder_id TEXT,
+            received INTEGER DEFAULT 0, chunks INTEGER DEFAULT 0, started_by TEXT, started_at TEXT);
+        CREATE INDEX IF NOT EXISTS ix_files_folder ON files(folder_id);
+        CREATE INDEX IF NOT EXISTS ix_files_sha ON files(sha256);
+        CREATE INDEX IF NOT EXISTS ix_folders_parent ON folders(parent_id);
+        """)
+        if not con.execute("SELECT 1 FROM folders WHERE id='root'").fetchone():
+            t = now_iso()
+            con.execute("INSERT INTO folders VALUES ('root', NULL, 'Archivos', 1, 'Sistema', ?, NULL, NULL)", (t,))
+            for name, pub in (("Productos", 1), ("Contenido TikTok", 1), ("Privado", 0)):
+                con.execute("INSERT INTO folders VALUES (?, 'root', ?, ?, 'Sistema', ?, NULL, NULL)", (new_id("D"), name, pub, t))
+
+
+def new_id(prefix="F"):
+    return prefix + secrets.token_hex(5)
+
+
+app = FastAPI(title="Vel Papier Files", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware, allow_origins=ORIGINS or ["https://dashboard.velpapier.com"],
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["Content-Disposition"],
+)
+
+# ─── auth ──────────────────────────────────────────────────────────────────
+_who_cache = {}
+
+
+def whoami(token):
+    if not token:
+        return None
+    hit = _who_cache.get(token)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    url = API_URL + "?action=whoami&token=" + urllib.parse.quote(token)
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:  # Apps Script down -> nobody can log in for a moment
+        log.warning("whoami failed: %s", e)
+        return None
+    ident = {"name": data.get("name") or "?", "role": data.get("role") or ""} if data.get("role") else None
+    _who_cache[token] = (time.time() + (300 if ident else 30), ident)
+    if len(_who_cache) > 500:
+        _who_cache.clear()
+    return ident
+
+
+def need_user(authorization, t=None):
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    token = token or (t or "")
+    ident = whoami(token)
+    if not ident:
+        raise HTTPException(401, "Sesión no válida. Vuelve a entrar al dashboard.")
+    return ident
+
+
+def need_admin(ident):
+    if ident.get("role") != "admin":
+        raise HTTPException(403, "Solo para administradores")
+
+
+# ─── helpers ───────────────────────────────────────────────────────────────
+def folder_row(con, fid):
+    return con.execute("SELECT * FROM folders WHERE id=?", (fid,)).fetchone()
+
+
+def folder_path(con, fid):
+    out, cur, hops = [], fid, 0
+    while cur and hops < 30:
+        r = folder_row(con, cur)
+        if not r:
+            break
+        out.append({"id": r["id"], "name": r["name"], "public": bool(r["public"])})
+        cur, hops = r["parent_id"], hops + 1
+    return list(reversed(out))
+
+
+def is_public(con, fid):
+    # a folder is public only if it and every parent is public
+    return all(p["public"] for p in folder_path(con, fid))
+
+
+def safe_name(name):
+    name = os.path.basename(str(name or "archivo")).strip().replace("\x00", "")
+    return name[:180] or "archivo"
+
+
+def file_out(con, r, pub_cache=None):
+    pub_cache = pub_cache if pub_cache is not None else {}
+    if r["folder_id"] not in pub_cache:
+        pub_cache[r["folder_id"]] = is_public(con, r["folder_id"])
+    pub = pub_cache[r["folder_id"]]
+    q = urllib.parse.quote(r["name"])
+    base = PUBLIC_BASE
+    d = {
+        "id": r["id"], "name": r["name"], "folder_id": r["folder_id"], "mime": r["mime"], "size": r["size"],
+        "width": r["width"], "height": r["height"], "duration": r["duration"], "uploaded_by": r["uploaded_by"],
+        "uploaded_at": r["uploaded_at"], "trashed_at": r["trashed_at"], "public": pub,
+        "kind": kind_of(r["mime"]),
+        "thumb_url": f"{base}/t/{r['id']}/{r['token']}.jpg" if r["has_thumb"] else "",
+        "url": f"{base}/f/{r['id']}/{r['token']}/{q}",
+        "web_url": f"{base}/w/{r['id']}/{r['token']}.jpg" if r["has_web"] else "",
+    }
+    return d
+
+
+def kind_of(mime):
+    mime = mime or ""
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime == "application/pdf":
+        return "pdf"
+    return "file"
+
+
+def make_previews(fid, path, mime):
+    """Creates web + thumb JPEGs. Returns (width, height, duration, has_web, has_thumb)."""
+    w = h = None
+    dur = None
+    has_web = has_thumb = 0
+    web = os.path.join(DATA, "web", fid + ".jpg")
+    thumb = os.path.join(DATA, "thumb", fid + ".jpg")
+    try:
+        if (mime or "").startswith("image/"):
+            with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im)
+                w, h = im.size
+                if im.mode not in ("RGB", "L"):
+                    bg = Image.new("RGB", im.size, (255, 255, 255))
+                    rgba = im.convert("RGBA")
+                    bg.paste(rgba, mask=rgba.split()[3])
+                    im = bg
+                else:
+                    im = im.convert("RGB")
+                big = im.copy()
+                big.thumbnail((WEB_MAX, WEB_MAX), Image.LANCZOS)
+                big.save(web, "JPEG", quality=88, optimize=True, progressive=True)
+                has_web = 1
+                im.thumbnail((THUMB_MAX, THUMB_MAX), Image.LANCZOS)
+                im.save(thumb, "JPEG", quality=80, optimize=True)
+                has_thumb = 1
+        elif (mime or "").startswith("video/"):
+            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                    "stream=width,height:format=duration", "-of", "json", path],
+                                   capture_output=True, text=True, timeout=60)
+            try:
+                info = json.loads(probe.stdout or "{}")
+                st = (info.get("streams") or [{}])[0]
+                w, h = st.get("width"), st.get("height")
+                dur = float((info.get("format") or {}).get("duration") or 0) or None
+            except Exception:
+                pass
+            frame = thumb + ".png"
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", path, "-frames:v", "1", frame],
+                           capture_output=True, timeout=120)
+            if not os.path.exists(frame):
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-frames:v", "1", frame],
+                               capture_output=True, timeout=120)
+            if os.path.exists(frame):
+                with Image.open(frame) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((THUMB_MAX, THUMB_MAX), Image.LANCZOS)
+                    im.save(thumb, "JPEG", quality=80)
+                os.remove(frame)
+                has_thumb = 1
+    except Exception as e:  # a broken preview never blocks the upload itself
+        log.warning("preview failed for %s: %s", fid, e)
+    return w, h, dur, has_web, has_thumb
+
+
+# ─── basic ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
-@app.post("/process")
-async def process(
-    csv: UploadFile = File(...),
-    pdf: UploadFile = File(...),
-    x_api_key: str = Header(None),
-    x_requested_by: str = Header(None),
-):
-    if x_api_key != APP_TOKEN:
-        raise HTTPException(401, "Unauthorized")
+@app.get("/api/me")
+def me(authorization: str = Header(None)):
+    return need_user(authorization)
 
-    csv_bytes = await csv.read()
-    pdf_bytes = await pdf.read()
 
+@app.get("/api/list")
+def list_folder(folder: str = "root", authorization: str = Header(None)):
+    need_user(authorization)
+    with db() as con:
+        f = folder_row(con, folder)
+        if not f or f["trashed_at"]:
+            raise HTTPException(404, "Carpeta no encontrada")
+        folders = con.execute("SELECT f.*, (SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id AND x.trashed_at IS NULL) AS n "
+                              "FROM folders f WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
+        files = con.execute("SELECT * FROM files WHERE folder_id=? AND trashed_at IS NULL ORDER BY uploaded_at DESC", (folder,)).fetchall()
+        cache = {}
+        return {
+            "folder": {"id": f["id"], "name": f["name"], "public": bool(f["public"]), "effective_public": is_public(con, f["id"])},
+            "path": folder_path(con, folder),
+            "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]), "files": r["n"],
+                         "created_by": r["created_by"], "created_at": r["created_at"]} for r in folders],
+            "files": [file_out(con, r, cache) for r in files],
+        }
+
+
+@app.get("/api/recent")
+def recent(kind: str = "", limit: int = 200, authorization: str = Header(None)):
+    need_user(authorization)
+    limit = max(1, min(limit, 1000))
+    with db() as con:
+        sql = "SELECT * FROM files WHERE trashed_at IS NULL"
+        args = []
+        if kind == "image":
+            sql += " AND mime LIKE 'image/%'"
+        elif kind == "video":
+            sql += " AND mime LIKE 'video/%'"
+        rows = con.execute(sql + " ORDER BY uploaded_at DESC LIMIT ?", args + [limit]).fetchall()
+        cache, paths, out = {}, {}, []
+        for r in rows:
+            d = file_out(con, r, cache)
+            if r["folder_id"] not in paths:
+                paths[r["folder_id"]] = " / ".join(p["name"] for p in folder_path(con, r["folder_id"])[1:])
+            d["folder_path"] = paths[r["folder_id"]]
+            out.append(d)
+        return {"files": out}
+
+
+@app.get("/api/search")
+def search(q: str = "", authorization: str = Header(None)):
+    need_user(authorization)
+    q = q.strip()
+    if len(q) < 2:
+        return {"files": [], "folders": []}
+    like = "%" + q.replace("%", "") + "%"
+    with db() as con:
+        files = con.execute("SELECT * FROM files WHERE trashed_at IS NULL AND name LIKE ? ORDER BY uploaded_at DESC LIMIT 300", (like,)).fetchall()
+        folders = con.execute("SELECT * FROM folders WHERE trashed_at IS NULL AND id<>'root' AND name LIKE ? LIMIT 100", (like,)).fetchall()
+        cache, out = {}, []
+        for r in files:
+            d = file_out(con, r, cache)
+            d["folder_path"] = " / ".join(p["name"] for p in folder_path(con, r["folder_id"])[1:])
+            out.append(d)
+        return {"files": out, "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]),
+                                           "path": " / ".join(p["name"] for p in folder_path(con, r["id"])[1:])} for r in folders]}
+
+
+@app.get("/api/trash")
+def trash_list(authorization: str = Header(None)):
+    need_user(authorization)
+    with db() as con:
+        files = con.execute("SELECT * FROM files WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC LIMIT 1000").fetchall()
+        folders = con.execute("SELECT * FROM folders WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC").fetchall()
+        cache, out = {}, []
+        for r in files:
+            d = file_out(con, r, cache)
+            d["trashed_by"] = r["trashed_by"]
+            out.append(d)
+        return {"files": out, "folders": [{"id": r["id"], "name": r["name"], "trashed_at": r["trashed_at"],
+                                           "trashed_by": r["trashed_by"]} for r in folders], "days": TRASH_DAYS}
+
+
+@app.get("/api/usage")
+def usage(authorization: str = Header(None)):
+    need_user(authorization)
+    du = shutil.disk_usage(DATA)
+    with db() as con:
+        r = con.execute("SELECT COUNT(*) n, COALESCE(SUM(size),0) s FROM files WHERE trashed_at IS NULL").fetchone()
+        t = con.execute("SELECT COUNT(*) n, COALESCE(SUM(size),0) s FROM files WHERE trashed_at IS NOT NULL").fetchone()
+    backup = None
     try:
-        return await _process_impl(csv_bytes, pdf_bytes, (x_requested_by or "")[:60])
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb = traceback.format_exc()
-        log.error(f"Unhandled error in /process: {e}\n{tb}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error_type":    type(e).__name__,
-                "error_message": str(e),
-                "where":         "tiktok-import service (unhandled exception)",
-            },
-        )
+        with open(os.path.join(DATA, "backup_status.json")) as fh:
+            backup = json.load(fh)
+    except Exception:
+        pass
+    return {"disk_total": du.total, "disk_used": du.used, "disk_free": du.free,
+            "files": r["n"], "files_bytes": r["s"], "trash_files": t["n"], "trash_bytes": t["s"], "backup": backup}
 
 
-async def _process_impl(csv_bytes: bytes, pdf_bytes: bytes, requested_by: str = ""):
-    warnings = []
-
-    rows = safe(lambda: parse_csv(csv_bytes), [], "CSV parsing", warnings)
-    if not rows:
-        raise HTTPException(400, "CSV parse failed or empty")
-
-    csv_fieldnames = safe(
-        lambda: _csv.DictReader(_io.StringIO(csv_bytes.decode("utf-8-sig", errors="replace"))).fieldnames,
-        [],
-        "CSV header read",
-        warnings,
-    ) or []
-
-    # importar-v2: Buyer Message / Seller Note go into TikTok Import History
-    # exactly as the CSV has them (per row; the sheet keeps the raw record).
-    for r in rows:
-        raw = r.get("raw_row") or {}
-        h = r.get("import_history_row")
-        if h is not None:
-            h["buyer_message"] = importar_lib.clean_text(raw.get("Buyer Message", ""))
-            h["seller_note"] = importar_lib.clean_text(raw.get("Seller Note", ""))
-
-    shipments = group_shipments(rows, warnings)
-    log.info(f"CSV: {len(rows)} rows -> {len(shipments)} shipments")
-
-    # importar-v2: slip pre-check (parse + verify only, no drawing) and the
-    # "In transit by" deadline per guía. Never blocks the import.
-    slip_checks = safe(lambda: importar_lib.check_all(pdf_bytes, rows), {}, "Revisión de hojas de empaque", warnings)
-    csv_by_tid = importar_lib.group_csv_rows(rows)
-    for s in shipments:
-        chk = slip_checks.get(s["tracking_id"]) or {}
-        s["slip_check"] = chk
-        s["ship_by"] = ((chk.get("deadline") or {}).get("iso")) or ""
-        notas = []
-        for oid, n in importar_lib.csv_notes_by_order(csv_by_tid.get(s["tracking_id"], [])).items():
-            for key, source in (("buyer", "Comprador"), ("seller", "Vendedor")):
-                txt = importar_lib.clean_text(n.get(key, ""))
-                if txt:
-                    notas.append({"order_id": oid, "source": source, "text": txt,
-                                  "candidates": json.dumps(n.get("items", []), ensure_ascii=False)})
-        s["notas"] = notas
-
-    pdf_addresses = safe(lambda: parse_pdf_addresses(pdf_bytes, warnings), {}, "PDF address extraction", warnings)
-    log.info(f"PDF: extracted addresses for {len(pdf_addresses)} tracking IDs")
-    for s in shipments:
-        s["address"] = pdf_addresses.get(s["tracking_id"], {})
-        s["address"]["recipient_raw"] = s.get("recipient_raw", "")
-
-    shipments_in_pdf = [s for s in shipments if s["tracking_id"] in pdf_addresses]
-    log.info(f"CSV export: {len(shipments_in_pdf)} of {len(shipments)} shipments matched to this PDF")
-
-    existing_customers = _fetch_customers()
-    log.info(f"Customers: {len(existing_customers)} records")
-
-    for s in shipments:
-        resolution = resolve_identity(
-            username           = s["username"],
-            phone_fingerprint  = s.get("phone_fingerprint", {}),
-            initials           = s.get("initials", []),
-            pdf_data           = s["address"],
-            existing_customers = existing_customers,
-        )
-        s["resolution"] = resolution
-
-    new_customer_payloads = []
-    for s in shipments:
-        if s["resolution"]["tier"] == "new_customer" and s["username"]:
-            e = s["resolution"]["enriched_data"]
-            new_customer_payloads.append({
-                "primary_username": e.get("Primary Username", ""),
-                "first_name":       e.get("First Name", ""),
-                "surname":          e.get("Surname", ""),
-                "street":           e.get("Street + Number", ""),
-                "city":             e.get("City", ""),
-                "state":            e.get("State", ""),
-                "zip":              e.get("ZIP", ""),
-                "phone_partial":    e.get("Phone Partial", ""),
-                "initials":         e.get("Initials (TT Format)", ""),
-            })
-
-    username_to_custid = {}
-    new_customers_created = []
-    if new_customer_payloads:
-        result = safe(lambda: _create_customers_bulk(new_customer_payloads), {"created": []}, "Creating new customers", warnings)
-        for c in result.get("created", []):
-            username_to_custid[c["username"]] = c["customer_id"]
-            if not c.get("existed"):
-                new_customers_created.append({
-                    "username":    c["username"],
-                    "customer_id": c["customer_id"],
-                })
-
-    for s in shipments:
-        if s["resolution"]["tier"] == "new_customer" and s["username"]:
-            cid = username_to_custid.get(s["username"], "")
-            if cid:
-                s["resolution"]["customer_id"] = cid
-
-    all_results  = []
-    inserted     = 0
-    duplicates   = 0
-    exact_linked = 0
-
-    for i in range(0, len(shipments), BATCH):
-        batch = shipments[i : i + BATCH]
-        payload = {
-            "action":    "import_tiktok_orders",
-            "token":     API_TOKEN,
-            "requested_by": requested_by,
-            "shipments": _build_batch_payload(batch),
-        }
-        resp = requests.post(API_URL, json=payload, timeout=300)
-        if not resp.ok:
-            raise HTTPException(502, f"Apps Script error: {resp.status_code}")
-        j = resp.json()
-        if "error" in j:
-            raise HTTPException(502, j["error"])
-
-        inserted     += j.get("inserted", 0)
-        duplicates   += j.get("duplicates", 0)
-        exact_linked += sum(1 for r in j.get("shipments", []) if r.get("customer_id"))
-        all_results  += j.get("shipments", [])
-
-    count_map = {r["tracking_id"]: r.get("shipment_count", 0) for r in all_results}
-    res_map = {r["tracking_id"]: r for r in all_results}
-    for s in shipments:
-        s["shipment_count"] = count_map.get(s["tracking_id"], 0)
-
-    annotation_meta = {
-        s["tracking_id"]: {
-            "username":       s["username"],
-            "shipment_count": s["shipment_count"],
-        }
-        for s in shipments
-    }
-
-    annotated_pdf = safe(lambda: annotate_pdf(pdf_bytes, annotation_meta), pdf_bytes, "PDF annotation (tracking labels / address whiteout)", warnings)
-    export_csv    = safe(lambda: build_shipments_csv(shipments_in_pdf, csv_fieldnames), b"", "Packing CSV export", warnings)
-
-    possible_matches = [
-        {
-            "username":    s["username"],
-            "tracking_id": s["tracking_id"],
-            "score":       s["resolution"]["match_score"],
-            "matched_to":  s["resolution"]["matched_to"],
-            "enriched":    s["resolution"]["enriched_data"],
-        }
-        for s in shipments
-        if s["resolution"]["tier"] == "possible_match"
-    ]
-
-    return {
-        "summary": {
-            "shipments_in_csv":      len(shipments),
-            "shipments_in_pdf":      len(shipments_in_pdf),
-            "inserted":              inserted,
-            "duplicates":            duplicates,
-            "exact_linked":          exact_linked,
-            "possible_matches":      len(possible_matches),
-            "new_customers_created": len(new_customers_created),
-        },
-        "possible_matches": possible_matches,
-        "new_customers":    new_customers_created,
-        # importar-v2: everything the configure step needs, per shipment
-        "shipments_meta":   [_shipment_meta(s, res_map.get(s["tracking_id"], {}), s["tracking_id"] in pdf_addresses)
-                             for s in shipments],
-        "pdf_base64":       base64.b64encode(annotated_pdf).decode(),
-        "csv_base64":       base64.b64encode(export_csv).decode(),
-        "warnings":         warnings,
-    }
+# ─── organize ──────────────────────────────────────────────────────────────
+@app.post("/api/folder")
+def create_folder(body: dict = Body(...), authorization: str = Header(None)):
+    ident = need_user(authorization)
+    name = safe_name(body.get("name"))[:80]
+    parent = body.get("parent_id") or "root"
+    with _db_lock, db() as con:
+        p = folder_row(con, parent)
+        if not p or p["trashed_at"]:
+            raise HTTPException(404, "Carpeta no encontrada")
+        if con.execute("SELECT 1 FROM folders WHERE parent_id=? AND name=? AND trashed_at IS NULL", (parent, name)).fetchone():
+            raise HTTPException(400, "Ya existe una carpeta con ese nombre aquí")
+        fid = new_id("D")
+        pub = 1 if body.get("public", p["public"]) else 0
+        con.execute("INSERT INTO folders VALUES (?,?,?,?,?,?,NULL,NULL)", (fid, parent, name, pub, ident["name"], now_iso()))
+    return {"ok": True, "id": fid}
 
 
-def _shipment_meta(s, res, in_pdf):
-    chk = s.get("slip_check") or {}
-    return {
-        "tracking_id":    s["tracking_id"],
-        "order_ids":      s.get("order_ids", []),
-        "username":       s.get("username", ""),
-        "customer_id":    res.get("customer_id") or (s.get("resolution") or {}).get("customer_id", ""),
-        "shipment_count": res.get("shipment_count"),
-        "inserted":       bool(res.get("inserted")),
-        "tier":           (s.get("resolution") or {}).get("tier", ""),
-        "in_pdf":         bool(in_pdf),
-        "ship_by":        s.get("ship_by", ""),
-        "deadline":       chk.get("deadline"),
-        "slip":           {k: chk.get(k) for k in ("ok", "code", "reason", "detail", "total")},
-        "products":       s.get("line_items", []),
-        "notas":          s.get("notas", []),
-    }
+@app.post("/api/folder_from_files")
+def folder_from_files(body: dict = Body(...), authorization: str = Header(None)):
+    # Archivos "drag photos to make a folder" flow: create the folder and
+    # move the dropped files into it in one transaction, so a mid-way failure
+    # never leaves a half-made folder or half-moved files.
+    ident = need_user(authorization)
+    name = safe_name(body.get("name"))[:80]
+    parent = body.get("parent_id") or "root"
+    file_ids = body.get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No hay fotos para mover")
+    with _db_lock, db() as con:
+        p = folder_row(con, parent)
+        if not p or p["trashed_at"]:
+            raise HTTPException(404, "Carpeta no encontrada")
+        if con.execute("SELECT 1 FROM folders WHERE parent_id=? AND name=? AND trashed_at IS NULL", (parent, name)).fetchone():
+            raise HTTPException(400, "Ya existe una carpeta con ese nombre aquí")
+        fid = new_id("D")
+        con.execute("INSERT INTO folders VALUES (?,?,?,?,?,?,NULL,NULL)", (fid, parent, name, p["public"], ident["name"], now_iso()))
+        for file_id in file_ids:
+            con.execute("UPDATE files SET folder_id=? WHERE id=?", (fid, file_id))
+    return {"ok": True, "id": fid}
 
 
-# ─── importar-v2: JSON endpoint behind the n8n "importar-api" workflow ─────
-# ops: "render"   -> final PDF from the browser's plan (csv + pdf re-sent)
-#      "funfacts" -> sticker PDF (or calibration page with test=true)
-#      "check"    -> slip pre-check only (used when an import is re-opened)
-# Logic errors come back as {"error": ...} with HTTP 200 so n8n passes them on.
-@app.post("/importar")
-async def importar(body: dict = Body(...), x_api_key: str = Header(None)):
-    if x_api_key != APP_TOKEN:
-        raise HTTPException(401, "Unauthorized")
-    op = str(body.get("op") or "")
-    try:
-        if op == "render":
-            pdf = base64.b64decode(body.get("pdf_base64") or "")
-            csvb = base64.b64decode(body.get("csv_base64") or "")
-            if not pdf:
-                # TROUBLESHOOT: the browser lost the original PDF (page reloaded
-                # mid-import). Re-open the import from Historial, which reloads it.
-                return {"error": "Falta el PDF original"}
-            t0 = time.time()
-            out, report = importar_lib.render_pdf(pdf, csvb, body.get("plan") or {}, body.get("settings") or {})
-            report["ms"] = int((time.time() - t0) * 1000)
-            log.info(f"render: {report['rebuilt']} rebuilt, {report['basic']} basic, {report['pages']} pages, {report['ms']} ms")
-            return {"pdf_base64": base64.b64encode(out).decode(), "report": report}
-        if op == "funfacts":
-            out, info = importar_lib.funfact_pdf(body.get("fact") or {}, body.get("copies") or 0,
-                                                 (body.get("settings") or {}).get("sticker") or {}, bool(body.get("test")))
-            return {"pdf_base64": base64.b64encode(out).decode(), "info": info}
-        if op == "check":
-            pdf = base64.b64decode(body.get("pdf_base64") or "")
-            csvb = base64.b64decode(body.get("csv_base64") or "")
-            return {"checks": importar_lib.check_all(pdf, parse_csv(csvb))}
-        if op == "test_slip":
-            # Ajustes -> "Hoja de prueba": look-and-feel sample, nothing stored or uploaded.
-            out, info = importar_lib.test_slip_pdf(body.get("mode") or "single",
-                                                   (body.get("settings") or {}).get("slip") or {})
-            return {"pdf_base64": base64.b64encode(out).decode(), "info": info}
-        if op == "version":
-            return {"importar": "2026-10-23", "pymupdf": getattr(importar_lib.fitz, "VersionBind", "?"),
-                    "fonts": sorted(os.listdir(importar_lib.FONT_DIR)) if os.path.isdir(importar_lib.FONT_DIR) else []}
-        return {"error": f"Operación desconocida: {op}"}
-    except Exception as e:
-        log.error(f"/importar {op} failed: {e}\n{traceback.format_exc()}")
-        # TROUBLESHOOT: read `docker compose logs tiktok-import --tail 80` for the traceback.
-        return {"error": f"{type(e).__name__}: {e}", "where": f"importar/{op}"}
+@app.post("/api/rename")
+def rename(body: dict = Body(...), authorization: str = Header(None)):
+    need_user(authorization)
+    name = safe_name(body.get("name"))
+    tid = body.get("id")
+    with _db_lock, db() as con:
+        if body.get("kind") == "folder":
+            if tid == "root":
+                raise HTTPException(400, "La carpeta principal no se puede renombrar")
+            con.execute("UPDATE folders SET name=? WHERE id=?", (name[:80], tid))
+        else:
+            con.execute("UPDATE files SET name=? WHERE id=?", (name, tid))
+    return {"ok": True}
 
 
-def _build_batch_payload(batch):
-    out = []
-    for s in batch:
-        resolution = s.get("resolution", {})
-        out.append({
-            "tracking_id": s["tracking_id"],
-            "order_ids":   s["order_ids"],
-            "username":    s["username"],
-            "customer_id": resolution.get("customer_id", ""),
-            "products":    s["products"],
-            "line_items":  s.get("line_items", []),
-            "import_history": s.get("import_history", []),
-            "price":       s["price"],
-            "created_time": s.get("created_time", ""),
-            "ship_by":     s.get("ship_by", ""),
-            "notas":       s.get("notas", []),
-            "address": {
-                "street": s["address"].get("street", ""),
-                "city":   s["address"].get("city", ""),
-                "state":  s["address"].get("state", ""),
-                "zip":    s["address"].get("zip", ""),
-                "phone":  s["address"].get("phone_partial", ""),
-            },
-        })
+@app.post("/api/visibility")
+def visibility(body: dict = Body(...), authorization: str = Header(None)):
+    ident = need_user(authorization)
+    need_admin(ident)
+    fid = body.get("folder_id")
+    if fid == "root":
+        raise HTTPException(400, "La carpeta principal siempre es pública")
+    with _db_lock, db() as con:
+        con.execute("UPDATE folders SET public=? WHERE id=?", (1 if body.get("public") else 0, fid))
+    return {"ok": True}
+
+
+def _descendants(con, fid):
+    out, stack = [], [fid]
+    while stack:
+        cur = stack.pop()
+        out.append(cur)
+        stack.extend(r["id"] for r in con.execute("SELECT id FROM folders WHERE parent_id=?", (cur,)).fetchall())
     return out
 
 
-def _fetch_customers():
-    last_error = None
-    for attempt in range(1, 4):
+@app.post("/api/move")
+def move(body: dict = Body(...), authorization: str = Header(None)):
+    need_user(authorization)
+    to = body.get("to") or "root"
+    with _db_lock, db() as con:
+        dest = folder_row(con, to)
+        if not dest or dest["trashed_at"]:
+            raise HTTPException(404, "Carpeta destino no encontrada")
+        for fid in body.get("folder_ids") or []:
+            if fid == "root" or to in _descendants(con, fid):
+                raise HTTPException(400, "No puedes mover una carpeta dentro de sí misma")
+            con.execute("UPDATE folders SET parent_id=? WHERE id=?", (to, fid))
+        for fid in body.get("file_ids") or []:
+            con.execute("UPDATE files SET folder_id=? WHERE id=?", (to, fid))
+    return {"ok": True}
+
+
+@app.post("/api/trash")
+def trash(body: dict = Body(...), authorization: str = Header(None)):
+    ident = need_user(authorization)
+    t = now_iso()
+    with _db_lock, db() as con:
+        for fid in body.get("file_ids") or []:
+            con.execute("UPDATE files SET trashed_at=?, trashed_by=? WHERE id=? AND trashed_at IS NULL", (t, ident["name"], fid))
+        for fid in body.get("folder_ids") or []:
+            if fid == "root":
+                continue
+            for d in _descendants(con, fid):
+                con.execute("UPDATE folders SET trashed_at=?, trashed_by=? WHERE id=? AND trashed_at IS NULL", (t, ident["name"], d))
+                con.execute("UPDATE files SET trashed_at=?, trashed_by=? WHERE folder_id=? AND trashed_at IS NULL", (t, ident["name"], d))
+    return {"ok": True}
+
+
+@app.post("/api/restore")
+def restore(body: dict = Body(...), authorization: str = Header(None)):
+    need_user(authorization)
+    with _db_lock, db() as con:
+        for fid in body.get("folder_ids") or []:
+            for d in _descendants(con, fid):
+                con.execute("UPDATE folders SET trashed_at=NULL, trashed_by=NULL WHERE id=?", (d,))
+                con.execute("UPDATE files SET trashed_at=NULL, trashed_by=NULL WHERE folder_id=?", (d,))
+        for fid in body.get("file_ids") or []:
+            r = con.execute("SELECT folder_id FROM files WHERE id=?", (fid,)).fetchone()
+            if not r:
+                continue
+            f = folder_row(con, r["folder_id"])
+            target = r["folder_id"] if f and not f["trashed_at"] else "root"   # parent folder gone -> back to root
+            con.execute("UPDATE files SET trashed_at=NULL, trashed_by=NULL, folder_id=? WHERE id=?", (target, fid))
+    return {"ok": True}
+
+
+def _delete_file_from_disk(con, r):
+    for p in (r["orig_path"], os.path.join(DATA, "web", r["id"] + ".jpg"), os.path.join(DATA, "thumb", r["id"] + ".jpg")):
         try:
-            resp = requests.get(
-                API_URL,
-                params={"action": "customers", "token": API_TOKEN},
-                timeout=60,
-            )
-            if not resp.text.strip():
-                raise ValueError("empty response body")
-            data = resp.json()
-            records = data.get("records", [])
-            if attempt > 1:
-                log.info(f"_fetch_customers succeeded on attempt {attempt}, {len(records)} records")
-            return records
+            if p and os.path.exists(p):
+                os.remove(p)
         except Exception as e:
-            last_error = e
-            log.warning(f"_fetch_customers attempt {attempt} failed: {e}")
-            if attempt < 3:
-                time.sleep(2 * attempt)
-
-    log.error(f"_fetch_customers failed after 3 attempts, giving up: {last_error}")
-    return []
+            log.warning("delete failed %s: %s", p, e)
+    con.execute("DELETE FROM files WHERE id=?", (r["id"],))
 
 
-def _create_customers_bulk(customers):
-    resp = requests.post(
-        API_URL,
-        json={
-            "action":    "create_customers_bulk",
-            "token":     API_TOKEN,
-            "customers": customers,
-        },
-        timeout=120,
-    )
-    return resp.json()
+@app.post("/api/purge")
+def purge(body: dict = Body(...), authorization: str = Header(None)):
+    ident = need_user(authorization)
+    need_admin(ident)
+    n = 0
+    with _db_lock, db() as con:
+        ids = body.get("file_ids")
+        rows = con.execute("SELECT * FROM files WHERE trashed_at IS NOT NULL").fetchall() if body.get("all") else \
+            [r for r in (con.execute("SELECT * FROM files WHERE id=?", (i,)).fetchone() for i in (ids or [])) if r and r["trashed_at"]]
+        for r in rows:
+            _delete_file_from_disk(con, r)
+            n += 1
+        if body.get("all"):
+            con.execute("DELETE FROM folders WHERE trashed_at IS NOT NULL AND id NOT IN (SELECT DISTINCT folder_id FROM files)")
+    log.info("purge by %s: %d files", ident["name"], n)
+    return {"ok": True, "deleted": n}
 
 
-# warnings, if given a list, gets a human-readable entry appended whenever
-# fn() fails -- so a caller can still return the safe fallback (never crash
-# the whole import over one failed step) while making sure the failure
-# isn't silently invisible to whoever reads the response. label identifies
-# which step failed (e.g. "PDF address extraction").
-def safe(fn, fallback, label=None, warnings=None):
-    try:
-        return fn()
-    except Exception as e:
-        log.warning(f"safe() caught [{label or 'unknown step'}]: {e}")
-        if warnings is not None:
-            warnings.append(f"{label or 'Unknown step'} failed: {e}")
-        return fallback
+# ─── upload (chunked) ──────────────────────────────────────────────────────
+@app.post("/api/upload/init")
+def upload_init(body: dict = Body(...), authorization: str = Header(None)):
+    ident = need_user(authorization)
+    size = int(body.get("size") or 0)
+    if size <= 0:
+        raise HTTPException(400, "Archivo vacío")
+    if size > MAX_FILE:
+        raise HTTPException(400, "El archivo pasa de 4 GB")
+    folder = body.get("folder_id") or "root"
+    with _db_lock, db() as con:
+        f = folder_row(con, folder)
+        if not f or f["trashed_at"]:
+            raise HTTPException(404, "Carpeta no encontrada")
+        uid = new_id("U")
+        chunks = (size + CHUNK - 1) // CHUNK
+        con.execute("INSERT INTO uploads VALUES (?,?,?,?,?,0,?,?,?)",
+                    (uid, safe_name(body.get("name")), size, str(body.get("mime") or "")[:100], folder, chunks, ident["name"], now_iso()))
+    open(os.path.join(DATA, "tmp", uid), "wb").close()
+    return {"upload_id": uid, "chunk_size": CHUNK, "chunks": chunks}
+
+
+@app.put("/api/upload/{uid}/{n}")
+async def upload_chunk(uid: str, n: int, request: Request, authorization: str = Header(None)):
+    need_user(authorization)
+    with db() as con:
+        u = con.execute("SELECT * FROM uploads WHERE id=?", (uid,)).fetchone()
+    if not u:
+        raise HTTPException(404, "Subida no encontrada (¿expiró?). Vuelve a subir el archivo.")
+    if n < u["received"]:
+        return {"ok": True, "received": u["received"]}          # resent chunk after a network blip
+    if n != u["received"]:
+        raise HTTPException(409, "Parte fuera de orden")
+    data = await request.body()
+    if not data or len(data) > CHUNK:
+        raise HTTPException(400, "Parte inválida")
+    with open(os.path.join(DATA, "tmp", uid), "ab") as fh:
+        fh.write(data)
+    with _db_lock, db() as con:
+        con.execute("UPDATE uploads SET received=received+1 WHERE id=?", (uid,))
+    return {"ok": True, "received": n + 1}
+
+
+@app.post("/api/upload/{uid}/complete")
+def upload_complete(uid: str, authorization: str = Header(None)):
+    ident = need_user(authorization)
+    tmp = os.path.join(DATA, "tmp", uid)
+    with db() as con:
+        u = con.execute("SELECT * FROM uploads WHERE id=?", (uid,)).fetchone()
+    if not u or not os.path.exists(tmp):
+        raise HTTPException(404, "Subida no encontrada")
+    if os.path.getsize(tmp) != u["size"]:
+        raise HTTPException(400, "El archivo llegó incompleto. Vuelve a subirlo.")
+    name = u["name"]
+    ext = os.path.splitext(name)[1].lower()[:10]
+    mime = u["mime"] or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if ext in (".heic", ".heif"):
+        mime = "image/heic"
+    sha = hashlib.sha256()
+    with open(tmp, "rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            sha.update(block)
+    digest = sha.hexdigest()
+    fid = new_id("F")
+    stamp = datetime.now(timezone.utc)
+    dest_dir = os.path.join(DATA, "orig", stamp.strftime("%Y"), stamp.strftime("%m"))
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, fid + ext)
+    shutil.move(tmp, dest)
+    w, h, dur, has_web, has_thumb = make_previews(fid, dest, mime)
+    with _db_lock, db() as con:
+        dup = con.execute("SELECT id, name, folder_id FROM files WHERE sha256=? AND trashed_at IS NULL LIMIT 1", (digest,)).fetchone()
+        con.execute("INSERT INTO files (id, folder_id, name, ext, mime, size, width, height, duration, sha256, token, orig_path, "
+                    "has_web, has_thumb, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fid, u["folder_id"], name, ext, mime, u["size"], w, h, dur, digest, secrets.token_urlsafe(12),
+                     dest, has_web, has_thumb, ident["name"], now_iso()))
+        con.execute("DELETE FROM uploads WHERE id=?", (uid,))
+        r = con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+        out = file_out(con, r)
+    if dup:
+        out["duplicate_of"] = {"id": dup["id"], "name": dup["name"], "folder_id": dup["folder_id"]}
+    log.info("upload %s %s (%d bytes) by %s", fid, name, u["size"], ident["name"])
+    return out
+
+
+# ─── serving ───────────────────────────────────────────────────────────────
+def _file_by_token(fid, token):
+    with db() as con:
+        r = con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+        if not r or not secrets.compare_digest(str(r["token"]), str(token)):
+            raise HTTPException(404, "No encontrado")
+        return r, is_public(con, r["folder_id"])
+
+
+def _check_private(pub, trashed, t, authorization):
+    if pub and not trashed:
+        return
+    need_user(authorization, t)        # private or trashed -> logged-in team only
+
+
+@app.get("/f/{fid}/{token}/{name}")
+def get_file(fid: str, token: str, name: str, dl: int = 0, t: str = Query(None), authorization: str = Header(None)):
+    r, pub = _file_by_token(fid, token)
+    _check_private(pub, r["trashed_at"], t, authorization)
+    if not os.path.exists(r["orig_path"]):
+        raise HTTPException(404, "El archivo ya no está en el disco")
+    return FileResponse(r["orig_path"], media_type=r["mime"], filename=r["name"],
+                        content_disposition_type="attachment" if dl else "inline",
+                        headers={"Cache-Control": "public, max-age=86400" if pub else "private, max-age=600"})
+
+
+@app.get("/w/{fid}/{token}.jpg")
+def get_web(fid: str, token: str, t: str = Query(None), authorization: str = Header(None)):
+    r, pub = _file_by_token(fid, token)
+    _check_private(pub, r["trashed_at"], t, authorization)
+    p = os.path.join(DATA, "web", fid + ".jpg")
+    if not os.path.exists(p):
+        raise HTTPException(404, "Sin versión web")
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800" if pub else "private, max-age=600"})
+
+
+@app.get("/t/{fid}/{token}.jpg")
+def get_thumb(fid: str, token: str):
+    _file_by_token(fid, token)
+    p = os.path.join(DATA, "thumb", fid + ".jpg")
+    if not os.path.exists(p):
+        raise HTTPException(404, "Sin miniatura")
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.get("/api/zip")
+def zip_files(background: BackgroundTasks, ids: str = "", t: str = Query(None), authorization: str = Header(None)):
+    need_user(authorization, t)
+    id_list = [i for i in ids.split(",") if i][:500]
+    if not id_list:
+        raise HTTPException(400, "Nada que descargar")
+    fd, path = tempfile.mkstemp(suffix=".zip", dir=os.path.join(DATA, "tmp"))
+    os.close(fd)
+    used = set()
+    with db() as con, zipfile.ZipFile(path, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for fid in id_list:
+            r = con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+            if not r or not os.path.exists(r["orig_path"]):
+                continue
+            n, base, ext, k = r["name"], os.path.splitext(r["name"])[0], os.path.splitext(r["name"])[1], 1
+            while n in used:
+                k += 1
+                n = f"{base} ({k}){ext}"
+            used.add(n)
+            z.write(r["orig_path"], n)
+    background.add_task(lambda: os.path.exists(path) and os.remove(path))
+    return FileResponse(path, media_type="application/zip", filename="velpapier_" + datetime.now().strftime("%Y%m%d_%H%M") + ".zip")
+
+
+# ─── housekeeping ──────────────────────────────────────────────────────────
+def housekeeping_loop():
+    while True:
+        try:
+            cutoff = datetime.fromtimestamp(time.time() - TRASH_DAYS * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with _db_lock, db() as con:
+                old = con.execute("SELECT * FROM files WHERE trashed_at IS NOT NULL AND trashed_at < ?", (cutoff,)).fetchall()
+                for r in old:
+                    _delete_file_from_disk(con, r)
+                con.execute("DELETE FROM folders WHERE trashed_at IS NOT NULL AND trashed_at < ? "
+                            "AND id NOT IN (SELECT DISTINCT folder_id FROM files)", (cutoff,))
+                stale = con.execute("SELECT id FROM uploads WHERE started_at < ?",
+                                    (datetime.fromtimestamp(time.time() - 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),)).fetchall()
+                for s in stale:
+                    p = os.path.join(DATA, "tmp", s["id"])
+                    if os.path.exists(p):
+                        os.remove(p)
+                    con.execute("DELETE FROM uploads WHERE id=?", (s["id"],))
+            if old:
+                log.info("housekeeping: purged %d files older than %d days in trash", len(old), TRASH_DAYS)
+            for fn in os.listdir(os.path.join(DATA, "tmp")):   # leftover zips
+                p = os.path.join(DATA, "tmp", fn)
+                if fn.endswith(".zip") and time.time() - os.path.getmtime(p) > 3600:
+                    os.remove(p)
+        except Exception as e:
+            log.warning("housekeeping error: %s", e)
+        time.sleep(6 * 3600)
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+    threading.Thread(target=housekeeping_loop, daemon=True).start()
+    log.info("vp-files ready, data=%s public=%s", DATA, PUBLIC_BASE)
+
+
+@app.exception_handler(HTTPException)
+def http_err(request, exc):
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
