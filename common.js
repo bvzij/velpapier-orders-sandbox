@@ -11,10 +11,13 @@ window.VP = (function () {
   const THEME_KEY = 'vp_theme';
   const ROLE_KEY  = 'vp_role';
   const NAME_KEY  = 'vp_name';
+  const SCOPES_KEY = 'vp_scopes';
 
   let token = localStorage.getItem(TOKEN_KEY) || '';
   let role  = sessionStorage.getItem(ROLE_KEY) || '';
   let userName = sessionStorage.getItem(NAME_KEY) || '';
+  let scopes = [];
+  try { scopes = JSON.parse(sessionStorage.getItem(SCOPES_KEY) || '[]'); } catch (e) { scopes = []; }
 
   /* ── Theme ──────────────────────────────────────────────────────────── */
   // Applied immediately (synchronously, at script-load time, before the
@@ -215,6 +218,8 @@ window.VP = (function () {
             sessionStorage.setItem(TOKEN_PING_KEY, String(Date.now()));
             role = body.role || '';
             sessionStorage.setItem(ROLE_KEY, role);
+            scopes = Array.isArray(body.scopes) ? body.scopes : [];
+            sessionStorage.setItem(SCOPES_KEY, JSON.stringify(scopes));
             userName = (body.name || '').toUpperCase();
             sessionStorage.setItem(NAME_KEY, userName);
             return;
@@ -258,6 +263,20 @@ window.VP = (function () {
     }
   }
 
+  // True when this person may open the page `scope` (a NAV id): admins always,
+  // staff only when an admin switched it on in Ajustes -> Acceso a páginas.
+  function hasScope(scope) {
+    return role === 'admin' || scopes.indexOf(scope) >= 0;
+  }
+
+  // Scoped pages call this right after ensureToken(), instead of requireAdminPage().
+  function requirePage(scope) {
+    if (!hasScope(scope)) {
+      window.location.href = staffHome();
+      throw new Error('not authorized for this page');
+    }
+  }
+
   function getRole() {
     return role;
   }
@@ -270,8 +289,8 @@ window.VP = (function () {
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
     { id: 'mayoristas', href: 'mayoristas.html', label: 'Mayoristas', adminOnly: true, extraUsers: ['KARIN'] },
-    { id: 'productos', href: 'productos.html', label: 'Productos', adminOnly: true },
-    { id: 'archivos',  href: 'archivos.html',  label: 'Archivos' },
+    { id: 'productos', href: 'productos.html', label: 'Productos', scope: 'productos' },
+    { id: 'archivos',  href: 'archivos.html',  label: 'Archivos',  scope: 'archivos' },
     { id: 'analisis',  href: 'analytics.html', label: 'Análisis',  adminOnly: true },
     { id: 'ajustes',   href: 'ajustes.html',   label: 'Ajustes',   adminOnly: true },
   ];
@@ -282,7 +301,7 @@ window.VP = (function () {
   // on top of the pages themselves redirecting staff away if reached
   // directly (requireAdminPage()).
   function mountNav(active) {
-    const visibleNav = NAV.filter(n => !n.adminOnly || role === 'admin' || (n.extraUsers || []).indexOf(userName) >= 0);
+    const visibleNav = NAV.filter(n => (!n.adminOnly && !n.scope) || role === 'admin' || (n.extraUsers || []).indexOf(userName) >= 0 || (n.scope && scopes.indexOf(n.scope) >= 0));
     const homeHref = role === 'admin' ? 'index.html' : staffHome();
     const el = document.createElement('nav');
     el.className = 'vp-nav';
@@ -1145,7 +1164,7 @@ window.VP = (function () {
     chartSlot, paintCharts, resetCharts,
     window_, pctChange, bucketBy, bucketByMonth, shortDate, MONTHS_ES, WEEKDAYS_ES, DAY,
     get token() { return token; },
-    requireAdminPage, getRole,
+    requireAdminPage, requirePage, hasScope, getRole,
     getUserName: () => userName,
   };
 })();
