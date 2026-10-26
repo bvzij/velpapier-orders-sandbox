@@ -83,6 +83,7 @@ window.vpListados = (function () {
     try { history.replaceState(null, '', '#' + name); } catch (e) { /* ignore */ }
     if (name === 'plantillas') renderTemplates();
     if (name === 'ajustes') renderSettings();
+    if (name === 'organizar' && window.vpOrganizar) vpOrganizar.render();
   }
 
   // ── Loading ──────────────────────────────────────────────────────────────
@@ -93,6 +94,7 @@ window.vpListados = (function () {
       renderList();
       const h = (location.hash || '').replace('#', '');
       if (h === 'plantillas' || h === 'ajustes') { renderTemplates(); renderSettings(); }
+      if (h === 'organizar' && window.vpOrganizar) vpOrganizar.render();
       // Handoff from Archivos "Crear producto con fotos seleccionadas".
       if (new URLSearchParams(location.search).get('from_archivos') === '1') {
         const raw = sessionStorage.getItem('vp_prod_from_archivos');
@@ -1264,7 +1266,7 @@ window.vpListados = (function () {
     });
     window.addEventListener('beforeunload', e => { if (draft && dirty) { e.preventDefault(); e.returnValue = ''; } });
     const h = (location.hash || '').replace('#', '');
-    tab(['listados', 'fotos', 'plantillas', 'ajustes'].indexOf(h) >= 0 ? h : 'listados');
+    tab(['listados', 'fotos', 'organizar', 'plantillas', 'ajustes'].indexOf(h) >= 0 ? h : 'listados');
   }
 
   document.addEventListener('DOMContentLoaded', () => { wire(); load(); });
