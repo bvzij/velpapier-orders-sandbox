@@ -34,6 +34,22 @@ window.vpListados = (function () {
     shopify: { text: '#4A6B24', bg: '#ECF3E0', label: 'Shopify' },
     tiktok: { text: '#3B5FA0', bg: '#E9F1FA', label: 'TikTok' },
   };
+  // Spanish labels for TikTok's own property-field names (the ones that
+  // actually show -- see the TikTok card render for why others are hidden).
+  // Keys stay the raw product_property/NNNNNN TikTok uses; add more here as
+  // new categories bring in fields not covered yet. Anything missing falls
+  // back to TikTok's English label.
+  const PROP_LABEL_ES = {
+    'product_property/100107': 'Tipo de garantía',
+    'product_property/101476': 'Período de garantía',
+    'product_property/100149': 'País de origen',
+    'product_property/102254': 'Producto importado',
+    'product_property/100115': 'Condición del producto',
+  };
+  function translateBtn_(fieldKey, fieldLabel, value) {
+    const onclick = 'vpListados.translateAttribute(' + JSON.stringify(fieldKey) + ',' + JSON.stringify(fieldLabel) + ',' + JSON.stringify(value) + ')';
+    return '<button type="button" class="ls-mini ls-translate-btn" onclick="' + esc(onclick).replace(/"/g, '&quot;') + '">Traducir «' + esc(value) + '»</button>';
+  }
   // Shows the badge(s) relevant to a field, filtered by what's actually
   // visible right now -- a 'both' field only shows the TikTok pill while in
   // TikTok view (and vice versa in Shopify view), so the badges never claim
@@ -265,7 +281,18 @@ window.vpListados = (function () {
     return '<label class="ls-field' + (opts.half ? ' ls-half' : '') + (opts.third ? ' ls-third' : '') + '"><span class="ls-label">' + labelHtml + platformPill(opts.platform || 'both') + counter + '</span>' + input + (opts.help ? '<span class="ls-help">' + opts.help + '</span>' : '') + '</label>';
   }
 
+  // renderEditor() rebuilds the whole editor body, which otherwise makes the
+  // page visibly jump on every "+ Variante" / remove / any field change that
+  // triggers a re-render -- the browser keeps the same scrollTop number while
+  // the content above/below it changes height. Save and restore it around
+  // the rebuild so the view stays put.
   function renderEditor() {
+    const scroller = document.getElementById('ls-editor');
+    const savedScroll = scroller ? scroller.scrollTop : 0;
+    renderEditorNow_();
+    if (scroller) scroller.scrollTop = savedScroll;
+  }
+  function renderEditorNow_() {
     const root = document.getElementById('ls-editor-body');
     if (!root || !draft) return;
     const tpls = activeTemplates();
@@ -337,15 +364,26 @@ window.vpListados = (function () {
     const showCompareAt = platformVisible('shopify');
     const vRows = draft.variants.map((v, i) => {
       const vi = ' data-vi="' + i + '"';
+      // No option 1 value typed -> this row isn't really a distinct variant
+      // yet, so its photo is meaningless (there's nothing for it to be a
+      // photo OF) and the upload/choose buttons are disabled, not just the
+      // text fields.
+      const hasVariant = !!draft.option1_name;
+      const photoCell = !hasVariant
+        ? '<td><div class="ls-vimg-pair" aria-disabled="true"><span class="ls-vimg-box ls-vimg-disabled">' + (v.image ? '' : '—') + '</span></div></td>'
+        : '<td><div class="ls-vimg-pair">' +
+            '<button type="button" class="ls-vimg-box" onclick="vpListados.uploadVariantImgPrompt(' + i + ')" title="Subir foto nueva">' + (v.image ? '<img src="' + esc(v.image) + '" alt="">' : '<span>⬆</span>') + '</button>' +
+            '<button type="button" class="ls-vimg-pick" onclick="vpListados.browseVariantImg(' + i + ')" title="Elegir de Archivos">📁</button>' +
+          '</div></td>';
       return '<tr>' +
-        '<td><button type="button" class="ls-vimg" onclick="vpListados.pickVariantImg(' + i + ')">' + (v.image ? '<img src="' + esc(v.image) + '" alt="">' : '<span>+</span>') + '</button></td>' +
-        '<td><input class="ls-cell" data-vf="option1"' + vi + ' value="' + esc(v.option1) + '" placeholder="' + esc(draft.option1_name || 'Sin variantes') + '"' + (draft.option1_name ? '' : ' disabled') + '></td>' +
+        photoCell +
+        '<td><input class="ls-cell" data-vf="option1"' + vi + ' value="' + esc(v.option1) + '" placeholder="' + esc(draft.option1_name || 'Sin variantes') + '"' + (hasVariant ? '' : ' disabled') + '></td>' +
         (two ? '<td><input class="ls-cell" data-vf="option2"' + vi + ' value="' + esc(v.option2) + '" placeholder="' + esc(draft.option2_name) + '"></td>' : '') +
         '<td><input class="ls-cell ls-sku" data-vf="sku"' + vi + ' value="' + esc(v.sku) + '" placeholder="código del proveedor"><span class="ls-sku-hint" data-sku-hint="' + i + '"></span></td>' +
         '<td><input class="ls-cell ls-num" data-vf="price"' + vi + ' value="' + esc(v.price) + '" inputmode="decimal" placeholder="$"></td>' +
         (showCompareAt ? '<td><input class="ls-cell ls-num" data-vf="compare_at"' + vi + ' value="' + esc(v.compare_at) + '" inputmode="decimal" placeholder="$"></td>' : '') +
         '<td><input class="ls-cell ls-num" data-vf="stock"' + vi + ' value="' + esc(v.stock) + '" inputmode="numeric"></td>' +
-        '<td><input class="ls-cell" data-vf="barcode"' + vi + ' value="' + esc(v.barcode) + '"></td>' +
+        '<td><input class="ls-cell" data-vf="barcode"' + vi + ' value="' + esc(v.barcode) + '" inputmode="numeric" pattern="[0-9]*" maxlength="30"></td>' +
         '<td><button class="ls-x" title="Quitar variante" onclick="vpListados.removeVariant(' + i + ')">✕</button></td>' +
         '</tr>' + (v.catalog_id ? '' : '');
     }).join('');
@@ -371,28 +409,28 @@ window.vpListados = (function () {
     // G. TikTok -- whole card hidden in pure Shopify view.
     let propsHtml = '';
     if (tpl) {
-      const cols = (tpl.config.columns || []).filter(c => c.key.indexOf('product_property/') === 0);
-      const withOpts = cols.filter(c => (tpl.config.options || {})[c.key]);
-      const rest = cols.filter(c => !(tpl.config.options || {})[c.key]);
+      // Only fields with an actual dropdown list from TikTok's own template
+      // are shown. A "conditionally mandatory" field with NO options (With
+      // battery, Plug type, Operating system, Storage capacity, ...) is
+      // TikTok's generic parent-category list leaking in -- things that only
+      // apply to electronics, never actually relevant to stationery, and
+      // with nothing to fill in besides free text TikTok doesn't even
+      // validate. Hiding them outright instead of collapsing them avoids
+      // showing fields that will never matter for what Vel Papier sells.
+      const cols = (tpl.config.columns || []).filter(c => c.key.indexOf('product_property/') === 0 && (tpl.config.options || {})[c.key]);
       const propField = c => {
         const opts = (tpl.config.options || {})[c.key];
         const v = (draft.tiktok_props || {})[c.key] || '';
-        let input;
-        if (opts) {
-          // dropdown values come from TikTok's template in English; show the
-          // Spanish word the first time it's been translated, English with a
-          // "traducir" link the first time it's seen (see translateAttribute()).
-          const dict = (boot.translations || {})[c.key] || {};
-          input = '<select class="ls-input" data-tp="' + esc(c.key) + '" data-tp-label="' + esc(c.label) + '"><option value="">—</option>' +
-            opts.map(o => '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(dict[o] || o) + (dict[o] ? '' : ' (sin traducir)') + '</option>').join('') + '</select>' +
-            (v && !dict[v] ? '<button type="button" class="ls-mini ls-translate-btn" onclick="vpListados.translateAttribute(\'' + esc(c.key) + '\',\'' + esc(c.label) + '\',\'' + esc(v).replace(/'/g, "\\'") + '\')">Traducir «' + esc(v) + '»</button>' : '');
-        } else {
-          input = '<input class="ls-input" data-tp="' + esc(c.key) + '" value="' + esc(v) + '">';
-        }
-        return '<label class="ls-field ls-half"><span class="ls-label">' + esc(c.label) + '</span>' + input + '</label>';
+        // dropdown values come from TikTok's template in English; show the
+        // Spanish word the first time it's been translated, English with a
+        // "traducir" link the first time it's seen (see translateAttribute()).
+        const dict = (boot.translations || {})[c.key] || {};
+        const input = '<select class="ls-input" data-tp="' + esc(c.key) + '" data-tp-label="' + esc(c.label) + '"><option value="">\u2014</option>' +
+          opts.map(o => '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(dict[o] || o) + (dict[o] ? '' : ' (sin traducir)') + '</option>').join('') + '</select>' +
+          (v && !dict[v] ? translateBtn_(c.key, c.label, v) : '');
+        return '<label class="ls-field ls-half"><span class="ls-label">' + esc(PROP_LABEL_ES[c.key] || c.label) + '</span>' + input + '</label>';
       };
-      propsHtml = '<div class="ls-grid">' + withOpts.map(propField).join('') + '</div>' +
-        (rest.length ? '<details class="ls-details"><summary>Más campos de TikTok (' + rest.length + ')</summary><div class="ls-grid">' + rest.map(propField).join('') + '</div></details>' : '');
+      propsHtml = '<div class="ls-grid">' + cols.map(propField).join('') + '</div>';
     }
     const tiktokHtml = !platformVisible('tiktok') ? '' : '<div class="ls-card"><div class="ls-card-title">TikTok' + platformPill('tiktok') + '</div>' +
       '<label class="ls-field"><span class="ls-label">Categoría' + platformPill('tiktok') + '</span><select class="ls-input" data-f="template_id" data-rerender="1">' +
@@ -485,6 +523,12 @@ window.vpListados = (function () {
     if (t.dataset.f) {
       draft[t.dataset.f] = t.value;
       markDirty();
+      if (t.dataset.f === 'option1_name' && !t.value.trim()) {
+        // no option 1 name -> these rows aren't distinct variants, so a
+        // photo on one of them no longer means anything; clear it rather
+        // than leave a photo attached to a "variant" that doesn't exist.
+        draft.variants.forEach(v => { v.image = ''; v.image_full = ''; });
+      }
       if (t.dataset.rerender || t.dataset.f === 'option1_name' || t.dataset.f === 'option2_name') {
         if (ev.type === 'change' || t.tagName === 'SELECT') renderEditor();
       }
@@ -626,15 +670,9 @@ window.vpListados = (function () {
     return { thumb: res.thumb_url, full: res.full_url };
   }
   async function uploadImgs(input) {
-    const files = Array.from(input.files || []).slice(0, 9 - (draft.images || []).length);
+    const files = Array.from(input.files || []);
     input.value = '';
-    const label = document.getElementById('ls-gadd-text');
-    for (let i = 0; i < files.length; i++) {
-      if (label) label.textContent = 'Subiendo ' + (i + 1) + ' de ' + files.length + '…';
-      try { const im = await uploadFile(files[i]); draft.images.push(im); markDirty(); }
-      catch (e) { toast(files[i].name + ': ' + (e.message || e), true); }
-    }
-    renderEditor();
+    await uploadFilesInto_(files);
   }
   async function uploadVariantImg(input, i) {
     const f = input.files && input.files[0];
@@ -644,6 +682,27 @@ window.vpListados = (function () {
     try { const im = await uploadFile(f); draft.variants[i].image = im.thumb; draft.variants[i].image_full = im.full; markDirty(); renderEditor(); toast('✓ Foto lista'); }
     catch (e) { toast(e.message || String(e), true); }
   }
+  // The ⬆ icon on a variant row: no modal, straight to the OS file picker,
+  // same as the old single-button behavior but now reachable only via its
+  // own icon instead of being the row's only option.
+  function uploadVariantImgPrompt(i) {
+    if (!boot.images_enabled) { toast('La subida de fotos no está configurada todavía', true); return; }
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'image/jpeg,image/png,image/webp';
+    inp.onchange = () => uploadVariantImg(inp, i);
+    inp.click();
+  }
+  // The 📁 icon on a variant row: straight to the Archivos browser, no
+  // intermediate "upload or browse?" modal (that choice is now the two icons).
+  function browseVariantImg(i) {
+    browseArchivos('Elegir foto para la variante', (f, m) => {
+      draft.variants[i].image = f.thumb_url;
+      draft.variants[i].image_full = f.web_url || f.url;
+      markDirty();
+      m.close();
+      renderEditor();
+    });
+  }
   function moveImg(i, d) {
     const j = i + d;
     if (j < 0 || j >= draft.images.length) return;
@@ -651,11 +710,39 @@ window.vpListados = (function () {
     markDirty(); renderEditor();
   }
   function removeImg(i) { draft.images.splice(i, 1); markDirty(); renderEditor(); }
-  function pasteImg() {
-    const u = (prompt('Pega el enlace (https://…) de la foto:') || '').trim();
-    if (!u) return;
-    if (!/^https:\/\/\S+$/.test(u)) { toast('El enlace debe empezar con https://', true); return; }
+  function addImgUrl_(u) {
+    u = String(u || '').trim();
+    if (!u) return false;
+    if (!/^https:\/\/\S+$/.test(u)) { toast('El enlace debe empezar con https://', true); return false; }
+    if ((draft.images || []).length >= 9) { toast('Ya tienes 9 fotos', true); return false; }
     draft.images.push({ thumb: u, full: u }); markDirty(); renderEditor();
+    return true;
+  }
+  function pasteImg() {
+    addImgUrl_(prompt('Pega el enlace (https://…) de la foto:'));
+  }
+  // Drag-and-drop onto the "+ Subir fotos" box: an image file uploads like a
+  // normal click-to-pick; a dropped/pasted URL (e.g. dragged from another
+  // browser tab) is added directly, same as "Pegar enlace de foto" but
+  // without the prompt.
+  async function dropOnGallery_(dt) {
+    if (!dt) return;
+    const files = Array.from((dt.files || [])).filter(f => /^image\//.test(f.type));
+    if (files.length) { await uploadFilesInto_(files); return; }
+    const text = dt.getData && (dt.getData('text/uri-list') || dt.getData('text/plain'));
+    if (text) addImgUrl_(text.split('\n')[0]);
+  }
+  async function uploadFilesInto_(files) {
+    const room = 9 - (draft.images || []).length;
+    files = files.slice(0, Math.max(room, 0));
+    if (!files.length) { toast('Ya tienes 9 fotos', true); return; }
+    const label = document.getElementById('ls-gadd-text');
+    for (let i = 0; i < files.length; i++) {
+      if (label) label.textContent = 'Subiendo ' + (i + 1) + ' de ' + files.length + '…';
+      try { const im = await uploadFile(files[i]); draft.images.push(im); markDirty(); }
+      catch (e) { toast(files[i].name + ': ' + (e.message || e), true); }
+    }
+    renderEditor();
   }
   async function useCatalogPhotos() {
     const parents = await loadCatalog();
@@ -714,28 +801,6 @@ window.vpListados = (function () {
       renderEditor();
     });
   }
-  // Tapping a variant's photo box: upload a new file, or pick one already in
-  // Archivos -- instead of jumping straight to the OS file picker.
-  function pickVariantImg(i) {
-    const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">Foto de la variante</div>' +
-      '<div class="ls-ai-actions">' +
-        (boot.images_enabled ? '<label class="btn btn-primary" style="cursor:pointer">Subir foto nueva<input type="file" id="pv-upload" accept="image/jpeg,image/png,image/webp" style="display:none"></label>' : '') +
-        '<button class="btn" id="pv-browse">Elegir de Archivos</button>' +
-      '</div>', { maxWidth: '420px' });
-    const upload = m.el.querySelector('#pv-upload');
-    if (upload) upload.onchange = () => { const inp = upload; m.close(); uploadVariantImg(inp, i); };
-    m.el.querySelector('#pv-browse').onclick = () => {
-      m.close();
-      browseArchivos('Elegir foto para la variante', (f, m2) => {
-        draft.variants[i].image = f.thumb_url;
-        draft.variants[i].image_full = f.web_url || f.url;
-        markDirty();
-        m2.close();
-        renderEditor();
-      });
-    };
-  }
-
   // ── Catalog link ─────────────────────────────────────────────────────────
   async function loadCatalog() {
     if (catalogParents) return catalogParents;
@@ -1130,6 +1195,27 @@ window.vpListados = (function () {
     const ed = document.getElementById('ls-editor-body');
     ed.addEventListener('input', onInput);
     ed.addEventListener('change', onInput);
+    // Drag-and-drop onto the "+ Subir fotos" box, same pattern as Fotos del
+    // catálogo: delegated on the editor body since the box is re-created on
+    // every renderEditor().
+    ['dragenter', 'dragover'].forEach(evt => ed.addEventListener(evt, e => {
+      const box = e.target.closest('.ls-gadd');
+      if (!box) return;
+      e.preventDefault();
+      box.classList.add('drag-over');
+    }));
+    ['dragleave', 'drop'].forEach(evt => ed.addEventListener(evt, e => {
+      const box = e.target.closest('.ls-gadd');
+      if (!box) return;
+      if (evt === 'dragleave' && box.contains(e.relatedTarget)) return;
+      box.classList.remove('drag-over');
+    }));
+    ed.addEventListener('drop', e => {
+      const box = e.target.closest('.ls-gadd');
+      if (!box || !draft) return;
+      e.preventDefault();
+      dropOnGallery_(e.dataTransfer);
+    });
     document.addEventListener('keydown', e => {
       if (!draft) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
@@ -1143,7 +1229,7 @@ window.vpListados = (function () {
 
   return {
     tab, load, renderList, open, close, save, archiveToggle, selectAllVisible, clearSel, exportDialog,
-    addVariant, removeVariant, fillDown, combos, uploadImgs, uploadVariantImg, pickVariantImg, moveImg, removeImg,
+    addVariant, removeVariant, fillDown, combos, uploadImgs, uploadVariantImg, uploadVariantImgPrompt, browseVariantImg, moveImg, removeImg,
     pasteImg, useCatalogPhotos, pickFromArchivos, pickParent, unlinkParent, runAi, undoAi, setViewMode,
     readTemplate, saveTemplate, toggleTemplate, saveSettings, preflight, translateAttribute,
   };
