@@ -34,10 +34,17 @@ window.vpListados = (function () {
     shopify: { text: '#4A6B24', bg: '#ECF3E0', label: 'Shopify' },
     tiktok: { text: '#3B5FA0', bg: '#E9F1FA', label: 'TikTok' },
   };
+  // Shows the badge(s) relevant to a field, filtered by what's actually
+  // visible right now -- a 'both' field only shows the TikTok pill while in
+  // TikTok view (and vice versa in Shopify view), so the badges never claim
+  // relevance for a platform whose own fields are currently hidden. In Ambos
+  // view a 'both' field shows both pills, since both really do apply.
   function platformPill(p) {
-    if (p === 'both') return '<span class="ls-pf-pill" style="color:' + PLATFORM_COLORS.tiktok.text + ';background:' + PLATFORM_COLORS.tiktok.bg + '">TikTok</span><span class="ls-pf-pill" style="color:' + PLATFORM_COLORS.shopify.text + ';background:' + PLATFORM_COLORS.shopify.bg + '">Shopify</span>';
-    const c = PLATFORM_COLORS[p];
-    return c ? '<span class="ls-pf-pill" style="color:' + c.text + ';background:' + c.bg + '">' + c.label + '</span>' : '';
+    const show = p === 'both' ? (viewMode === 'ambos' ? ['tiktok', 'shopify'] : [viewMode]) : [p];
+    return show.map(k => {
+      const c = PLATFORM_COLORS[k];
+      return c ? '<span class="ls-pf-pill" style="color:' + c.text + ';background:' + c.bg + '">' + c.label + '</span>' : '';
+    }).join('');
   }
   // Whether a field tagged `p` ('tiktok' | 'shopify' | 'both') should render
   // in the current viewMode. 'both'-tagged fields always show (they're the
