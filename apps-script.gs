@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-26.1';
+const SCRIPT_VERSION = '2026-10-26.2';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -382,11 +382,11 @@ function doGet(e) {
     // Ajustes-only tools -- duplicate finders/mergers, product merge
     // search/history. Staff role is a valid token but not allowed here.
     if (action === 'find_duplicate_customers') return requireAdmin(role) ? findDuplicateCustomers(e) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'find_duplicate_products') return requireAdmin(role) ? findDuplicateProducts(e) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'search_products_for_merge') return requireAdmin(role) ? searchProductsForMerge(e) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'manual_product_pair') return requireAdmin(role) ? getManualProductPair(e) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'product_merge_history') return requireAdmin(role) ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'product_categories') return requireAdmin(role) ? getProductCategoriesAction(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'find_duplicate_products') return hasScope(identity, 'productos') ? findDuplicateProducts(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'search_products_for_merge') return hasScope(identity, 'productos') ? searchProductsForMerge(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'manual_product_pair') return hasScope(identity, 'productos') ? getManualProductPair(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'product_merge_history') return hasScope(identity, 'productos') ? getProductMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'product_categories') return hasScope(identity, 'productos') ? getProductCategoriesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'merge_history') return requireAdmin(role) ? getMergeHistory(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_roles') return requireAdmin(role) ? getRolesAction(e) : jsonResponse({ error: 'unauthorized' });
     if (action === 'get_staff_scopes') return requireAdmin(role) ? getStaffScopesAction(e) : jsonResponse({ error: 'unauthorized' });
@@ -986,12 +986,12 @@ function dispatchPostAction(action, body, role) {
     if (action === 'update_order_status') return mayoreoAfterOrderChange(updateOrderStatus(body), body.order_id);
     if (action === 'update_order') return mayoreoAfterOrderChange(updateOrder(body), body.order_id);
     if (action === 'mayoreo_save_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoSavePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'save_product_categories') return requireAdmin(role) ? saveProductCategoriesAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'set_product_category') return requireAdmin(role) ? setProductCategoryAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'save_product_categories') return hasScope(identity, 'productos') ? saveProductCategoriesAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'set_product_category') return hasScope(identity, 'productos') ? setProductCategoryAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'set_product_review_flag') return requireAdmin(role) ? setProductReviewFlagAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'merge_variants_within_parent') return requireAdmin(role) ? mergeVariantsWithinParentAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'merge_variants_within_parent') return hasScope(identity, 'productos') ? mergeVariantsWithinParentAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_variant_merge_within_parent') return requireAdmin(role) ? undoVariantMergeWithinParentAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'catalog_set_fields_bulk') return requireAdmin(role) ? catalogSetFieldsBulkAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_set_fields_bulk') return hasScope(identity, 'productos') ? catalogSetFieldsBulkAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_delete_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoDeletePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
@@ -1040,8 +1040,8 @@ function dispatchPostAction(action, body, role) {
     // order purge (2026-10-24): admin only
     if (action === 'order_purge_preview') return requireAdmin(role) ? orderPurgePreviewAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'order_purge') return requireAdmin(role) ? orderPurgeAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'dismiss_product_pair') return requireAdmin(role) ? dismissProductPairAction(body) : jsonResponse({ error: 'unauthorized' });
-    if (action === 'merge_products') return requireAdmin(role) ? mergeProductsAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'dismiss_product_pair') return hasScope(identity, 'productos') ? dismissProductPairAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'merge_products') return hasScope(identity, 'productos') ? mergeProductsAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'undo_product_merge') return requireAdmin(role) ? undoProductMergeAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'backfill_tiktok_preview') return requireAdmin(role) ? backfillTikTokHistoryPreview(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'backfill_tiktok_commit') return requireAdmin(role) ? backfillTikTokHistoryCommit(body) : jsonResponse({ error: 'unauthorized' });
