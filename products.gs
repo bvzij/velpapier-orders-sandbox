@@ -42,6 +42,12 @@ const PROD_SHEETS = {
   history: { name: 'Listing History', text: ['Listing ID'], headers: ['Listing ID', 'Date', 'User', 'Action', 'Snapshot'] },
   attributes: { name: 'Product Attributes', text: ['Parent ID', 'Listing ID'], headers: [
     'Parent ID', 'Listing ID', 'Attribute', 'Value', 'Value Number', 'Source', 'Updated Date'] },
+  // English TikTok dropdown values <-> the Spanish label shown in the editor,
+  // per template field (product_property/100107, etc). One row per English
+  // value. Spanish starts blank the first time a value is seen; Vel fills it
+  // in once from the editor and it's remembered from then on, catalog-wide.
+  translations: { name: 'Attribute Translations', text: [], headers: [
+    'Field Key', 'Field Label', 'English Value', 'Spanish Value', 'Updated By', 'Updated Date'] },
 };
 
 const PROD_STATUSES = ['Borrador', 'Listo', 'Exportado', 'Archivado'];
@@ -100,7 +106,7 @@ function prodDispatchPost(action, body, identity) {
     const writers = {
       prod_save: prodSaveAction_, prod_archive: prodArchiveAction_, prod_template_save: prodTemplateSaveAction_,
       prod_template_toggle: prodTemplateToggleAction_, prod_export_done: prodExportDoneAction_,
-      prod_settings_save: prodSettingsSaveAction_,
+      prod_settings_save: prodSettingsSaveAction_, prod_translate_save: prodTranslateSaveAction_,
     };
     if (!writers[action]) return jsonResponse({ error: 'Acción desconocida: ' + action });   // frontend newer than backend -> deploy products.gs again
     return withWriteLock(() => prodWithAudit_(() => writers[action](body)));
@@ -264,8 +270,22 @@ function prodBootstrapAction_() {
     ai_model: props.getProperty('AI_MODEL') || PROD_DEFAULT_MODEL,
     images_enabled: !!props.getProperty('IMAGE_SERVICE_KEY'),
     attribute_schema: PROD_ATTRIBUTE_SCHEMA, attribute_vocab: prodAttributeVocab_(),
-    statuses: PROD_STATUSES,
+    translations: prodTranslationsOut_(), statuses: PROD_STATUSES,
   });
+}
+
+// { 'product_property/100107': { 'No warranty': 'Sin garantía', ... }, ... }
+// Field keys with no Spanish yet still appear, with '' as the value, so the
+// editor knows to offer the "traducir" prompt instead of just showing English.
+function prodTranslationsOut_() {
+  const t = prodTable_('translations');
+  const out = {};
+  t.rows.forEach(r => {
+    const key = String(r['Field Key'] || '');
+    if (!key) return;
+    (out[key] = out[key] || {})[String(r['English Value'] || '')] = String(r['Spanish Value'] || '');
+  });
+  return out;
 }
 
 function prodListingOut_(r) {
@@ -295,7 +315,7 @@ function prodVariantOut_(r, cat) {
   return {
     catalog_id: live, catalog_id_was: live !== raw ? raw : '', position: Number(r['Position']) || 0,
     option1: String(r['Option 1'] || ''), option2: String(r['Option 2'] || ''), sku: String(r['Your SKU'] || ''),
-    price: r['Price MXN'], compare_at: r['Compare At MXN'], cost: r['Cost MXN'], stock: r['Stock'],
+    price: r['Price MXN'], compare_at: r['Compare At MXN'], stock: r['Stock'],
     barcode: String(r['Barcode'] || ''), image: String(r['Image URL'] || ''), image_full: String(r['Full Image URL'] || ''),
     weight_g: r['Weight g'], shopify_variant_id: String(r['Shopify Variant ID'] || ''),
   };
@@ -811,6 +831,31 @@ function prodAiAction_(body) {
   if (!parsed) return jsonResponse({ error: 'La IA no devolvió un JSON válido. Intenta de nuevo.' });   // rare; a retry almost always works
   logAuditEvent('prod_ai', 'AI', mode, { model: model, in_tokens: data.usage && data.usage.input_tokens, out_tokens: data.usage && data.usage.output_tokens });
   return jsonResponse({ ok: true, mode: mode, model: model, at: nowISO(), result: parsed });
+}
+
+// { field_key, field_label, english, spanish } -- one new or corrected term.
+// Spanish is keyed by (field_key, english value), never auto-translated: it's
+// Vel's own word, typed once, reused catalog-wide from then on.
+function prodTranslateSaveAction_(body) {
+  const fieldKey = prodStr_(body.field_key, 120);
+  const english = prodStr_(body.english, 200);
+  const spanish = prodStr_(body.spanish, 200);
+  if (!fieldKey || !english) return jsonResponse({ error: 'Falta el campo o el valor en inglés' });   // frontend bug, shouldn't happen
+  const t = prodTable_('translations');
+  const existing = t.rows.find(r => String(r['Field Key']) === fieldKey && String(r['English Value']) === english);
+  const now = nowISO(), user = prodUserName_();
+  if (existing) {
+    t.sheet.getRange(existing._row, t.headers.indexOf('Spanish Value') + 1).setValue(spanish);
+    t.sheet.getRange(existing._row, t.headers.indexOf('Updated By') + 1, 1, 2).setValues([[user, now]]);
+  } else {
+    const start = t.sheet.getLastRow() + 1;
+    t.sheet.getRange(start, 1, 1, t.headers.length).setValues([prodRowArray_(t.headers, {
+      'Field Key': fieldKey, 'Field Label': prodStr_(body.field_label, 150), 'English Value': english,
+      'Spanish Value': spanish, 'Updated By': user, 'Updated Date': now,
+    })]);
+  }
+  logAudit('prod_translate', 'AttributeTranslation', fieldKey + ': ' + english, 'Spanish Value', '', spanish);
+  return jsonResponse({ ok: true, translations: prodTranslationsOut_() });
 }
 
 function prodExtractJson_(text) {
