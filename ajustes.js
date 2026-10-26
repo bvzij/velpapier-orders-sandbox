@@ -763,6 +763,61 @@ async function openRolesModal() {
   }));
 }
 
+// ─── Page access per person (Acceso a páginas) ──────────────────────────
+// Checkbox = that person may open that page. "Todo el equipo" gives or removes
+// a page for every staff member at once. Backend enforces it immediately;
+// the person's menu updates within ~5 minutes (or on their next login).
+async function openScopesModal() {
+  const el = ajModal('aj-scopes', 'Acceso a páginas', 'aj-scopes-body');
+  let data;
+  try { data = await VP.get('action=get_staff_scopes'); }
+  catch (e) { el.innerHTML = `<div class="vp-empty-sm">No se pudo cargar: ${VP.esc(e.message)}</div>`; return; }   // TROUBLESHOOT: "unauthorized" -> Apps Script not redeployed with 2026-10-26.1; check ?action=version.
+  const pages = data.pages || [];
+  const users = data.users || [];
+  if (!users.length) { el.innerHTML = '<div class="vp-empty-sm">No hay personas del equipo configuradas.</div>'; return; }
+  const labelOf = id => (pages.find(p => p.id === id) || {}).label || id;
+  const cell = inner => `<span style="min-width:90px;display:flex;gap:4px;justify-content:center">${inner}</span>`;
+
+  const head = `<div class="aj-history-row" style="font-weight:600;flex-wrap:wrap">
+    <div class="aj-history-main"><span>Persona</span></div>
+    <div style="display:flex;gap:12px">${pages.map(p => cell(VP.esc(p.label))).join('')}</div>
+  </div>`;
+  const rows = users.map(u => `<div class="aj-history-row" style="flex-wrap:wrap">
+    <div class="aj-history-main"><span>${VP.esc(u.name)}</span></div>
+    <div style="display:flex;gap:12px">${pages.map(p => cell(
+      `<input type="checkbox" class="aj-scope-cb" data-name="${VP.esc(u.name)}" data-scope="${VP.esc(p.id)}" ${u.scopes.indexOf(p.id) >= 0 ? 'checked' : ''}>`
+    )).join('')}</div>
+  </div>`).join('');
+  const allRow = `<div class="aj-history-row" style="flex-wrap:wrap">
+    <div class="aj-history-main"><span>Todo el equipo</span></div>
+    <div style="display:flex;gap:12px">${pages.map(p => cell(
+      `<button class="refresh-btn aj-scope-all" data-scope="${VP.esc(p.id)}" data-enabled="true">Dar</button>` +
+      `<button class="refresh-btn aj-scope-all" data-scope="${VP.esc(p.id)}" data-enabled="false">Quitar</button>`
+    )).join('')}</div>
+  </div>`;
+  el.innerHTML = head + rows + allRow +
+    '<div class="aj-row-hint" style="margin-top:8px">Los administradores siempre tienen acceso a todo.</div>';
+
+  el.querySelectorAll('.aj-scope-cb').forEach(cb => cb.addEventListener('change', async () => {
+    cb.disabled = true;
+    try {
+      await VP.post({ action: 'set_staff_scope', person_name: cb.dataset.name, scope: cb.dataset.scope, enabled: cb.checked });
+      VP.toast(`${cb.dataset.name}: ${cb.checked ? 'ahora puede abrir' : 'ya no puede abrir'} ${labelOf(cb.dataset.scope)}`);
+    } catch (e) { cb.checked = !cb.checked; VP.toast(e.message, true); }   // TROUBLESHOOT: checkbox snaps back = the save failed; read the toast text, then check the Apps Script version and audit log.
+    cb.disabled = false;
+  }));
+  el.querySelectorAll('.aj-scope-all').forEach(btn => btn.addEventListener('click', async () => {
+    const enabled = btn.dataset.enabled === 'true';
+    const label = labelOf(btn.dataset.scope);
+    if (!confirm(enabled ? `¿Dar acceso a ${label} a todo el equipo?` : `¿Quitar el acceso a ${label} a todo el equipo?`)) return;
+    try {
+      const r = await VP.post({ action: 'set_staff_scope', person_name: '*', scope: btn.dataset.scope, enabled: enabled });
+      VP.toast(`${label}: ${r.changed || 0} persona(s) cambiada(s)`);
+      openScopesModal();
+    } catch (e) { VP.toast(e.message, true); }
+  }));
+}
+
 // ─── Product merge history + undo (FIX_LOG 6.3) ─────────────────────────
 // The backend has supported undo since the merger was built; this is the
 // first screen that can reach it.
@@ -806,5 +861,6 @@ async function openProductMergeHistoryModal() {
   on('aj-open-health', openHealthModal);
   on('aj-run-reconcile', runReconcile);
   on('aj-open-roles', openRolesModal);
+  on('aj-open-scopes', openScopesModal);
   on('aj-logout', () => { if (confirm('¿Cerrar sesión en este dispositivo?')) VP.logout(); });
 })();
