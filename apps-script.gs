@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.6';
+const SCRIPT_VERSION = '2026-10-25.7';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -709,7 +709,7 @@ function flushAudit() {
 // failsafe), and the others have no single-field reversal that's safe to
 // automate. "Last action" is scoped to the calling person's own rows only
 // -- _currentIdentity.name, never anyone else's.
-const UNDOABLE_ACTIONS = ['update_order_status', 'update_order', 'add_alias', 'update_packed_date', 'save_qc'];
+const UNDOABLE_ACTIONS = ['update_order_status', 'update_order', 'add_alias', 'update_packed_date', 'save_qc', 'set_product_category', 'set_product_review_flag'];
 
 function getAuditSheetCols(sheet) {
   const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -752,6 +752,18 @@ function writeFieldForRecord(recordType, recordId, field, value) {
     const row = findRowByColumn(sheet, 'A', recordId);
     if (!row) return false;
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const col = headers.indexOf(field) + 1;
+    if (col <= 0) return false;
+    sheet.getRange(row, col).setValue(value);
+    return true;
+  }
+  if (recordType === 'Parent') {
+    const sheet = getProductParentsSheet();
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const idCol = headers.indexOf('Parent ID');
+    if (idCol < 0) return false;
+    const row = findRowByColumn(sheet, colLetter(idCol), recordId);
+    if (!row) return false;
     const col = headers.indexOf(field) + 1;
     if (col <= 0) return false;
     sheet.getRange(row, col).setValue(value);
@@ -974,6 +986,11 @@ function dispatchPostAction(action, body, role) {
     if (action === 'update_order') return mayoreoAfterOrderChange(updateOrder(body), body.order_id);
     if (action === 'mayoreo_save_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoSavePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'save_product_categories') return requireAdmin(role) ? saveProductCategoriesAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'set_product_category') return requireAdmin(role) ? setProductCategoryAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'set_product_review_flag') return requireAdmin(role) ? setProductReviewFlagAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'merge_variants_within_parent') return requireAdmin(role) ? mergeVariantsWithinParentAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'undo_variant_merge_within_parent') return requireAdmin(role) ? undoVariantMergeWithinParentAction(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'catalog_set_fields_bulk') return requireAdmin(role) ? catalogSetFieldsBulkAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_delete_plantilla') return mayoreoAllowed(_currentIdentity) ? mayoreoDeletePlantillaAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'create_order') return createOrder(body);
     if (action === 'create_customer') return createCustomer(body);
@@ -2999,6 +3016,80 @@ function saveProductCategoriesAction(body) {
   sheet.getRange(2, 1, categories.length, 1).setValues(categories.map(c => [c]));
   logAuditEvent('save_product_categories', 'ProductCategories', 'ALL', { before: before, after: categories });
   return jsonResponse({ ok: true, categories: categories });
+}
+
+// POST set_product_category (admin) -- { parent_ids: ['PARENT-001', ...], category: 'Washis' }
+// Bulk-assigns one category to many Parents at once. Logs ONE audit event
+// per Parent (not one bulk event) so undo can revert them individually --
+// consistent with how every other write in this file is undoable at the
+// single-record level.
+function setProductCategoryAction(body) {
+  const parentIds = Array.isArray(body.parent_ids) ? body.parent_ids.map(String).filter(Boolean) : [];
+  const category = String(body.category || '').trim();
+  if (!parentIds.length) return jsonResponse({ error: 'parent_ids no puede estar vacío' });
+  if (!category) return jsonResponse({ error: 'category es obligatorio' });
+
+  const sheet = getProductParentsSheet();
+  if (!sheet) return jsonResponse({ error: "No se encontró la hoja 'Product Parents'" });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idCol = h.indexOf('Parent ID');
+  const catCol = ensureHeader(sheet, 'Category');
+  if (idCol < 0) return jsonResponse({ error: "Product Parents no tiene la columna 'Parent ID'" });
+
+  const data = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 0), sheet.getLastColumn()).getValues();
+  const rowByParentId = {};
+  data.forEach((r, i) => { rowByParentId[String(r[idCol])] = i + 2; });
+
+  let updated = 0;
+  const notFound = [];
+  parentIds.forEach(pid => {
+    const row = rowByParentId[pid];
+    if (!row) { notFound.push(pid); return; }
+    const cell = sheet.getRange(row, catCol + 1);
+    const before = cell.getValue();
+    if (String(before || '') === category) return; // already set, nothing to log
+    cell.setValue(category);
+    logAudit('set_product_category', 'Parent', pid, 'Category', before, category);
+    updated++;
+  });
+
+  return jsonResponse({ ok: true, updated: updated, not_found: notFound });
+}
+
+// POST set_product_review_flag (admin) -- { parent_ids: [...], flagged: true|false }
+// Toggles the 'Pendiente de revisión' marker so partially-fixed products
+// can be picked up again later by anyone on the team.
+function setProductReviewFlagAction(body) {
+  const parentIds = Array.isArray(body.parent_ids) ? body.parent_ids.map(String).filter(Boolean) : [];
+  const flagged = !!body.flagged;
+  if (!parentIds.length) return jsonResponse({ error: 'parent_ids no puede estar vacío' });
+
+  const sheet = getProductParentsSheet();
+  if (!sheet) return jsonResponse({ error: "No se encontró la hoja 'Product Parents'" });
+  const h = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const idCol = h.indexOf('Parent ID');
+  const flagCol = ensureHeader(sheet, 'Review Flag');
+  if (idCol < 0) return jsonResponse({ error: "Product Parents no tiene la columna 'Parent ID'" });
+
+  const data = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 0), sheet.getLastColumn()).getValues();
+  const rowByParentId = {};
+  data.forEach((r, i) => { rowByParentId[String(r[idCol])] = i + 2; });
+
+  const value = flagged ? 'Pendiente' : '';
+  let updated = 0;
+  const notFound = [];
+  parentIds.forEach(pid => {
+    const row = rowByParentId[pid];
+    if (!row) { notFound.push(pid); return; }
+    const cell = sheet.getRange(row, flagCol + 1);
+    const before = cell.getValue();
+    if (String(before || '') === value) return;
+    cell.setValue(value);
+    logAudit('set_product_review_flag', 'Parent', pid, 'Review Flag', before, value);
+    updated++;
+  });
+
+  return jsonResponse({ ok: true, updated: updated, not_found: notFound });
 }
 
 function generateParentID(existingParents) {
@@ -5104,6 +5195,120 @@ function getProductMergeHistory(e) {
   return jsonResponse({ records: sheetToObjects(getProductMergeHistorySheet()) });
 }
 
+// ─── Merge two variants that ALREADY share a Parent ID ────────────────────
+// For when the duplicate is within one product (e.g. two "Rojo" variants
+// created by a messy import), not across two Parents. Simpler than
+// mergeProductsAction: no Parent ID repointing, no Parent sentinel -- just
+// the same per-variant union/backfill + Catalog ID repoint across Orders,
+// scoped to one pair. Logged to the same Product Merge History sheet (Kept
+// Parent ID === Merged Parent ID signals "within-parent" to the history UI
+// and to undo) so it shows up in the same history/undo screen as parent
+// merges, with no second history sheet to maintain.
+function mergeVariantsWithinParentAction(body) {
+  const parentId = String(body.parent_id || '');
+  const keepCatalogId = String(body.keep_catalog_id || '');
+  const loseCatalogId = String(body.lose_catalog_id || '');
+  if (!parentId || !keepCatalogId || !loseCatalogId || keepCatalogId === loseCatalogId) {
+    return jsonResponse({ error: 'parent_id, keep_catalog_id and lose_catalog_id (different) are required' });
+  }
+
+  const variantsSheet = getProductVariantsSheet();
+  const vData = variantsSheet.getDataRange().getValues();
+  const vHeaders = vData[0];
+  const vCatalogCol = vHeaders.indexOf('Catalog ID');
+  const vParentCol = vHeaders.indexOf('Parent ID');
+  const vNameCol = vHeaders.indexOf('Variant Name');
+  const vYourSkuCol = vHeaders.indexOf('Your SKU');
+  const vTiktokSkusCol = vHeaders.indexOf('TikTok SKU IDs');
+  const vNotesCol = vHeaders.indexOf('Notes');
+
+  let keepRow = -1, loseRow = -1;
+  for (let i = 1; i < vData.length; i++) {
+    if (String(vData[i][vCatalogCol]) === keepCatalogId) keepRow = i;
+    if (String(vData[i][vCatalogCol]) === loseCatalogId) loseRow = i;
+  }
+  if (keepRow === -1 || loseRow === -1) return jsonResponse({ error: 'Una o ambas variantes no se encontraron' });
+  if (String(vData[keepRow][vParentCol]) !== parentId || String(vData[loseRow][vParentCol]) !== parentId) {
+    return jsonResponse({ error: 'Ambas variantes deben pertenecer al mismo producto (Parent ID)' });
+  }
+
+  const loseName = String(vData[loseRow][vNameCol] || '');
+
+  // Snapshot keeper's pre-merge fields + loser's original name, so undo can
+  // fully restore both sides -- same shape as mergeProductsAction's snapshot.
+  const snapshot = {
+    keeperVariantSnapshot: {
+      yourSku: String(vData[keepRow][vYourSkuCol] || ''),
+      tiktokSkus: String(vData[keepRow][vTiktokSkusCol] || ''),
+      notes: String(vData[keepRow][vNotesCol] || ''),
+    },
+    loserVariantSnapshot: { parentId: parentId, variantName: loseName },
+  };
+
+  const vTrack = makeCellTracker(vData);
+  const setCell = vTrack.set;
+
+  const keepSkus = String(vData[keepRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const loseSkus = String(vData[loseRow][vTiktokSkusCol] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const mergedSkus = [...new Set([...keepSkus, ...loseSkus])];
+  setCell(keepRow, vTiktokSkusCol, mergedSkus.join(', '));
+
+  if (!String(vData[keepRow][vYourSkuCol] || '').trim() && vData[loseRow][vYourSkuCol]) {
+    setCell(keepRow, vYourSkuCol, vData[loseRow][vYourSkuCol]);
+  }
+  const keeperNotes = String(vData[keepRow][vNotesCol] || '');
+  const loserNotes = String(vData[loseRow][vNotesCol] || '');
+  if (loserNotes && !keeperNotes.includes(loserNotes)) {
+    setCell(keepRow, vNotesCol, keeperNotes ? keeperNotes + ' | ' + loserNotes : loserNotes);
+  }
+
+  setCell(loseRow, vNameCol, loseName + ` (merged→${keepCatalogId})`);
+  vTrack.flush(variantsSheet, [vTiktokSkusCol, vYourSkuCol, vCatalogCol, vParentCol]);
+
+  // ─── Repoint Orders: only this one Catalog ID, within this one Parent ──
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  let ordersRepointed = 0;
+  const movedCells = [];
+
+  if (ordersSheet.getLastRow() > 1) {
+    const orderIdVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+    const touchedRows = new Set();
+    for (let n = 1; n <= 30; n++) {
+      const col = oh.indexOf('Product ' + n + ' Catalog ID');
+      if (col < 0) continue;
+      const vals = readColumn(ordersSheet, col);
+      const changed = [];
+      vals.forEach((v, i) => {
+        if (String(v || '') === loseCatalogId) {
+          vals[i] = keepCatalogId;
+          changed.push(i);
+          touchedRows.add(i);
+          movedCells.push(String(orderIdVals[i]) + '|' + n + '|' + loseCatalogId);
+        }
+      });
+      writeColumnChanges(ordersSheet, col, vals, changed);
+    }
+    ordersRepointed = touchedRows.size;
+  }
+  snapshot.movedCells = movedCells;
+
+  // Kept Parent ID === Merged Parent ID is the within-parent signal.
+  const parentsSheetForName = getProductParentsSheet();
+  const pObjs = sheetToObjects(parentsSheetForName);
+  const parentObj = pObjs.find(p => String(p['Parent ID']) === parentId);
+  const parentName = parentObj ? String(parentObj['Parent Name'] || '') : '';
+  logProductMergeHistory(parentId, parentName, parentId, loseName, [{ keep_catalog_id: keepCatalogId, lose_catalog_id: loseCatalogId }], ordersRepointed, snapshot);
+  logAuditEvent('merge_variants_within_parent', 'Variant', keepCatalogId, {
+    parent_id: parentId, merged_catalog_id: loseCatalogId, merged_name: loseName, orders_repointed: ordersRepointed,
+  });
+
+  return jsonResponse({
+    result: 'merged', parent_id: parentId,
+    kept_catalog_id: keepCatalogId, merged_catalog_id: loseCatalogId, orders_repointed: ordersRepointed,
+  });
+}
+
 // ─── Undo ──────────────────────────────────────────────────────────────
 // Reverses a product merge: restores the loser Parent's original name,
 // restores every loser Variant's original Parent ID and Variant Name
@@ -5269,6 +5474,124 @@ function undoProductMergeAction(body) {
   historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
   if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
   logAuditEvent('undo_product_merge', 'Product', keepId, { merge_id: mergeId, restored_id: loseId, orders_reverted: ordersReverted });
+
+  return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
+}
+
+// Undo for mergeVariantsWithinParentAction. Shares the same history sheet
+// and row shape as undoProductMergeAction -- Kept Parent ID === Merged
+// Parent ID is the signal that this was a within-parent merge, so (unlike
+// the parent-merge undo) there is no Parent Name sentinel to restore and
+// no cross-parent repoint map; just the one variant pair.
+function undoVariantMergeWithinParentAction(body) {
+  const mergeId = body.merge_id;
+  if (!mergeId) return jsonResponse({ error: 'merge_id is required' });
+
+  const historySheet = getProductMergeHistorySheet();
+  const hData = historySheet.getDataRange().getValues();
+  const hHeaders = hData[0];
+  const iMergeId = hHeaders.indexOf('Merge ID');
+  const iKeepId = hHeaders.indexOf('Kept Parent ID');
+  const iLoseId = hHeaders.indexOf('Merged Parent ID');
+  const iVariantPairs = hHeaders.indexOf('Variant Pairs (JSON)');
+  const iStatus = hHeaders.indexOf('Status');
+  const iUndoneDate = hHeaders.indexOf('Undone Date');
+  const iSnapshot = hHeaders.indexOf('Keeper Snapshot (JSON)');
+
+  let historyRow = -1, record = null;
+  for (let i = 1; i < hData.length; i++) {
+    if (String(hData[i][iMergeId]) === String(mergeId)) { historyRow = i; record = hData[i]; break; }
+  }
+  if (historyRow === -1) return jsonResponse({ error: 'Merge record not found' });
+  if (record[iStatus] === 'Deshecho') return jsonResponse({ error: 'This merge was already undone' });
+  if (String(record[iKeepId]) !== String(record[iLoseId])) {
+    return jsonResponse({ error: 'Este registro es una fusión entre productos distintos -- usa undo_product_merge' });
+  }
+
+  const parentId = record[iKeepId];
+  const variantPairs = JSON.parse(record[iVariantPairs] || '[]');
+  const pair = variantPairs[0];
+  const snapshot = JSON.parse(record[iSnapshot] || '{}');
+  const keeperVariantSnapshot = snapshot.keeperVariantSnapshot || {};
+  const loserVariantSnapshot = snapshot.loserVariantSnapshot || {};
+
+  if (!pair) return jsonResponse({ error: 'Registro de fusión sin datos de variantes' });
+
+  // ─── Restore Variants ──────────────────────────────────────────────────
+  const variantsSheet = getProductVariantsSheet();
+  const vData = variantsSheet.getDataRange().getValues();
+  const vHeaders = vData[0];
+  const vCatalogCol = vHeaders.indexOf('Catalog ID');
+  const vParentCol = vHeaders.indexOf('Parent ID');
+  const vNameCol = vHeaders.indexOf('Variant Name');
+  const vYourSkuCol = vHeaders.indexOf('Your SKU');
+  const vTiktokSkusCol = vHeaders.indexOf('TikTok SKU IDs');
+  const vNotesCol = vHeaders.indexOf('Notes');
+
+  const rowByCatalogId = {};
+  for (let i = 1; i < vData.length; i++) rowByCatalogId[String(vData[i][vCatalogCol])] = i;
+
+  const vTrack = makeCellTracker(vData);
+  const setCell = vTrack.set;
+
+  const loseSnap = loserVariantSnapshot[pair.lose_catalog_id];
+  if (loseSnap) {
+    const row = rowByCatalogId[pair.lose_catalog_id];
+    if (row !== undefined) {
+      setCell(row, vParentCol, loseSnap.parentId);
+      setCell(row, vNameCol, loseSnap.variantName);
+    }
+  }
+  const keepSnap = keeperVariantSnapshot[pair.keep_catalog_id];
+  if (keepSnap) {
+    const row = rowByCatalogId[pair.keep_catalog_id];
+    if (row !== undefined) {
+      setCell(row, vYourSkuCol, keepSnap.yourSku);
+      setCell(row, vTiktokSkusCol, keepSnap.tiktokSkus);
+      setCell(row, vNotesCol, keepSnap.notes);
+    }
+  }
+  vTrack.flush(variantsSheet, [vTiktokSkusCol, vYourSkuCol, vCatalogCol, vParentCol]);
+
+  // ─── Repoint Orders back, using the exact moved cells ─────────────────
+  const ordersSheet = getOrdersSheet();
+  const oh = ordersSheet.getRange(1, 1, 1, ordersSheet.getLastColumn()).getValues()[0];
+  let ordersReverted = 0;
+
+  if (ordersSheet.getLastRow() > 1 && Array.isArray(snapshot.movedCells)) {
+    const orderIdVals = readColumn(ordersSheet, oh.indexOf('Order ID'));
+    const rowById = {};
+    orderIdVals.forEach((v, i) => { rowById[String(v)] = i; });
+    const touchedRows = new Set();
+    const colState = {};
+
+    snapshot.movedCells.forEach(entry => {
+      const parts = String(entry).split('|');
+      const rowIdx = rowById[parts[0]];
+      const slot = parseInt(parts[1], 10);
+      const original = parts[2];
+      if (rowIdx === undefined) return;
+      const col = oh.indexOf('Product ' + slot + ' Catalog ID');
+      if (col < 0) return;
+      if (!colState[col]) colState[col] = { vals: readColumn(ordersSheet, col), changed: [] };
+      const st = colState[col];
+      if (String(st.vals[rowIdx] || '') !== pair.keep_catalog_id) return; // edited since -- leave alone
+      st.vals[rowIdx] = original;
+      st.changed.push(rowIdx);
+      touchedRows.add(rowIdx);
+    });
+
+    Object.keys(colState).forEach(col => {
+      writeColumnChanges(ordersSheet, Number(col), colState[col].vals, colState[col].changed);
+    });
+    ordersReverted = touchedRows.size;
+  }
+
+  historySheet.getRange(historyRow + 1, iStatus + 1).setValue('Deshecho');
+  if (iUndoneDate >= 0) historySheet.getRange(historyRow + 1, iUndoneDate + 1).setValue(nowISO());
+  logAuditEvent('undo_variant_merge_within_parent', 'Variant', pair.keep_catalog_id, {
+    merge_id: mergeId, parent_id: parentId, restored_catalog_id: pair.lose_catalog_id, orders_reverted: ordersReverted,
+  });
 
   return jsonResponse({ result: 'undone', merge_id: mergeId, orders_reverted: ordersReverted });
 }
@@ -9455,6 +9778,8 @@ function savePickAction(body) {
 
 // ─── POST catalog_set_fields (admin) ───────────────────────────────────────
 // { catalog_id, fields: { 'Image URL': 'https://…', 'Barcode': '…', 'Stock': 12, 'Low Stock At': 3 } }
+// ─── POST catalog_set_fields (admin) ───────────────────────────────────────
+// { catalog_id, fields: { 'Image URL': 'https://…', 'Barcode': '…', 'Stock': 12, 'Low Stock At': 3 } }
 function catalogSetFieldsAction(body) {
   const catalogId = pkStr_(body.catalog_id, 40);
   const fields = body.fields || {};
@@ -9493,24 +9818,27 @@ function catalogSetFieldsAction(body) {
   return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
 }
 
-// ─── POST catalog_set_fields (admin) ───────────────────────────────────────
-// { catalog_id, fields: { 'Image URL': 'https://…', 'Barcode': '…', 'Stock': 12, 'Low Stock At': 3 } }
-function catalogSetFieldsAction(body) {
-  const catalogId = pkStr_(body.catalog_id, 40);
+// ─── POST catalog_set_fields_bulk (admin) ──────────────────────────────────
+// { catalog_ids: ['VAR-1', 'VAR-2', ...], fields: { 'Stock': 12 } }
+// Applies the SAME field values to many variants at once (e.g. set Stock
+// for every size of one product in one go). Same field whitelist and
+// validation as the single version; logs one audit entry per variant so
+// each is individually undoable, same convention as set_product_category.
+function catalogSetFieldsBulkAction(body) {
+  const catalogIds = Array.isArray(body.catalog_ids) ? body.catalog_ids.map(String).filter(Boolean) : [];
   const fields = body.fields || {};
-  if (!catalogId) return jsonResponse({ error: 'catalog_id es obligatorio' });                          // the line has no catalog match -> link its SKU in Catálogo first
+  if (!catalogIds.length) return jsonResponse({ error: 'catalog_ids no puede estar vacío' });
   const names = Object.keys(fields);
-  if (!names.length) return jsonResponse({ error: 'No hay campos que guardar' });                       // empty request
+  if (!names.length) return jsonResponse({ error: 'No hay campos que guardar' });
   for (let i = 0; i < names.length; i++) {
-    if (PK_VARIANT_COLS.indexOf(names[i]) < 0) return jsonResponse({ error: 'Campo no permitido: ' + names[i] });   // only Image URL / Barcode / Stock / Low Stock At
+    if (PK_VARIANT_COLS.indexOf(names[i]) < 0) return jsonResponse({ error: 'Campo no permitido: ' + names[i] });
   }
+
   const vs = getProductVariantsSheet();
-  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });                   // tab renamed -> restore the name
+  if (!vs) return jsonResponse({ error: 'No se encontró la hoja Product Variants' });
   const startH = vs.getRange(1, 1, 1, vs.getLastColumn()).getValues()[0];
   const iCat = startH.indexOf('Catalog ID');
   if (iCat < 0) return jsonResponse({ error: 'Product Variants no tiene la columna Catalog ID' });
-  const row = findRowByColumn(vs, colLetter(iCat), catalogId);
-  if (!row) return jsonResponse({ error: 'Variante no encontrada: ' + catalogId });                     // merged or deleted variant -> refresh the page and reopen
 
   const clean = {};
   for (let i = 0; i < names.length; i++) {
@@ -9521,15 +9849,28 @@ function catalogSetFieldsAction(body) {
     if (n === 'Barcode') v = v.replace(/\s+/g, '');
     clean[n] = v;
   }
-  names.forEach(n => {
-    const col = ensureHeader(vs, n) + 1;
-    const cell = vs.getRange(row, col);
-    const before = cell.getValue();
-    if (n === 'Barcode' || n === 'Image URL') cell.setNumberFormat('@');
-    cell.setValue(n === 'Stock' || n === 'Low Stock At' ? (clean[n] === '' ? '' : Number(clean[n])) : clean[n]);
-    logAudit('catalog_set_field', 'Variant', catalogId, n, before, clean[n]);
+
+  const colByName = {};
+  names.forEach(n => { colByName[n] = ensureHeader(vs, n) + 1; });
+
+  let updated = 0;
+  const notFound = [];
+  catalogIds.forEach(catalogId => {
+    const row = findRowByColumn(vs, colLetter(iCat), catalogId);
+    if (!row) { notFound.push(catalogId); return; }
+    names.forEach(n => {
+      const cell = vs.getRange(row, colByName[n]);
+      const before = cell.getValue();
+      const after = n === 'Stock' || n === 'Low Stock At' ? (clean[n] === '' ? '' : Number(clean[n])) : clean[n];
+      if (n === 'Barcode' || n === 'Image URL') cell.setNumberFormat('@');
+      cell.setValue(after);
+      logAudit('catalog_set_field', 'Variant', catalogId, n, before, after);
+    });
+    updated++;
   });
-  return jsonResponse({ ok: true, catalog_id: catalogId, fields: clean });
+
+  pkCacheClear_('pkcat');
+  return jsonResponse({ ok: true, updated: updated, not_found: notFound, fields: clean });
 }
 
 // ─── POST catalog_upload_image (admin) ─────────────────────────────────────
