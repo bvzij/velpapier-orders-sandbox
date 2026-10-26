@@ -150,6 +150,7 @@ def parse_csv(csv_bytes: bytes) -> list:
             "sku_id":    r["sku_id"],
             "product":   r["product"],
             "variation": r["variation"],
+            "seller_sku": r["seller_sku"],   # 2026-10-25 Productos SKU matching
             "qty":       int(qty) if qty.isdigit() else 1,
         } if r["product"] else None
         r["import_history_row"] = _build_import_history_row(row)
