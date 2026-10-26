@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.4';   // productos: fichas, exportar TikTok/Shopify, IA, SKU matching
+const SCRIPT_VERSION = '2026-10-25.5';   // productos: fichas, exportar TikTok/Shopify, IA, SKU matching
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -9600,17 +9600,25 @@ function catalogListAction(e) {
   }
 
   const orders = getOrdersSheet();
-  const oh = orders.getRange(1, 1, 1, orders.getLastColumn()).getValues()[0];
   const catalogToParent = {};
   parents.forEach(p => p.variants.forEach(v => { catalogToParent[v.catalog_id] = p; }));
-  for (let n = 1; n <= 30; n++) {
-    const cCol = oh.indexOf('Product ' + n + ' Catalog ID'), qCol = oh.indexOf('Product ' + n + ' Qty');
-    if (cCol < 0) break;
-    const ids = readColumn(orders, cCol), qtys = qCol >= 0 ? readColumn(orders, qCol) : [];
-    for (let i = 0; i < ids.length; i++) {
-      const cid = String(ids[i] || '').trim();
-      if (!cid || !catalogToParent[cid]) continue;
-      catalogToParent[cid].units_sold += parseInt(qtys[i], 10) || 1;
+  if (orders && orders.getLastRow() >= 2) {
+    const od = orders.getDataRange().getValues();
+    const oh = od[0];
+    const colPairs = [];
+    for (let n = 1; n <= 30; n++) {
+      const cCol = oh.indexOf('Product ' + n + ' Catalog ID'), qCol = oh.indexOf('Product ' + n + ' Qty');
+      if (cCol < 0) break;
+      colPairs.push([cCol, qCol]);
+    }
+    for (let r = 1; r < od.length; r++) {
+      for (let k = 0; k < colPairs.length; k++) {
+        const cCol = colPairs[k][0], qCol = colPairs[k][1];
+        const cid = String(od[r][cCol] || '').trim();
+        if (!cid || !catalogToParent[cid]) continue;
+        const qty = qCol >= 0 ? od[r][qCol] : 1;
+        catalogToParent[cid].units_sold += parseInt(qty, 10) || 1;
+      }
     }
   }
   parents.sort((a, b) => a.name.localeCompare(b.name, 'es'));
