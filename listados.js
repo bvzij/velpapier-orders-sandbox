@@ -26,6 +26,32 @@ window.vpListados = (function () {
   let aiUndo = null;
   let catalogParents = null;       // lazy, from catalog_list
   const imgDims = {};              // url -> {w,h} (for pre-flight)
+  let viewMode = localStorage.getItem('vp_prod_view') || 'tiktok';   // 'tiktok' | 'shopify' | 'ambos' -- which fields are SHOWN; never affects what's stored or what export checks
+
+  // Vel Papier's two brand colors for the platform pills, used both in the
+  // pill badges and the field-visibility toggle at the top of the editor.
+  const PLATFORM_COLORS = {
+    shopify: { text: '#4A6B24', bg: '#ECF3E0', label: 'Shopify' },
+    tiktok: { text: '#3B5FA0', bg: '#E9F1FA', label: 'TikTok' },
+  };
+  function platformPill(p) {
+    if (p === 'both') return '<span class="ls-pf-pill" style="color:' + PLATFORM_COLORS.tiktok.text + ';background:' + PLATFORM_COLORS.tiktok.bg + '">TikTok</span><span class="ls-pf-pill" style="color:' + PLATFORM_COLORS.shopify.text + ';background:' + PLATFORM_COLORS.shopify.bg + '">Shopify</span>';
+    const c = PLATFORM_COLORS[p];
+    return c ? '<span class="ls-pf-pill" style="color:' + c.text + ';background:' + c.bg + '">' + c.label + '</span>' : '';
+  }
+  // Whether a field tagged `p` ('tiktok' | 'shopify' | 'both') should render
+  // in the current viewMode. 'both'-tagged fields always show (they're the
+  // shared facts: title, photos, price, SKU...).
+  function platformVisible(p) {
+    if (!p || p === 'both') return true;
+    if (viewMode === 'ambos') return true;
+    return p === viewMode;
+  }
+  function setViewMode(m) {
+    viewMode = m;
+    localStorage.setItem('vp_prod_view', m);
+    if (draft) renderEditor();
+  }
 
   // ── Tabs ─────────────────────────────────────────────────────────────────
   function tab(name) {
@@ -174,7 +200,7 @@ window.vpListados = (function () {
       shopify_handle: '', seo_title: '', seo_description: '', images: [], option1_name: '', option2_name: '',
       weight_g: s.default_weight_g || '', length_cm: dims[0] || '', width_cm: dims[1] || '', height_cm: dims[2] || '',
       attributes: {}, attributes_source: '', ai_model: '', ai_at: '', notes: '', variants_hint: '',
-      variants: [{ catalog_id: '', option1: '', option2: '', sku: '', price: '', compare_at: '', cost: '', stock: '', barcode: '', image: '', image_full: '' }],
+      variants: [{ catalog_id: '', option1: '', option2: '', sku: '', price: '', compare_at: '', stock: '', barcode: '', image: '', image_full: '' }],
     };
   }
 
@@ -216,14 +242,20 @@ window.vpListados = (function () {
     });
   }
 
+  // opts.platform: 'tiktok' | 'shopify' | 'both' (default) -- which pill shows
+  // and whether the field is hidden by the view-mode toggle.
+  // opts.required: true -- bold label + red asterisk (only meaningful on
+  // 'both' fields: those are the ones that block every export if missing).
   function field(label, key, opts) {
     opts = opts || {};
+    if (!platformVisible(opts.platform)) return '';
     const v = draft[key] == null ? '' : draft[key];
     const counter = (opts.max || opts.count) ? '<span class="ls-count" data-count="' + key + '" data-max="' + (opts.max || '') + '"></span>' : '';
     const input = opts.area
       ? '<textarea class="ls-input" data-f="' + key + '" rows="' + (opts.rows || 4) + '" placeholder="' + esc(opts.ph || '') + '">' + esc(v) + '</textarea>'
       : '<input class="ls-input" data-f="' + key + '" value="' + esc(v) + '" placeholder="' + esc(opts.ph || '') + '"' + (opts.type ? ' type="' + opts.type + '" inputmode="decimal"' : '') + (opts.list ? ' list="' + opts.list + '"' : '') + '>';
-    return '<label class="ls-field' + (opts.half ? ' ls-half' : '') + (opts.third ? ' ls-third' : '') + '"><span class="ls-label">' + esc(label) + counter + '</span>' + input + (opts.help ? '<span class="ls-help">' + opts.help + '</span>' : '') + '</label>';
+    const labelHtml = (opts.required ? '<b>' + esc(label) + '</b><span class="ls-req">*</span>' : esc(label));
+    return '<label class="ls-field' + (opts.half ? ' ls-half' : '') + (opts.third ? ' ls-third' : '') + '"><span class="ls-label">' + labelHtml + platformPill(opts.platform || 'both') + counter + '</span>' + input + (opts.help ? '<span class="ls-help">' + opts.help + '</span>' : '') + '</label>';
   }
 
   function renderEditor() {
@@ -268,11 +300,11 @@ window.vpListados = (function () {
     // C. text
     const brandOpts = tpl && tpl.config.options && tpl.config.options.brand ? tpl.config.options.brand : ['No brand'];
     const textHtml = '<div class="ls-card"><div class="ls-card-title">Texto</div>' +
-      field('Título (TikTok)', 'title', { max: 255 }) +
-      field('Título corto (Shopify)', 'shopify_title', { max: 70, half: true, ph: 'Si lo dejas vacío se usa el de TikTok' }) +
+      field('Título', 'title', { max: 255, required: true }) +
+      field('Título corto (Shopify)', 'shopify_title', { max: 70, half: true, platform: 'shopify', ph: 'Si lo dejas vacío se usa el título de arriba' }) +
       field('Marca', 'brand', { half: true, list: 'ls-brands' }) +
       '<datalist id="ls-brands">' + brandOpts.map(b => '<option value="' + esc(b) + '">').join('') + '</datalist>' +
-      field('Descripción', 'description', { area: true, rows: 9, count: true, help: 'Texto plano. Para Shopify se convierte solo a HTML (párrafos y viñetas «• »).' }) +
+      field('Descripción', 'description', { area: true, rows: 9, count: true, required: true, help: 'Texto plano. Para Shopify se convierte solo a HTML (párrafos y viñetas «• »).' }) +
       '</div>';
 
     // D. photos
@@ -295,17 +327,16 @@ window.vpListados = (function () {
 
     // E. variants
     const two = !!draft.option2_name;
+    const showCompareAt = platformVisible('shopify');
     const vRows = draft.variants.map((v, i) => {
       const vi = ' data-vi="' + i + '"';
       return '<tr>' +
-        '<td><label class="ls-vimg">' + (v.image ? '<img src="' + esc(v.image) + '" alt="">' : '<span>+</span>') +
-          (boot.images_enabled ? '<input type="file" accept="image/jpeg,image/png,image/webp" onchange="vpListados.uploadVariantImg(this,' + i + ')">' : '') + '</label></td>' +
+        '<td><button type="button" class="ls-vimg" onclick="vpListados.pickVariantImg(' + i + ')">' + (v.image ? '<img src="' + esc(v.image) + '" alt="">' : '<span>+</span>') + '</button></td>' +
         '<td><input class="ls-cell" data-vf="option1"' + vi + ' value="' + esc(v.option1) + '" placeholder="' + esc(draft.option1_name || 'Sin variantes') + '"' + (draft.option1_name ? '' : ' disabled') + '></td>' +
         (two ? '<td><input class="ls-cell" data-vf="option2"' + vi + ' value="' + esc(v.option2) + '" placeholder="' + esc(draft.option2_name) + '"></td>' : '') +
         '<td><input class="ls-cell ls-sku" data-vf="sku"' + vi + ' value="' + esc(v.sku) + '" placeholder="código del proveedor"><span class="ls-sku-hint" data-sku-hint="' + i + '"></span></td>' +
         '<td><input class="ls-cell ls-num" data-vf="price"' + vi + ' value="' + esc(v.price) + '" inputmode="decimal" placeholder="$"></td>' +
-        '<td><input class="ls-cell ls-num" data-vf="compare_at"' + vi + ' value="' + esc(v.compare_at) + '" inputmode="decimal"></td>' +
-        '<td><input class="ls-cell ls-num" data-vf="cost"' + vi + ' value="' + esc(v.cost) + '" inputmode="decimal"></td>' +
+        (showCompareAt ? '<td><input class="ls-cell ls-num" data-vf="compare_at"' + vi + ' value="' + esc(v.compare_at) + '" inputmode="decimal" placeholder="$"></td>' : '') +
         '<td><input class="ls-cell ls-num" data-vf="stock"' + vi + ' value="' + esc(v.stock) + '" inputmode="numeric"></td>' +
         '<td><input class="ls-cell" data-vf="barcode"' + vi + ' value="' + esc(v.barcode) + '"></td>' +
         '<td><button class="ls-x" title="Quitar variante" onclick="vpListados.removeVariant(' + i + ')">✕</button></td>' +
@@ -315,12 +346,13 @@ window.vpListados = (function () {
       '<div class="ls-grid">' + field('Nombre de la opción 1', 'option1_name', { half: true, max: 20, ph: 'Ej. Color (vacío = sin variantes)' }) +
       field('Nombre de la opción 2', 'option2_name', { half: true, max: 20, ph: 'Ej. Tamaño (opcional)' }) + '</div>' +
       '<div class="ls-table-wrap"><table class="ls-table"><thead><tr><th>Foto</th><th>' + esc(draft.option1_name || 'Opción 1') + '</th>' + (two ? '<th>' + esc(draft.option2_name) + '</th>' : '') +
-      '<th>SKU</th><th>Precio</th><th>Antes</th><th>Costo</th><th>Stock</th><th>Código de barras</th><th></th></tr></thead><tbody>' + vRows + '</tbody></table></div>' +
+      '<th>SKU</th><th>Precio *</th>' + (showCompareAt ? '<th>Antes' + platformPill('shopify') + '</th>' : '') + '<th>Stock</th><th>Código de barras</th><th></th></tr></thead><tbody>' + vRows + '</tbody></table></div>' +
       '<div class="ls-ai-actions" style="margin-top:8px">' +
         '<button class="ls-mini" onclick="vpListados.addVariant()">+ Variante</button>' +
         '<button class="ls-mini" onclick="vpListados.combos()">Generar combinaciones</button>' +
         '<button class="ls-mini" onclick="vpListados.fillDown()">Copiar precio/stock de la 1ª a todas</button>' +
-      '</div><div class="ls-help">El SKU es el código del proveedor, tal cual, incluso si repite el mismo código en varias variantes. Puede quedar vacío. Liga los pedidos de TikTok y Shopify con este producto.</div></div>';
+      '</div><div class="ls-help">El SKU es el código del proveedor, tal cual, incluso si repite el mismo código en varias variantes. Puede quedar vacío. Liga los pedidos de TikTok y Shopify con este producto.' +
+      (showCompareAt ? ' «Antes» es el precio tachado que Shopify muestra junto al precio con descuento; no existe en la plantilla de TikTok.' : '') + '</div></div>';
 
     // F. shipping
     const shipHtml = '<div class="ls-card"><div class="ls-card-title">Paquete (para el envío)</div><div class="ls-grid">' +
@@ -329,7 +361,7 @@ window.vpListados = (function () {
       field('Alto (cm)', 'height_cm', { type: 'number', third: true }) + '</div>' +
       '<div class="ls-help">TikTok usa el peso y medidas de la primera variante para calcular el envío de todas.</div></div>';
 
-    // G. TikTok
+    // G. TikTok -- whole card hidden in pure Shopify view.
     let propsHtml = '';
     if (tpl) {
       const cols = (tpl.config.columns || []).filter(c => c.key.indexOf('product_property/') === 0);
@@ -338,22 +370,32 @@ window.vpListados = (function () {
       const propField = c => {
         const opts = (tpl.config.options || {})[c.key];
         const v = (draft.tiktok_props || {})[c.key] || '';
-        const input = opts
-          ? '<select class="ls-input" data-tp="' + esc(c.key) + '"><option value="">—</option>' + opts.map(o => '<option' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>').join('') + '</select>'
-          : '<input class="ls-input" data-tp="' + esc(c.key) + '" value="' + esc(v) + '">';
+        let input;
+        if (opts) {
+          // dropdown values come from TikTok's template in English; show the
+          // Spanish word the first time it's been translated, English with a
+          // "traducir" link the first time it's seen (see translateAttribute()).
+          const dict = (boot.translations || {})[c.key] || {};
+          input = '<select class="ls-input" data-tp="' + esc(c.key) + '" data-tp-label="' + esc(c.label) + '"><option value="">—</option>' +
+            opts.map(o => '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(dict[o] || o) + (dict[o] ? '' : ' (sin traducir)') + '</option>').join('') + '</select>' +
+            (v && !dict[v] ? '<button type="button" class="ls-mini ls-translate-btn" onclick="vpListados.translateAttribute(\'' + esc(c.key) + '\',\'' + esc(c.label) + '\',\'' + esc(v).replace(/'/g, "\\'") + '\')">Traducir «' + esc(v) + '»</button>' : '');
+        } else {
+          input = '<input class="ls-input" data-tp="' + esc(c.key) + '" value="' + esc(v) + '">';
+        }
         return '<label class="ls-field ls-half"><span class="ls-label">' + esc(c.label) + '</span>' + input + '</label>';
       };
       propsHtml = '<div class="ls-grid">' + withOpts.map(propField).join('') + '</div>' +
         (rest.length ? '<details class="ls-details"><summary>Más campos de TikTok (' + rest.length + ')</summary><div class="ls-grid">' + rest.map(propField).join('') + '</div></details>' : '');
     }
-    const tiktokHtml = '<div class="ls-card"><div class="ls-card-title">TikTok</div>' +
-      '<label class="ls-field"><span class="ls-label">Plantilla / categoría</span><select class="ls-input" data-f="template_id" data-rerender="1">' +
-        '<option value="">— Elige la categoría —</option>' + tpls.map(t => '<option value="' + esc(t.template_id) + '"' + (t.template_id === draft.template_id ? ' selected' : '') + '>' + esc(t.name) + ' — ' + esc(t.category_path) + '</option>').join('') +
+    const tiktokHtml = !platformVisible('tiktok') ? '' : '<div class="ls-card"><div class="ls-card-title">TikTok' + platformPill('tiktok') + '</div>' +
+      '<label class="ls-field"><span class="ls-label">Categoría' + platformPill('tiktok') + '</span><select class="ls-input" data-f="template_id" data-rerender="1">' +
+        '<option value="">— Elige la categoría —</option>' + tpls.map(t => '<option value="' + esc(t.template_id) + '"' + (t.template_id === draft.template_id ? ' selected' : '') + '>' + esc(t.name) + '</option>').join('') +
         (draft.template_id && !tpl ? '<option value="' + esc(draft.template_id) + '" selected>(plantilla inactiva)</option>' : '') +
       '</select>' + (tpls.length ? '' : '<span class="ls-help">No hay plantillas. Súbelas en la pestaña Plantillas.</span>') + '</label>' + propsHtml + '</div>';
 
-    // H. Shopify
-    const shopifyHtml = '<div class="ls-card"><div class="ls-card-title">Shopify</div><div class="ls-grid">' +
+    // H. Shopify -- whole card hidden outside Shopify/Ambos view, since none
+    // of these fields matter for a TikTok-only product (the common case).
+    const shopifyHtml = !platformVisible('shopify') ? '' : '<div class="ls-card"><div class="ls-card-title">Shopify' + platformPill('shopify') + '</div><div class="ls-grid">' +
       field('Categoría de Shopify', 'shopify_category', { half: true, ph: 'Ej. Arts & Entertainment > Hobbies & Creative Arts > Arts & Crafts' }) +
       field('Tipo', 'shopify_type', { half: true, ph: 'Ej. Marcadores' }) +
       '<label class="ls-field"><span class="ls-label">Etiquetas (separadas por coma)</span><input class="ls-input" data-tags="1" value="' + esc((draft.tags || []).join(', ')) + '"></label>' +
@@ -367,13 +409,37 @@ window.vpListados = (function () {
     // J. notes
     const notesHtml = '<div class="ls-card"><div class="ls-card-title">Notas internas</div>' + field('', 'notes', { area: true, rows: 3, ph: 'Solo para el equipo' }) + '</div>';
 
-    root.innerHTML = '<div class="ls-preflight" id="ls-preflight"></div>' + '<div class="ls-card">' + linkHtml + '</div>' +
+    const viewToggleHtml = '<div class="ls-viewtoggle">' +
+      '<span class="ls-viewtoggle-label">Mostrar campos:</span>' +
+      ['tiktok', 'shopify', 'ambos'].map(m => '<button type="button" class="ls-vt-btn' + (viewMode === m ? ' is-active' : '') + '" data-vt-color="' + (m === 'ambos' ? '' : m) + '" onclick="vpListados.setViewMode(\'' + m + '\')">' +
+        (m === 'tiktok' ? 'TikTok' : m === 'shopify' ? 'Shopify' : 'Ambos') + '</button>').join('') +
+      '</div>';
+    root.innerHTML = viewToggleHtml + '<div class="ls-preflight" id="ls-preflight"></div>' + '<div class="ls-card">' + linkHtml + '</div>' +
       aiHtml + textHtml + photosHtml + variantsHtml + shipHtml + tiktokHtml + shopifyHtml + attrHtml + notesHtml +
       (draft.listing_id ? '<div class="ls-help" style="text-align:center;margin:10px 0 30px">Creado por ' + esc(draft.created_by) + ' ' + esc(draft.created ? VP.fmtDateTime(draft.created) : '') +
         ' · última edición ' + esc(draft.updated_by) + ' ' + esc(draft.updated ? VP.fmtDateTime(draft.updated) : '') + '</div>' : '');
     renderPreflight();
   }
 
+  // Spanish labels for the attribute-schema keys (the keys themselves stay
+  // English snake_case server-side, for stable analysis joins -- this is
+  // purely what the editor shows). Any key missing here falls back to the
+  // key with underscores turned into spaces, same as before.
+  const ATTR_LABELS = {
+    product_type: 'Tipo de producto', product_subtype: 'Subtipo', category_group: 'Categoría general',
+    brand: 'Marca', product_line: 'Línea', medium: 'Medio/técnica', technique_uses: 'Usos/técnicas',
+    tip_types: 'Tipo de punta', tip_size_mm: 'Grosor de punta (mm)', color_count: 'Cantidad de colores',
+    color_families: 'Familias de color', specific_colors: 'Colores específicos', pack_quantity: 'Piezas por paquete',
+    size_format: 'Formato/tamaño', dimensions_cm: 'Dimensiones (cm)', page_count: 'Número de páginas',
+    paper_weight_gsm: 'Gramaje del papel', paper_type: 'Tipo de papel', binding: 'Encuadernado',
+    cover_material: 'Material de la portada', material: 'Material', finish: 'Acabado',
+    refillable: 'Recargable', erasable: 'Borrable', water_resistant: 'Resistente al agua',
+    lightfast: 'Resistente a la luz', non_toxic: 'No tóxico', acid_free: 'Libre de ácido', blendable: 'Se puede mezclar',
+    skill_level: 'Nivel', audience: 'Público', age_min: 'Edad mínima', aesthetic: 'Estética',
+    themes: 'Temas', occasions: 'Ocasiones', giftable: 'Para regalo', includes: 'Qué incluye',
+    country_of_origin: 'País de origen', price_positioning: 'Rango de precio', keywords: 'Palabras clave',
+    extra: 'Otros rasgos',
+  };
   function renderAttributes() {
     const schema = boot.attribute_schema || {};
     const a = draft.attributes || {};
@@ -396,7 +462,7 @@ window.vpListados = (function () {
         const shown = Array.isArray(v) ? v.join(', ') : (v == null ? '' : v);
         input = '<input class="ls-input" data-attr="' + k + '" data-kind="' + kind + '" value="' + esc(shown) + '" placeholder="' + esc(desc.replace(/^[^—]*—\s*/, '').slice(0, 70)) + '">';
       }
-      return '<label class="ls-field ls-half"><span class="ls-label">' + esc(k.replace(/_/g, ' ')) + '</span>' + input + '</label>';
+      return '<label class="ls-field ls-half"><span class="ls-label">' + esc(ATTR_LABELS[k] || k.replace(/_/g, ' ')) + '</span>' + input + '</label>';
     }).join('');
     const filled = Object.keys(a).filter(k => a[k] != null && a[k] !== '' && !(Array.isArray(a[k]) && !a[k].length)).length;
     const src = draft.attributes_source === 'ai' ? 'IA' : (draft.attributes_source === 'mixto' ? 'IA + manual' : (filled ? 'manual' : ''));
@@ -429,6 +495,9 @@ window.vpListados = (function () {
       draft.tiktok_props = draft.tiktok_props || {};
       draft.tiktok_props[t.dataset.tp] = t.value;
       markDirty();
+      // a dropdown pick needs a re-render so the "Traducir" button can
+      // appear/disappear for the newly selected value; typed text fields don't.
+      if (t.tagName === 'SELECT') renderEditor();
       return;
     }
     if (t.dataset.tags) {
@@ -480,8 +549,10 @@ window.vpListados = (function () {
 
   // ── Variants actions ─────────────────────────────────────────────────────
   function addVariant() {
-    const last = draft.variants[draft.variants.length - 1] || {};
-    draft.variants.push({ catalog_id: '', option1: '', option2: '', sku: '', price: last.price || '', compare_at: last.compare_at || '', cost: last.cost || '', stock: last.stock || '', barcode: '', image: '', image_full: '' });
+    // Blank on purpose: every variant is its own real-world item with its own
+    // SKU, price and stock, so starting from the previous row's values would
+    // just be a value someone forgot to change, not a shortcut.
+    draft.variants.push({ catalog_id: '', option1: '', option2: '', sku: '', price: '', compare_at: '', stock: '', barcode: '', image: '', image_full: '' });
     markDirty(); renderEditor();
   }
   function removeVariant(i) {
@@ -493,7 +564,7 @@ window.vpListados = (function () {
   }
   function fillDown() {
     const f = draft.variants[0];
-    draft.variants.forEach(v => { v.price = f.price; v.stock = f.stock; v.compare_at = f.compare_at; v.cost = f.cost; });
+    draft.variants.forEach(v => { v.price = f.price; v.stock = f.stock; v.compare_at = f.compare_at; });
     markDirty(); renderEditor();
   }
   function combos() {
@@ -514,7 +585,7 @@ window.vpListados = (function () {
       base.forEach(v => { have[(v.option1 || '') + '||' + (v.option2 || '')] = 1; });
       (b.length ? a.flatMap(x => b.map(y => [x, y])) : a.map(x => [x, ''])).forEach(([x, y]) => {
         if (have[x + '||' + y]) return;
-        base.push({ catalog_id: '', option1: x, option2: y, sku: '', price: proto.price || '', compare_at: proto.compare_at || '', cost: proto.cost || '', stock: proto.stock || '', barcode: '', image: '', image_full: '' });
+        base.push({ catalog_id: '', option1: x, option2: y, sku: '', price: proto.price || '', compare_at: proto.compare_at || '', stock: proto.stock || '', barcode: '', image: '', image_full: '' });
       });
       draft.variants = base.length ? base : draft.variants;
       m.close(); markDirty(); renderEditor();
@@ -594,7 +665,10 @@ window.vpListados = (function () {
     if (!added) toast('El catálogo no tiene fotos nuevas para este producto'); else markDirty();
     renderEditor();
   }
-  async function pickFromArchivos() {
+  // Shared Archivos browser. onPick(file) decides what happens when a tile is
+  // tapped; the modal stays open so several can be picked in a row (gallery
+  // use) unless onPick itself closes it (single-slot use, like a variant photo).
+  async function browseArchivos(title, onPick) {
     let data;
     try {
       const r = await fetch(FILES_API + '/api/recent?kind=image&limit=300', { headers: { Authorization: 'Bearer ' + VP.token } });
@@ -606,9 +680,9 @@ window.vpListados = (function () {
       return;
     }
     const files = (data.files || []).filter(f => f.public);
-    const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">Elegir de Archivos</div>' +
+    const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">' + esc(title) + '</div>' +
       '<input class="ls-input" id="pa-q" placeholder="Buscar por nombre o carpeta…" style="margin-bottom:10px">' +
-      '<div class="ls-help" style="margin-bottom:8px">Solo fotos de carpetas públicas. Toca para agregar (máx. 9).</div>' +
+      '<div class="ls-help" style="margin-bottom:8px">Solo fotos de carpetas públicas.</div>' +
       '<div class="pa-grid" id="pa-grid"></div>', { maxWidth: '760px' });
     const grid = m.el.querySelector('#pa-grid');
     const paint = q => {
@@ -621,12 +695,37 @@ window.vpListados = (function () {
     grid.onclick = e => {
       const b = e.target.closest('.pa-tile');
       if (!b) return;
+      onPick(files[Number(b.dataset.i)], m, b);
+    };
+  }
+  function pickFromArchivos() {
+    browseArchivos('Elegir de Archivos', (f, m, b) => {
       if ((draft.images || []).length >= 9) { toast('Ya tienes 9 fotos', true); return; }
-      const f = files[Number(b.dataset.i)];
       draft.images.push({ thumb: f.thumb_url, full: f.web_url || f.url });
       b.classList.add('is-picked');
       markDirty();
       renderEditor();
+    });
+  }
+  // Tapping a variant's photo box: upload a new file, or pick one already in
+  // Archivos -- instead of jumping straight to the OS file picker.
+  function pickVariantImg(i) {
+    const m = VP.showModal('<div class="modal-title" style="margin-bottom:10px">Foto de la variante</div>' +
+      '<div class="ls-ai-actions">' +
+        (boot.images_enabled ? '<label class="btn btn-primary" style="cursor:pointer">Subir foto nueva<input type="file" id="pv-upload" accept="image/jpeg,image/png,image/webp" style="display:none"></label>' : '') +
+        '<button class="btn" id="pv-browse">Elegir de Archivos</button>' +
+      '</div>', { maxWidth: '420px' });
+    const upload = m.el.querySelector('#pv-upload');
+    if (upload) upload.onchange = () => { const inp = upload; m.close(); uploadVariantImg(inp, i); };
+    m.el.querySelector('#pv-browse').onclick = () => {
+      m.close();
+      browseArchivos('Elegir foto para la variante', (f, m2) => {
+        draft.variants[i].image = f.thumb_url;
+        draft.variants[i].image_full = f.web_url || f.url;
+        markDirty();
+        m2.close();
+        renderEditor();
+      });
     };
   }
 
@@ -663,7 +762,7 @@ window.vpListados = (function () {
       draft.parent_id = p.parent_id;
       const emptyVariants = draft.variants.every(v => !v.option1 && !v.price && !v.catalog_id);
       if (emptyVariants && (p.variants || []).length) {
-        draft.variants = p.variants.map(v => ({ catalog_id: v.catalog_id, option1: v.variant_name || '', option2: '', sku: v.sku || '', price: '', compare_at: '', cost: '', stock: '', barcode: '', image: v.image || '', image_full: v.full_image || v.image || '' }));
+        draft.variants = p.variants.map(v => ({ catalog_id: v.catalog_id, option1: v.variant_name || '', option2: '', sku: v.sku || '', price: '', compare_at: '', stock: '', barcode: '', image: v.image || '', image_full: v.full_image || v.image || '' }));
         if (p.variants.length > 1 && !draft.option1_name) draft.option1_name = 'Variante';
       }
       if (!draft.title) draft.title = p.name;
@@ -715,7 +814,7 @@ window.vpListados = (function () {
         r.variants.forEach((av, i) => { realRows[i].option1 = String(av.option1 || '').slice(0, 50); realRows[i].option2 = String(av.option2 || '').slice(0, 50); });
         draft.variants = realRows;
       } else if (!realRows.length) {
-        draft.variants = r.variants.map(av => ({ catalog_id: '', option1: String(av.option1 || '').slice(0, 50), option2: String(av.option2 || '').slice(0, 50), sku: '', price: proto.price || '', compare_at: proto.compare_at || '', cost: proto.cost || '', stock: proto.stock || '', barcode: '', image: '', image_full: '' }));
+        draft.variants = r.variants.map(av => ({ catalog_id: '', option1: String(av.option1 || '').slice(0, 50), option2: String(av.option2 || '').slice(0, 50), sku: '', price: proto.price || '', compare_at: proto.compare_at || '', stock: proto.stock || '', barcode: '', image: '', image_full: '' }));
       } else {
         toast('La IA propuso ' + r.variants.length + ' variantes y tienes ' + realRows.length + ': no cambié las variantes', true);
       }
@@ -951,6 +1050,18 @@ window.vpListados = (function () {
       renderTemplates(); renderList();
     } catch (e) { toast(e.message || String(e), true); }
   }
+  // First time a TikTok dropdown value shows up untranslated: ask once for
+  // the Spanish word, save it catalog-wide (prod_translate_save), re-render.
+  async function translateAttribute(fieldKey, fieldLabel, english) {
+    const spanish = (prompt('¿Cómo se dice «' + english + '» en español? (campo: ' + fieldLabel + ')') || '').trim();
+    if (!spanish) return;
+    try {
+      const res = await VP.post({ action: 'prod_translate_save', field_key: fieldKey, field_label: fieldLabel, english: english, spanish: spanish });
+      boot.translations = res.translations;
+      toast('✓ Traducción guardada');
+      renderEditor();
+    } catch (e) { toast(e.message || String(e), true); }
+  }
   async function toggleTemplate(id, active) {
     try {
       await VP.post({ action: 'prod_template_toggle', template_id: id, active: active });
@@ -1025,8 +1136,8 @@ window.vpListados = (function () {
 
   return {
     tab, load, renderList, open, close, save, archiveToggle, selectAllVisible, clearSel, exportDialog,
-    addVariant, removeVariant, fillDown, combos, uploadImgs, uploadVariantImg, moveImg, removeImg,
-    pasteImg, useCatalogPhotos, pickFromArchivos, pickParent, unlinkParent, runAi, undoAi,
-    readTemplate, saveTemplate, toggleTemplate, saveSettings, preflight,
+    addVariant, removeVariant, fillDown, combos, uploadImgs, uploadVariantImg, pickVariantImg, moveImg, removeImg,
+    pasteImg, useCatalogPhotos, pickFromArchivos, pickParent, unlinkParent, runAi, undoAi, setViewMode,
+    readTemplate, saveTemplate, toggleTemplate, saveSettings, preflight, translateAttribute,
   };
 })();
