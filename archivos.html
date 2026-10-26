@@ -142,6 +142,7 @@
 <script>
   (async function () {
     await VP.ensureToken();
+    VP.requirePage('archivos');
     VP.mountNav('archivos');
   })();
 </script>
