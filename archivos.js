@@ -192,7 +192,7 @@ window.vpArchivos = (function () {
       (f.id !== 'root' ? ' <button class="ls-mini" onclick="vpArchivos.renameFolder()">Renombrar</button>' : '');
 
     const folders = data.folders.map(x => '<div class="ar-folder-wrap"><input type="checkbox" class="ar-fcheck" data-fcheck="' + esc(x.id) + '"' + (selectedFolders.has(x.id) ? ' checked' : '') + '>' +
-      '<button class="ar-folder" onclick="vpArchivos.open(\'' + esc(x.id) + '\')">' + (x.public ? '📁' : '🔒') + ' ' + esc(x.name) + '<small>' + x.files + ' archivo' + (x.files !== 1 ? 's' : '') + '</small></button></div>').join('');
+      '<button class="ar-folder" data-folder-id="' + esc(x.id) + '" onclick="vpArchivos.open(\'' + esc(x.id) + '\')">' + (x.public ? '📁' : '🔒') + ' ' + esc(x.name) + '<small>' + x.files + ' archivo' + (x.files !== 1 ? 's' : '') + '</small></button></div>').join('');
     const files = data.files.map(x => tileFile(x, false)).join('');
     grid.innerHTML = (folders ? '<div class="ar-folders">' + folders + '</div>' : '') +
       (files ? '<div class="ar-files">' + files + '</div>' : '<div class="ar-drop-hint">Arrastra archivos aquí o toca <b>Subir</b>.<br><small>Fotos, videos, PDF… hasta 4 GB por archivo.</small></div>');
@@ -418,6 +418,28 @@ window.vpArchivos = (function () {
       if (!f) { e.preventDefault(); return; }
       e.dataTransfer.effectAllowed = 'copy';
       e.dataTransfer.setData('application/x-vp-file', JSON.stringify({ id: f.id, name: f.name, thumb_url: f.thumb_url }));
+    });
+    // Drag a tile straight onto an existing folder tile -> move it there
+    // immediately (unlike the drop strip, this has no undo step; it's a
+    // direct move, same as the existing "Mover" button).
+    grid.addEventListener('dragover', e => {
+      const fb = e.target.closest('[data-folder-id]');
+      if (fb && Array.from(e.dataTransfer.types || []).indexOf('application/x-vp-file') >= 0) { e.preventDefault(); fb.classList.add('drag-over'); }
+    });
+    grid.addEventListener('dragleave', e => {
+      const fb = e.target.closest('[data-folder-id]');
+      if (fb && !fb.contains(e.relatedTarget)) fb.classList.remove('drag-over');
+    });
+    grid.addEventListener('drop', async e => {
+      const fb = e.target.closest('[data-folder-id]');
+      if (!fb) return;
+      const raw = e.dataTransfer.getData('application/x-vp-file');
+      if (!raw) return;
+      e.preventDefault();
+      fb.classList.remove('drag-over');
+      let f; try { f = JSON.parse(raw); } catch (err) { return; }
+      try { await api('/api/move', { method: 'POST', body: { file_ids: [f.id], to: fb.dataset.folderId } }); toast('✓ Movido a la carpeta'); refresh(); }
+      catch (err) { toast(err.message, true); }
     });
     const strip = document.getElementById('ar-dropstrip');
     strip.addEventListener('dragover', e => { if (Array.from(e.dataTransfer.types || []).indexOf('application/x-vp-file') >= 0) e.preventDefault(); });
