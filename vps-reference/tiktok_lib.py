@@ -24,6 +24,7 @@ COLUMN_MAP = {
     "city":        "City",
     "zip":         "Zipcode",
     "created_time": "Created Time",
+    "seller_sku":  "Seller SKU",
 }
 
 PADDING            = [107, 2, 100, 5]
