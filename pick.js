@@ -333,21 +333,28 @@
   function markDirty() { S.dirty = true; updateHint(); refreshSubmit(); }
 
   // ── Load / save ──────────────────────────────────────────────────────────
+  function pickQs() {
+    const orderIds = selected.order_ids || [];
+    const tt = [];
+    orderIds.filter(o => o.channel === 'TikTok').forEach(o => String(o.id).split('+').forEach(x => { const d = x.replace(/\D/g, ''); if (d && tt.indexOf(d) < 0) tt.push(d); }));
+    const addons = [];
+    orderIds.filter(o => o.channel !== 'TikTok').concat(typeof selectedAddons !== 'undefined' ? selectedAddons : []).forEach(o => {
+      if (o && o.id && !addons.some(a => String(a.id) === String(o.id))) addons.push({ id: String(o.id), channel: o.channel || '' });
+    });
+    const q = qcRowOf(curTracking());
+    return 'action=pick_lines&tracking_id=' + enc(curTracking()) + '&ids=' + enc(tt.join(',')) +
+      '&addons=' + enc(addons.map(a => (a.channel ? a.channel + ':' : '') + a.id).join(',')) +
+      '&saved=' + (q && q['Pick At'] ? '1' : '0');
+  }
+
   async function load() {
     if (S.loading || typeof selected === 'undefined' || !selected) return;
     S.loading = true; S.error = ''; renderSection();
     const gen = typeof captureGen !== 'undefined' ? captureGen : 0;
     try {
-      const orderIds = selected.order_ids || [];
-      const tt = [];
-      orderIds.filter(o => o.channel === 'TikTok').forEach(o => String(o.id).split('+').forEach(x => { const d = x.replace(/\D/g, ''); if (d && tt.indexOf(d) < 0) tt.push(d); }));
-      const addons = [];
-      orderIds.filter(o => o.channel !== 'TikTok').concat(typeof selectedAddons !== 'undefined' ? selectedAddons : []).forEach(o => {
-        if (o && o.id && !addons.some(a => String(a.id) === String(o.id))) addons.push({ id: String(o.id), channel: o.channel || '' });
-      });
-      const qs = 'action=pick_lines&tracking_id=' + enc(curTracking()) + '&ids=' + enc(tt.join(',')) +
-        '&addons=' + enc(addons.map(a => (a.channel ? a.channel + ':' : '') + a.id).join(','));
-      const res = await VP.get(qs);
+      const qs = pickQs();
+      const res = await (S.pre && S.pre.qs === qs ? S.pre.p : VP.get(qs));
+      S.pre = null;
       if (gen !== (typeof captureGen !== 'undefined' ? captureGen : 0)) return;   // another order was opened meanwhile
       if (res.flags) Object.assign(S.flags, res.flags);
       const saved = res.saved || {};
@@ -364,6 +371,7 @@
       S.sessionOpen = new Date().toISOString();
       S.loaded = true; S.dirty = false; S.expanded = true;
     } catch (e) {
+      S.pre = null;
       S.error = 'No se pudieron cargar los productos: ' + (e.message || e);   // backend not updated yet, or no connection: press the button to retry
     } finally {
       S.loading = false;
@@ -563,6 +571,8 @@
     resetState();
     const standaloneMay = (shipment.order_ids || []).length === 1 && shipment.order_ids[0].channel === 'Mayorista' && /^MAY-\d+$/.test(shipment.tracking_id || '');
     S.visible = !standaloneMay;   // a standalone wholesale order already shows its own contents list
+    S.pre = null;
+    if (S.visible && S.flags.pickListEnabled) { try { const q = pickQs(); S.pre = { qs: q, p: VP.get(q) }; S.pre.p.catch(() => {}); } catch (e) { S.pre = null; } }   // loads silently in the background; the button just shows it
     renderSection(); updateHint(); refreshSubmit();
   };
   PK.onClose = function () {
