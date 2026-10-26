@@ -84,7 +84,9 @@ const PROD_ATTRIBUTE_SCHEMA = {
 // ─── Routing ────────────────────────────────────────────────────────────────
 
 function prodDispatchGet(action, e, identity) {
-  if (!requireAdmin(identity.role)) return jsonResponse({ error: 'unauthorized' });
+  // Productos scope opens the whole page; Archivos scope only needs the file-usage lookup.
+  const allowed = hasScope(identity, 'productos') || (action === 'prod_file_usage' && hasScope(identity, 'archivos'));
+  if (!allowed) return jsonResponse({ error: 'unauthorized' });
   try {
     if (action === 'prod_bootstrap') return prodBootstrapAction_();
     if (action === 'prod_template_file') return prodTemplateFileAction_(e);
@@ -98,7 +100,7 @@ function prodDispatchGet(action, e, identity) {
 }
 
 function prodDispatchPost(action, body, identity) {
-  if (!requireAdmin(identity.role)) return jsonResponse({ error: 'unauthorized' });
+  if (!hasScope(identity, 'productos')) return jsonResponse({ error: 'unauthorized' });
   try {
     // slow, no sheet writes -> outside the global lock
     if (action === 'prod_ai') return prodWithAudit_(() => prodAiAction_(body));
