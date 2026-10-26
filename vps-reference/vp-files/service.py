@@ -282,14 +282,14 @@ def list_folder(folder: str = "root", authorization: str = Header(None)):
         f = folder_row(con, folder)
         if not f or f["trashed_at"]:
             raise HTTPException(404, "Carpeta no encontrada")
-        folders = con.execute("SELECT f.*, (SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id AND x.trashed_at IS NULL) AS n "
-                              "FROM folders f WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
+        folders = con.execute("SELECT * FROM folders WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
         files = con.execute("SELECT * FROM files WHERE folder_id=? AND trashed_at IS NULL ORDER BY uploaded_at DESC", (folder,)).fetchall()
         cache = {}
         return {
             "folder": {"id": f["id"], "name": f["name"], "public": bool(f["public"]), "effective_public": is_public(con, f["id"])},
             "path": folder_path(con, folder),
-            "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]), "files": r["n"],
+            "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]),
+                         "files": folder_file_count(con, r["id"]), "subfolders": folder_subfolder_count(con, r["id"]),
                          "created_by": r["created_by"], "created_at": r["created_at"]} for r in folders],
             "files": [file_out(con, r, cache) for r in files],
         }
@@ -444,6 +444,19 @@ def _descendants(con, fid):
         out.append(cur)
         stack.extend(r["id"] for r in con.execute("SELECT id FROM folders WHERE parent_id=?", (cur,)).fetchall())
     return out
+
+
+def folder_file_count(con, fid):
+    # recursive: a folder's count includes files sitting in its subfolders,
+    # not just direct children (Vel: "0 archivos" was wrong when the 8
+    # photos were one level down).
+    ids = _descendants(con, fid)
+    q = ",".join("?" * len(ids))
+    return con.execute(f"SELECT COUNT(*) FROM files WHERE folder_id IN ({q}) AND trashed_at IS NULL", ids).fetchone()[0]
+
+
+def folder_subfolder_count(con, fid):
+    return con.execute("SELECT COUNT(*) FROM folders WHERE parent_id=? AND trashed_at IS NULL", (fid,)).fetchone()[0]
 
 
 @app.post("/api/move")
