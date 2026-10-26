@@ -44,6 +44,11 @@
     .ar-drop-hint { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
     .ar-selbar { position: sticky; top: 56px; z-index: 40; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
     .ar-selbar .grow { flex: 1; font-size: 13px; font-weight: 600; }
+    .cp-rows { max-height: 50vh; overflow-y: auto; }
+    .cp-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 0.5px solid var(--border); font-size: 12.5px; }
+    .cp-row img { width: 36px; height: 36px; object-fit: cover; border-radius: 6px; flex: 0 0 auto; }
+    .cp-name { flex: 1; min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cp-variant { width: 140px; padding: 5px 8px; font-size: 12px; }
     .ar-dropstrip { margin-bottom: 12px; }
     .ar-ds-empty { border: 1.5px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 14px; text-align: center; font-size: 12.5px; color: var(--text-faint); }
     .ar-ds-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface); border: 1.5px dashed #1f8a4c; border-radius: var(--radius-lg); padding: 10px 14px; }
@@ -96,6 +101,7 @@
     <button class="btn" id="ar-sel-link" onclick="vpArchivos.linkSelected()">Copiar enlace</button>
     <button class="btn" id="ar-sel-rename" onclick="vpArchivos.renameSelected()">Renombrar</button>
     <button class="btn" onclick="vpArchivos.moveSelected()">Mover</button>
+    <button class="btn btn-primary" id="ar-sel-product" onclick="vpArchivos.createProduct()">Crear producto con fotos seleccionadas</button>
     <button class="btn btn-danger" onclick="vpArchivos.trashSelected()">Papelera</button>
     <button class="ls-mini" onclick="vpArchivos.clearSel()">✕</button>
   </div>
