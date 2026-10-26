@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-25.4';   // pick list speed
+const SCRIPT_VERSION = '2026-10-25.4';   // productos: fichas, exportar TikTok/Shopify, IA, SKU matching
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -370,7 +370,8 @@ function doGet(e) {
     // Empacar pick list
     if (action === 'pick_lines') return pickLinesAction(e);
     if (action === 'catalog_list') return catalogListAction(e);
-    if (action === 'catalog_list') return catalogListAction(e);
+    // Productos: fichas, plantillas, exportar, IA -- everything lives in products.gs
+    if (String(action).indexOf('prod_') === 0) return prodDispatchGet(action, e, identity);
     if (action === 'empacar_settings') return empacarSettingsGetAction(e, identity);
     if (action === 'batch_lines') return batchLinesAction(e);
     if (action === 'pack_stats') return requireAdmin(role) ? packStatsAction(e) : jsonResponse({ error: 'unauthorized' });
@@ -927,6 +928,8 @@ function doPost(e) {
     _currentIdentity = identity; // read by logAudit() -- see audit log section
     tmark('auth_ms', _tAuth);
     if (!serviceActionAllowed(identity, action)) { flushAudit(); return jsonResponse({ error: 'unauthorized' }); }
+    // Productos (products.gs) takes the write lock itself, so slow AI calls never block other saves.
+    if (String(action).indexOf('prod_') === 0) return prodDispatchPost(action, body, identity);
     return withWriteLock(function () {
       const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
@@ -3087,6 +3090,22 @@ function resolveLineItemsBatch(allLineItems) {
       return;
     }
 
+    // ─── Step 1b: Seller SKU = Your SKU (products created in Productos) ──
+    // The SKU ID is new (first order of a new listing) but the seller SKU
+    // matches a catalog variant -> link it and remember the SKU ID.
+    const sellerSku = String(item.seller_sku || '').trim().toUpperCase();
+    if (sellerSku) {
+      const bySku = variants._yourSku || (variants._yourSku = prodYourSkuIndex_(vData, vHeaders, variants));
+      const sv = bySku[sellerSku];
+      if (sv) {
+        resultMap[skuId] = sv.catalogId;
+        skuToVariant[skuId] = sv;
+        if (!skuAdditions[sv.rowIndex]) skuAdditions[sv.rowIndex] = [];
+        skuAdditions[sv.rowIndex].push(skuId);
+        return;
+      }
+    }
+
     // ─── Step 2: Name + Variation exact match ─────────────────────
     const nameVarKey = productName + '||' + variationName;
     if (nameVarToVariant[nameVarKey]) {
@@ -3525,6 +3544,7 @@ function importShopifyOrder(body) {
       product:   li.product || li.title || '',
       variation: li.variation || li.variant_title || '',
       qty:       li.qty || li.quantity || 1,
+      seller_sku: li.sku || li.seller_sku || '',   // Shopify SKU = Your SKU from Productos -> links by SKU
     }));
     const skuToCatalogId = allLineItems.length ? resolveLineItemsBatch(allLineItems) : {};
 
