@@ -11,11 +11,20 @@ window.vpArchivos = (function () {
 
   let folderId = 'root';
   let pendingFolder = [];   // [{id, name, thumb_url}] -- photos dragged in, not yet saved to a new folder
+  let lastClickedFile = null;   // for shift-click range select
   let sortOrder = 'new';    // 'new' | 'old'
   let groupBy = 'none';     // 'none' | 'used' | 'unused'
   let usageMap = null;      // url -> ['tiktok','shopify'] -- from Apps Script, cached per page load
 
+  // TODO-CLEANUP (usage badges, disabled 2026-10-26): feature is built but
+  // turned off for now. To re-enable: remove the early `return {}` below.
+  // To actually clean this up later: delete loadUsageMap_/usageOf/
+  // usageBadgeHtml/markFolderUsage_, the .ar-tile--*/.ar-folder--*/.ar-usage-*
+  // CSS in archivos.html, the usedCls/usageBadgeHtml() calls in tileFile(),
+  // the markFolderUsage_() call in render(), and prodFileUsageAction_ +
+  // its GET route in products.gs if nothing else ends up using it.
   async function loadUsageMap_() {
+    usageMap = {}; return usageMap;   // DISABLED -- see TODO-CLEANUP above
     if (usageMap) return usageMap;
     try { usageMap = (await VP.get('action=prod_file_usage')).usage || {}; }
     catch (e) { usageMap = {}; }
@@ -318,33 +327,44 @@ window.vpArchivos = (function () {
   function createProduct() {
     const files = Array.from(selected).map(id => fileById(id)).filter(Boolean);
     if (!files.length) return;
-    const state = {}; // id -> { listing: bool, variantName: string }
-    files.forEach(f => { state[f.id] = { listing: true, variantName: '' }; });
-    const row = f => '<div class="cp-row" data-id="' + esc(f.id) + '">' +
-      '<img src="' + esc(f.thumb_url) + '" alt="">' +
-      '<span class="cp-name">' + esc(f.name) + '</span>' +
-      '<label><input type="checkbox" data-cp-listing="' + esc(f.id) + '" checked> Foto del listado</label>' +
-      '<input type="text" class="ls-input cp-variant" data-cp-variant="' + esc(f.id) + '" placeholder="Variante (opcional), ej. Rojo">' +
-      '</div>';
+    // role: 'listing' | 'variant' | 'both' -- click the photo itself to cycle
+    // through roles instead of separate checkbox + textbox controls.
+    const state = {};
+    files.forEach(f => { state[f.id] = { role: 'listing', variantName: '' }; });
+    const roleLabel = { listing: 'Listado', variant: 'Variante', both: 'Ambas' };
+    const tile = f => {
+      const s = state[f.id];
+      return '<div class="cp-tile" data-id="' + esc(f.id) + '">' +
+        '<img src="' + esc(f.thumb_url) + '" alt="">' +
+        '<button type="button" class="cp-role cp-role--' + s.role + '" data-cp-role="' + esc(f.id) + '">' + roleLabel[s.role] + '</button>' +
+        (s.role !== 'listing' ? '<input type="text" class="cp-variant" data-cp-variant="' + esc(f.id) + '" placeholder="Nombre de variante" value="' + esc(s.variantName) + '">' : '') +
+        '</div>';
+    };
+    const paintTiles = () => { m.el.querySelector('#cp-tiles').innerHTML = files.map(tile).join(''); };
     const m = VP.showModal('<div class="modal-title" style="margin-bottom:6px">Crear producto</div>' +
-      '<div class="ls-help" style="margin-bottom:10px">Marca «Foto del listado» para la galería principal (máx. 9). Escribe una variante si la foto es de una variante específica (puede ser ambas).</div>' +
+      '<div class="ls-help" style="margin-bottom:10px">Toca una foto para cambiar su uso: <b>Listado</b> (galería principal, máx. 9), <b>Variante</b> (ej. color) o <b>Ambas</b>.</div>' +
       '<label class="ls-field"><span class="ls-label">Nombre de la opción 1 (ej. Color)</span><input type="text" class="ls-input" id="cp-opt1"></label>' +
-      '<div class="cp-rows">' + files.map(row).join('') + '</div>' +
-      '<div class="ls-ai-actions" style="margin-top:12px"><button class="btn btn-primary" id="cp-go">Crear producto</button></div>', { maxWidth: '620px' });
+      '<div class="cp-tiles" id="cp-tiles"></div>' +
+      '<div class="ls-ai-actions" style="margin-top:12px"><button class="btn btn-primary" id="cp-go">Crear producto</button></div>', { maxWidth: '640px' });
+    paintTiles();
+    m.el.addEventListener('click', e => {
+      const b = e.target.closest('[data-cp-role]');
+      if (!b) return;
+      const s = state[b.dataset.cpRole];
+      s.role = s.role === 'listing' ? 'variant' : s.role === 'variant' ? 'both' : 'listing';
+      paintTiles();
+    });
     m.el.addEventListener('input', e => {
-      if (e.target.dataset.cpListing !== undefined) state[e.target.dataset.cpListing].listing = e.target.checked;
       if (e.target.dataset.cpVariant !== undefined) state[e.target.dataset.cpVariant].variantName = e.target.value;
     });
-    m.el.addEventListener('change', e => {
-      if (e.target.dataset.cpListing !== undefined) state[e.target.dataset.cpListing].listing = e.target.checked;
-    });
     m.el.querySelector('#cp-go').onclick = () => {
-      const listingCount = Object.values(state).filter(s => s.listing).length;
+      const listingCount = files.filter(f => state[f.id].role !== 'variant').length;
       if (listingCount > 9) { toast('Máximo 9 fotos para el listado', true); return; }
-      const images = files.filter(f => state[f.id].listing).map(f => ({ thumb: f.thumb_url, full: f.web_url || f.url }));
+      const images = files.filter(f => state[f.id].role !== 'variant').map(f => ({ thumb: f.thumb_url, full: f.web_url || f.url }));
       const byVariant = {};
       files.forEach(f => {
-        const name = state[f.id].variantName.trim();
+        const s = state[f.id];
+        const name = s.role === 'listing' ? '' : s.variantName.trim();
         if (!name) return;
         if (!byVariant[name]) byVariant[name] = { thumb: f.thumb_url, full: f.web_url || f.url };
       });
@@ -498,7 +518,7 @@ window.vpArchivos = (function () {
     const grid = document.getElementById('ar-grid');
     grid.addEventListener('change', e => {
       const c = e.target.closest('[data-check]');
-      if (c) { if (c.checked) selected.add(c.dataset.check); else selected.delete(c.dataset.check); c.closest('.ar-tile').classList.toggle('is-sel', c.checked); renderSel(); return; }
+      if (c) { if (c.checked) selected.add(c.dataset.check); else selected.delete(c.dataset.check); c.closest('.ar-tile').classList.toggle('is-sel', c.checked); lastClickedFile = c.dataset.check; renderSel(); return; }
       const fc = e.target.closest('[data-fcheck]');
       if (fc) { if (fc.checked) selectedFolders.add(fc.dataset.fcheck); else selectedFolders.delete(fc.dataset.fcheck); renderSel(); }
     });
@@ -506,12 +526,22 @@ window.vpArchivos = (function () {
       if (e.target.closest('input')) return;
       const t = e.target.closest('[data-file]');
       if (!t) return;
+      if (e.shiftKey && lastClickedFile) {
+        const tiles = Array.from(grid.querySelectorAll('[data-file]'));
+        const ids = tiles.map(x => x.dataset.file);
+        const a = ids.indexOf(lastClickedFile), b = ids.indexOf(t.dataset.file);
+        if (a >= 0 && b >= 0) { ids.slice(Math.min(a, b), Math.max(a, b) + 1).forEach(id => selected.add(id)); render(); return; }
+      }
       if (selected.size) {   // while selecting, a tap toggles instead of opening
         const id = t.dataset.file;
         if (selected.has(id)) selected.delete(id); else selected.add(id);
+        lastClickedFile = id;
         render(); return;
       }
       preview(t.dataset.file);
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && (selected.size || selectedFolders.size)) { selected.clear(); selectedFolders.clear(); lastClickedFile = null; render(); }
     });
     // Drag a tile from the grid onto the drop strip -> add to pendingFolder.
     // Uses a custom drag type (not "Files") so it never collides with the
