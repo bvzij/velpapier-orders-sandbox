@@ -366,7 +366,7 @@ window.vpArchivos = (function () {
         const s = state[f.id];
         const name = s.role === 'listing' ? '' : s.variantName.trim();
         if (!name) return;
-        if (!byVariant[name]) byVariant[name] = { thumb: f.thumb_url, full: f.web_url || f.url };
+        if (!byVariant[name]) byVariant[name] = { image: f.thumb_url, image_full: f.web_url || f.url };
       });
       const variants = Object.keys(byVariant).map(name => Object.assign({ option1: name, sku: '', price: '', stock: '' }, byVariant[name]));
       const payload = { images: images, option1_name: m.el.querySelector('#cp-opt1').value.trim(), variants: variants };
