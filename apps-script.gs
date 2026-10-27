@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-27.3';
+const SCRIPT_VERSION = '2026-10-27.4';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -372,6 +372,7 @@ function doGet(e) {
     if (action === 'catalog_list') return catalogListAction(e);
     // Productos: fichas, plantillas, exportar, IA -- everything lives in products.gs
     if (String(action).indexOf('prod_') === 0) return prodDispatchGet(action, e, identity);
+    if (String(action).indexOf('cli_') === 0) return cliDispatchGet(action, e, identity);
     if (action === 'empacar_settings') return empacarSettingsGetAction(e, identity);
     if (action === 'batch_lines') return batchLinesAction(e);
     if (action === 'pack_stats') return requireAdmin(role) ? packStatsAction(e) : jsonResponse({ error: 'unauthorized' });
@@ -973,6 +974,8 @@ function doPost(e) {
 }
 
 function dispatchPostAction(action, body, role) {
+    const identity = _currentIdentity;
+    if (String(action).indexOf('cli_') === 0) return cliDispatchPost(action, body, identity);
     if (action === 'mayoreo_save_settings') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveSettingsAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_save_cliente') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveClienteAction(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'mayoreo_save_order') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveOrderSynced(body) : jsonResponse({ error: 'unauthorized' });
@@ -2194,6 +2197,7 @@ function requireAdmin(role) {
 const SCOPEABLE_PAGES = [
   { id: 'productos', label: 'Productos' },
   { id: 'archivos',  label: 'Archivos' },
+  { id: 'clientes',  label: 'Clientes' },
 ];
 
 let _scopesMemo = {};
