@@ -285,6 +285,7 @@ window.VP = (function () {
   const NAV = [
     { id: 'inicio',    href: 'index.html',     label: 'Inicio',    adminOnly: true },
     { id: 'pedidos',   href: 'pedidos.html',   label: 'Pedidos' },
+    { id: 'clientes',  href: 'clientes.html',  label: 'Clientes', scope: 'clientes' },
     { id: 'empacar',   href: 'qc.html',        label: 'Empacar' },
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
