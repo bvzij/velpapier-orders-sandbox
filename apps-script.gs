@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-27.2';
+const SCRIPT_VERSION = '2026-10-27.3';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -999,7 +999,8 @@ function dispatchPostAction(action, body, role) {
     if (action === 'add_alias') return addAlias(body);
     if (action === 'stamp_customer_ids') { stampCustomerIDs(); return jsonResponse({ result: 'done' }); }
     if (action === 'update_order') return updateOrder(body);
-    if (action === 'delete_order') return deleteOrder(body);
+    if (action === 'delete_order_preview') return requireAdmin(role) ? deleteOrderPreview(body) : jsonResponse({ error: 'unauthorized' });
+    if (action === 'delete_order') return requireAdmin(role) ? deleteOrder(body) : jsonResponse({ error: 'unauthorized' });
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
@@ -1627,6 +1628,65 @@ function updateOrder(body) {
   return jsonResponse({ result: 'updated', order_id: body.order_id, status: body.fields ? body.fields['Status'] : undefined });
 }
 
+// Looks up what deleting this order would touch, without writing anything.
+// Frontend calls this first and shows the warning modal if qc_photos > 0
+// or linked_orders is non-empty; confirm then calls delete_order for real.
+function deleteOrderPreview(body) {
+  const sheet = getOrdersSheet();
+  const rowIndex = findOrderRow(sheet, body.order_id);
+  if (!rowIndex) return jsonResponse({ error: 'Order not found' });
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rowValues = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  const snapshot = {};
+  headers.forEach((h, i) => { snapshot[h] = rowValues[i]; });
+
+  const trackingId = snapshot['Tracking ID'];
+  const qcPhotos = trackingId ? countQCPhotosForTracking(trackingId) : { content: 0, box: 0 };
+  const linkedOrders = trackingId ? findAnotadoOrdersLinkedTo(sheet, headers, trackingId, body.order_id) : [];
+
+  return jsonResponse({
+    order_id: body.order_id,
+    channel: snapshot['Channel'],
+    status: snapshot['Status'],
+    tracking_id: trackingId || '',
+    qc_photos: qcPhotos,
+    linked_orders: linkedOrders,
+  });
+}
+
+// Counts photos already saved against a Tracking ID's QC row, if any.
+function countQCPhotosForTracking(trackingId) {
+  const qcSheet = getQCSheet();
+  const h = qcSheet.getRange(1, 1, 1, qcSheet.getLastColumn()).getValues()[0];
+  const iTid = h.indexOf('Tracking ID');
+  if (iTid < 0) return { content: 0, box: 0 };
+  const row = findRowByColumn(qcSheet, colLetter(iTid), trackingId);
+  if (!row) return { content: 0, box: 0 };
+  const vals = qcSheet.getRange(row, 1, 1, h.length).getValues()[0];
+  const count = prefix => [1, 2, 3, 4, 5].filter(n => vals[h.indexOf(prefix + n)]).length;
+  return { content: count('Content'), box: count('Box') };
+}
+
+// Finds other orders Anotado onto this Tracking ID (riding inside the
+// same TikTok shipment), excluding the order being deleted itself.
+function findAnotadoOrdersLinkedTo(sheet, headers, trackingId, excludeOrderId) {
+  const iOrderId = headers.indexOf('Order ID');
+  const iLink = headers.indexOf('Linked Shipment');
+  const iStatus = headers.indexOf('Status');
+  const iUsername = headers.indexOf('Primary Username');
+  if (iLink < 0) return [];
+  const data = sheet.getDataRange().getValues();
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[iOrderId]) === String(excludeOrderId)) continue;
+    if (String(row[iLink]) !== String(trackingId)) continue;
+    out.push({ order_id: row[iOrderId], status: row[iStatus], username: row[iUsername] });
+  }
+  return out;
+}
+
 function deleteOrder(body) {
   const sheet = getOrdersSheet();
   const rowIndex = findOrderRow(sheet, body.order_id);
@@ -1649,8 +1709,80 @@ function deleteOrder(body) {
   // order that no longer exists and nothing in the UI could clear it.
   const matchesClosed = closePendingMatchesForShopifyOrder(snapshot['Shopify Order ID']);
 
-  logAuditEvent('delete_order', 'Order', body.order_id, { deleted_row: snapshot, matches_closed: matchesClosed });
-  return jsonResponse({ result: 'deleted', order_id: body.order_id, matches_closed: matchesClosed });
+  // TikTok Import History keeps its own row per Order ID + SKU ID so the
+  // daily import can tell "already seen" from "new". Deleting the order
+  // without clearing those rows would make the same CSV/PDF re-import as
+  // a silent no-op (every row looks already-imported) instead of
+  // recreating the order -- so remove every History row for this Order ID.
+  const historyRemoved = removeFromTikTokImportHistory(body.order_id);
+
+  // Shopify/Manual orders Anotado on this shipment ride inside the same
+  // package physically, not inside this Orders row -- they must stay as
+  // real orders, just released back to Pagado with no dangling link to a
+  // Tracking ID that no longer has an Orders row behind it.
+  const unlinked = unlinkAnotadoOrdersFor(sheet, headers, snapshot['Tracking ID'], body.order_id);
+
+  logAuditEvent('delete_order', 'Order', body.order_id, {
+    deleted_row: snapshot,
+    matches_closed: matchesClosed,
+    history_removed: historyRemoved,
+    unlinked_orders: unlinked,
+  });
+  return jsonResponse({
+    result: 'deleted',
+    order_id: body.order_id,
+    matches_closed: matchesClosed,
+    history_removed: historyRemoved,
+    unlinked_orders: unlinked,
+  });
+}
+
+// Removes every TikTok Import History row for this Order ID (there can be
+// several -- one per SKU ID), so the same CSV/PDF can be re-imported later
+// and will be treated as new rather than already-seen.
+function removeFromTikTokImportHistory(orderId) {
+  const hSheet = getTikTokImportHistorySheet();
+  if (!hSheet) return 0;
+  const data = hSheet.getDataRange().getValues();
+  if (data.length < 2) return 0;
+  const headers = data[0];
+  const iOrderId = headers.indexOf('Order ID');
+  if (iOrderId < 0) return 0;
+
+  // Delete bottom-up so earlier row indexes stay valid as rows are removed.
+  let removed = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    if (String(data[i][iOrderId]) === String(orderId)) {
+      hSheet.deleteRow(i + 1);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+// Releases Shopify/Manual orders Anotado onto this Tracking ID back to
+// Pagado, clearing Linked Shipment, since the shipment they were waiting
+// to ride inside no longer exists as an Orders row.
+function unlinkAnotadoOrdersFor(sheet, headers, trackingId, excludeOrderId) {
+  if (!trackingId) return [];
+  const iOrderId = headers.indexOf('Order ID');
+  const iLink = headers.indexOf('Linked Shipment');
+  const iStatus = headers.indexOf('Status');
+  if (iLink < 0 || iStatus < 0) return [];
+
+  const data = sheet.getDataRange().getValues();
+  const touched = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[iOrderId]) === String(excludeOrderId)) continue;
+    if (String(row[iLink]) !== String(trackingId)) continue;
+    const rowIndex = i + 1;
+    sheet.getRange(rowIndex, iStatus + 1).setValue('Pagado');
+    sheet.getRange(rowIndex, iLink + 1).setValue('');
+    logAudit('delete_order_unlink', 'Order', row[iOrderId], 'Status', row[iStatus], 'Pagado');
+    touched.push(row[iOrderId]);
+  }
+  return touched;
 }
 
 // Marks any still-Pending Shopify match rows for this Shopify Order ID as
