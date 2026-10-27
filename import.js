@@ -1577,6 +1577,55 @@ function resetSettings() {
   S.settings = JSON.parse(JSON.stringify(DEFAULTS));
   renderSettings();
 }
+
+// ── delete order (Ajustes) ──────────────────────────────────────────────
+async function deleteOrderPreview() {
+  const orderId = $('del-order-id').value.trim();
+  if (!orderId) return;
+  $('del-order-result').innerHTML = '<div class="imp-muted">Buscando…</div>';
+  try {
+    const r = await VP.post({ action: 'delete_order_preview', order_id: orderId });
+    renderDeletePreview(r);
+  } catch (e) {
+    $('del-order-result').innerHTML = `<div class="imp-muted">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderDeletePreview(r) {
+  const photoCount = (r.qc_photos.content || 0) + (r.qc_photos.box || 0);
+  const hasWarnings = photoCount > 0 || (r.linked_orders && r.linked_orders.length > 0);
+  let html = `<div class="modal-field"><div class="modal-field-label">Pedido</div>
+    <div class="modal-field-value">${esc(r.order_id)} · ${esc(r.channel || '')} · ${esc(r.status || '')}</div></div>`;
+
+  if (photoCount > 0) {
+    html += `<div class="modal-field" style="color:var(--amber)"><div class="modal-field-label">⚠ Fotos de QC guardadas</div>
+      <div class="modal-field-value">${r.qc_photos.content} de contenido, ${r.qc_photos.box} de caja — se perderán si continúas</div></div>`;
+  }
+  if (r.linked_orders && r.linked_orders.length > 0) {
+    const list = r.linked_orders.map(o => `${esc(o.order_id)} (${esc(o.username || '')}, ${esc(o.status)})`).join(', ');
+    html += `<div class="modal-field" style="color:var(--amber)"><div class="modal-field-label">⚠ Pedidos Anotado vinculados a este envío</div>
+      <div class="modal-field-value">${list} — pasarán a Pagado, sin vínculo</div></div>`;
+  }
+  if (!hasWarnings) {
+    html += `<div class="imp-muted">Sin fotos de QC ni pedidos vinculados.</div>`;
+  }
+  html += `<div class="imp-btns" style="margin-top:0.75rem">
+    <button class="imp-btn" style="background:var(--red,#c0392b);color:#fff" onclick="IMP.deleteOrderConfirm('${esc(r.order_id)}')">Eliminar definitivamente</button>
+  </div>`;
+  $('del-order-result').innerHTML = html;
+}
+
+async function deleteOrderConfirm(orderId) {
+  if (!confirm(`¿Eliminar el pedido ${orderId} por completo? Esta acción no se puede deshacer.`)) return;
+  try {
+    const r = await VP.post({ action: 'delete_order', order_id: orderId });
+    showToast(`✓ Pedido ${r.order_id} eliminado (historial: ${r.history_removed} fila(s), desvinculados: ${(r.unlinked_orders || []).length})`);
+    $('del-order-id').value = '';
+    $('del-order-result').innerHTML = '';
+  } catch (e) {
+    showToast('Error: ' + e.message, true);
+  }
+}
 async function testSlip() {
   const mode = $('set-test-mode').value;
   const s = readSettingsForm();
@@ -1862,6 +1911,7 @@ window.IMP = {
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   ffpOpen, ffpClose, ffpTest, ffpPrint,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
+  deleteOrderPreview, deleteOrderConfirm,
 };
 
 (async function init() {
