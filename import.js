@@ -250,12 +250,7 @@ async function startImport(data, opts) {
     $('matches-section').style.display = 'block';
     fetchCustomersForModal().then(() => renderMatches(lastMatches));
   }
-  const newC = data.new_customers || [];
-  if (newC.length) {
-    $('new-customers-list').innerHTML = newC.map(c => `<span class="new-customer-chip">✓ ${esc(c.username)}</span>`).join('');
-    $('new-customers-section').style.display = 'block';
-  }
-
+  
   if (!data.shipments_meta) {
     // TROUBLESHOOT: the VPS still runs the old service.py (no shipments_meta).
     // Redo the VPS step of the deploy guide. Meanwhile the old PDF works.
@@ -268,6 +263,7 @@ async function startImport(data, opts) {
 
   await loadContext();
   initSelections();
+  renderPendingNew();
   renderConfigure();
   if (opts.reopen) goReview(); else showImportModal();
   if (!opts.reopen) saveImportToHistory();
@@ -363,9 +359,12 @@ function infos() {
     const c = (S.ctx && S.ctx.shipments && S.ctx.shipments[m.tracking_id]) || {};
     const cust = c.customer_id || m.customer_id || '';
     let count = (c.shipment_count !== undefined && c.shipment_count !== null) ? c.shipment_count : m.shipment_count;
-    if (!cust || count === undefined) count = null;
+    // Customer not created yet (created when the PDF is generated): new customer, first shipment.
+    const pending = !cust && m.tier === 'pending_new';
+    if (pending) count = 0;
+    else if (!cust || count === undefined) count = null;
     return {
-      tid: m.tracking_id, username: m.username || '', cust, count,
+      pending, tid: m.tracking_id, username: m.username || '', cust, count,
       kind: count === null ? 'unknown' : count === 0 ? 'new' : 'existing',
       ship_by: c.ship_by || m.ship_by || '', deadline: m.deadline, slip: m.slip || {}, order_ids: m.order_ids || [],
       primary_username: c.primary_username || '',
@@ -466,11 +465,12 @@ function counts() {
   const custKind = {};
   list.forEach(i => { if (i.cust) custKind[i.cust] = i.kind; });
   const kinds = Object.values(custKind);
+  const pendingNames = new Set(list.filter(i => i.pending).map(i => normUser(i.username)));
   return {
     shipments: list.length,
-    newC: kinds.filter(k => k === 'new').length,
+    newC: kinds.filter(k => k === 'new').length + pendingNames.size,
     existingC: kinds.filter(k => k === 'existing').length,
-    unknownC: list.filter(i => !i.cust).length,
+    unknownC: list.filter(i => !i.cust && !i.pending).length,
     postcards: kinds.filter(k => k === 'existing').length,
   };
 }
@@ -989,11 +989,14 @@ async function generate(mode) {
     showError(`Elige a qué pedido de TikTok va ${plural(missing.length, 'el producto extra marcado', 'cada uno de los productos extra marcados')} (clientes con varios envíos).`);
     return;
   }
+  const dupLeft = unresolvedMatches();
+  if (dupLeft.length && !confirm(`Quedan ${plural(dupLeft.length, 'posible cliente duplicado sin resolver', 'posibles clientes duplicados sin resolver')} (${dupLeft.map(m => m.username).join(', ')}).\n\nSi continúas se crearán como clientes NUEVOS. ¿Continuar?`)) return;
   S.busy = true;
   renderConfigure();
   setProgress(true, 'Generando PDF…', 40);
   try {
     if (!S.pdfB64 || !S.csvB64) throw new Error('Faltan los archivos originales. Reabre la importación desde Historial.');
+    await commitPendingCustomers();
     const plan = buildPlan(mode);
     const sendPlan = Object.assign({}, plan);
     delete sendPlan.extrasByTid;
@@ -1019,6 +1022,46 @@ async function generate(mode) {
     showError('No se pudo generar el PDF: ' + e.message + (S.legacyPdf ? ' — Mientras tanto puedes usar el PDF anotado de la importación (botón abajo).' : ''));
     if (S.legacyPdf) $('configure').insertAdjacentHTML('afterbegin', legacyButtonsHtml());
   }
+}
+
+// ── deferred customer creation ────────────────────────────────────────────
+// The import (VPS) no longer creates customers. Possible duplicates are resolved
+// above; whatever is still new is created here, when the PDF is generated.
+function usernameHasCustomer(u) { return infos().some(i => i.cust && normUser(i.username) === normUser(u)); }
+function unresolvedMatches() { return ((S.result && S.result.possible_matches) || []).filter(m => !usernameHasCustomer(m.username)); }
+function matchToPayload(m) {
+  const e = m.enriched || {};
+  return { primary_username: e['Primary Username'] || m.username, first_name: e['First Name'] || '', surname: e['Surname'] || '',
+    street: e['Street + Number'] || '', city: e['City'] || '', state: e['State'] || '', zip: e['ZIP'] || '',
+    phone_partial: e['Phone Partial'] || '', initials: e['Initials (TT Format)'] || '' };
+}
+function pendingToCommit() {
+  const fresh = ((S.result && S.result.pending_new_customers) || []).filter(c => !usernameHasCustomer(c.primary_username));
+  return fresh.concat(unresolvedMatches().map(matchToPayload));
+}
+function renderPendingNew() {
+  const all = (S.result && S.result.pending_new_customers) || [];
+  const box = $('new-customers-section');
+  if (!all.length) { box.style.display = 'none'; return; }
+  $('new-customers-list').innerHTML = all.map(c => {
+    const done = usernameHasCustomer(c.primary_username);
+    return `<span class="new-customer-chip">${done ? '✓' : '🕓'} ${esc(c.primary_username)}</span>`;
+  }).join('');
+  box.style.display = 'block';
+}
+async function commitPendingCustomers() {
+  const list = pendingToCommit();
+  if (!list.length) return;
+  setProgress(true, 'Creando clientes nuevos…', 55);
+  const r = await VP.post({ action: 'import_commit_customers', customers: list });
+  if (r && r.error) throw new Error(r.error);
+  await loadContext();
+  initSelectionsKeep();
+  renderPendingNew();
+  const c = counts();
+  logFields({ 'New Customers': c.newC, 'Unknown Customers': c.unknownC });
+  const made = ((r && r.created) || []).filter(x => !x.existed).length;
+  if (made) showToast(`${plural(made, 'cliente nuevo creado', 'clientes nuevos creados')}`);
 }
 
 // Only what is REALLY printed becomes Anotado. Unprinted items stay as they were.
