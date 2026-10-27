@@ -17,7 +17,7 @@
   reflect();
 })();
 
-document.getElementById('aj-scan-duplicates').addEventListener('click', openDuplicatesModal);
+ddocument.getElementById('aj-scan-duplicates').addEventListener('click', () => { window.location.href = 'clientes.html'; });
 
 // Shared close-on-Escape for every modal on this page. Click-outside-to-close
 // is deliberately NOT used -- an accidental click just outside a modal (e.g.
