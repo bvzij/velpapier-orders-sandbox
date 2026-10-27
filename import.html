@@ -659,6 +659,14 @@
     <!-- ═══ AJUSTES ═══ -->
     <div class="imp-pane" id="pane-ajustes">
       <div id="settings-form" class="imp-muted">Cargando…</div>
+      <div class="imp-card">
+        <h3>Eliminar pedido <small>· borra el pedido y permite reimportar el CSV/PDF</small></h3>
+        <div class="imp-row">
+          <input type="text" id="del-order-id" placeholder="Order ID" style="flex:1;padding:7px 10px;font-size:13px;border:0.5px solid var(--border-strong);border-radius:var(--radius-sm)">
+          <button class="imp-btn" onclick="IMP.deleteOrderPreview()">Revisar</button>
+        </div>
+        <div id="del-order-result" style="margin-top:0.75rem"></div>
+      </div>
     </div>
 
   </div>
