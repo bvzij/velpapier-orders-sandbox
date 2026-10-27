@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
+  <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Clientes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* tabs */
+    .cl-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; border-bottom: 0.5px solid var(--border); padding-bottom: 10px; }
+    .cl-tab { background: none; border: 0.5px solid var(--border-strong); border-radius: 20px; padding: 6px 14px; font-size: 13px; font-weight: 500; font-family: inherit; color: var(--text-muted); cursor: pointer; }
+    .cl-tab:hover { background: var(--surface2); }
+    .cl-tab.is-active { background: var(--text); color: var(--surface); border-color: var(--text); }
+
+    /* toolbar + chips */
+    .cl-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .cl-search { flex: 1; min-width: 220px; padding: 9px 10px; font-size: 14px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--text); font-family: inherit; }
+    .cl-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .cl-chip { background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: 20px; padding: 4px 11px; font-size: 12px; font-family: inherit; color: var(--text-muted); cursor: pointer; }
+    .cl-chip small { color: var(--text-faint); margin-left: 3px; }
+    .cl-chip.is-active { background: var(--text); color: var(--surface); border-color: var(--text); }
+    .cl-chip.is-active small { color: inherit; opacity: .7; }
+    .cl-count { font-size: 12px; color: var(--text-faint); margin-bottom: 8px; }
+
+    /* list */
+    .cl-head, .cl-row { display: grid; grid-template-columns: minmax(180px, 2.2fr) minmax(110px, 1.2fr) 64px 64px 96px minmax(110px, 1.4fr); gap: 10px; align-items: center; padding: 9px 12px; }
+    .cl-head { font-size: 11px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+    .cl-row { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-md); margin-bottom: 5px; cursor: pointer; font-size: 13px; }
+    .cl-row:hover { background: var(--surface2); }
+    .cl-main { min-width: 0; }
+    .cl-main b { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cl-main small { display: block; color: var(--text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cl-loc { color: var(--text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cl-n { text-align: right; font-variant-numeric: tabular-nums; }
+    .cl-date { font-size: 12px; color: var(--text-muted); }
+    .cl-more { display: block; margin: 12px auto 0; }
+    @media (max-width: 760px) {
+      .cl-head { display: none; }
+      .cl-row { grid-template-columns: 1fr 52px 52px; }
+      .cl-row .cl-loc, .cl-row .cl-date, .cl-row .cl-tagcell { display: none; }
+    }
+
+    /* tags */
+    .cl-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 99px; margin: 0 4px 3px 0; background: var(--surface2); color: var(--text-muted); }
+    .cl-tag--vip { background: var(--purple-bg); color: var(--purple-text); }
+    .cl-tag--frecuente { background: var(--green-bg); color: var(--green-text); }
+    .cl-tag--problematico { background: var(--red-bg); color: var(--red-text); }
+
+    /* detail modal */
+    .cl-h { font-size: 20px; font-weight: 600; font-family: 'Fraunces', serif; margin-bottom: 2px; padding-right: 36px; }
+    .cl-sub { font-size: 12px; color: var(--text-faint); margin-bottom: 8px; }
+    .cl-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }
+    .cl-actions--left { justify-content: flex-start; margin: 10px 0 14px; }
+    .cl-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 12px 0; }
+    .cl-stat { background: var(--surface2); border-radius: var(--radius-md); padding: 8px 10px; }
+    .cl-stat span { display: block; font-size: 11px; color: var(--text-faint); }
+    .cl-stat b { font-size: 16px; font-weight: 600; }
+    .cl-info { border: 0.5px solid var(--border); border-radius: var(--radius-md); overflow: hidden; margin-bottom: 12px; }
+    .cl-info-row { display: grid; grid-template-columns: 110px 1fr; gap: 8px; padding: 6px 12px; font-size: 13px; border-bottom: 0.5px solid var(--border); }
+    .cl-info-row:last-child { border-bottom: none; }
+    .cl-info-row > span:first-child { color: var(--text-faint); }
+    .cl-info-row a { color: var(--blue-text); }
+    .cl-subtabs { display: flex; gap: 14px; border-bottom: 0.5px solid var(--border); margin-bottom: 8px; }
+    .cl-subtab { background: none; border: none; border-bottom: 2px solid transparent; padding: 6px 2px; font-size: 13px; font-family: inherit; color: var(--text-muted); cursor: pointer; }
+    .cl-subtab.is-active { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+    .cl-lrow { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 7px 2px; border-bottom: 0.5px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+    .cl-lrow:last-child { border-bottom: none; }
+    .cl-lrow small { color: var(--text-faint); font-size: 11px; }
+    .cl-mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+    .cl-ok { color: var(--green-text); }
+    .cl-warn { background: var(--amber-bg); color: var(--amber-text); border: 0.5px solid var(--amber-border); border-radius: var(--radius-md); padding: 10px 12px; font-size: 13px; margin: 10px 0; }
+    .cl-scroll { max-height: 46vh; overflow-y: auto; }
+
+    /* forms */
+    .cl-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+    .cl-form .form-group.full { grid-column: 1 / -1; }
+    .cl-form textarea { padding: 7px 10px; font-size: 13px; border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-family: inherit; width: 100%; min-height: 64px; resize: vertical; }
+    .cl-tagedit { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .cl-tagbtn { border: 0.5px solid var(--border-strong); background: var(--surface); border-radius: 99px; padding: 3px 10px; font-size: 12px; font-family: inherit; color: var(--text-muted); cursor: pointer; }
+    .cl-tagbtn.is-on { background: var(--text); color: var(--surface); border-color: var(--text); }
+    .cl-taginput { flex: 1; min-width: 120px; padding: 4px 8px; font-size: 12px; border: 0.5px solid var(--border-strong); border-radius: 99px; background: var(--surface); color: var(--text); font-family: inherit; }
+    @media (max-width: 640px) { .cl-form { grid-template-columns: 1fr; } }
+
+    /* merge compare */
+    .cl-cmp { border: 0.5px solid var(--border); border-radius: var(--radius-md); overflow: hidden; margin: 10px 0; }
+    .cl-cmp-row { display: grid; grid-template-columns: 100px 1fr 1fr; padding: 5px 12px; font-size: 12px; border-bottom: 0.5px solid var(--border); }
+    .cl-cmp-row:last-child { border-bottom: none; }
+    .cl-cmp-row > div:first-child { color: var(--text-faint); }
+    .cl-cmp-row > div { overflow-wrap: anywhere; padding-right: 6px; }
+    .cl-cmp-head { background: var(--surface2); font-weight: 600; }
+    .cl-keep { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0; font-size: 13px; }
+    .cl-keep label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+    .cl-pick { display: flex; justify-content: space-between; gap: 10px; align-items: center; width: 100%; text-align: left; background: none; border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 6px; cursor: pointer; font-family: inherit; color: var(--text); font-size: 13px; }
+    .cl-pick:hover { background: var(--surface2); }
+    .cl-pick small { color: var(--text-faint); }
+
+    /* dedup threshold row on the page */
+    .cl-thr { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--text-muted); flex-wrap: wrap; }
+    .cl-thr input[type=range] { flex: 1; min-width: 140px; max-width: 320px; }
+    .cl-empty { padding: 3rem 1rem; text-align: center; color: var(--text-muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<main class="vp-shell vp-shell--wide">
+  <section class="vp-hero" style="padding-bottom:1.25rem">
+    <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Clientes</h1>
+    <div class="vp-hero-date" id="cl-sub">Fichas, duplicados y fusiones</div>
+  </section>
+
+  <div class="cl-tabs" id="cl-tabs"></div>
+  <div id="cl-panel"><div class="cl-empty">Cargando…</div></div>
+</main>
+
+<div class="toast" id="toast"></div>
+<div id="modal-container"></div>
+
+<script src="common.js"></script>
+<script src="clientes.js"></script>
+</body>
+</html>
