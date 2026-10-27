@@ -6,7 +6,7 @@
 
 window.VP = (function () {
 
-  const API = 'https://script.google.com/macros/s/AKfycbyeywjfBWA0hFSy_3U3A2iYLE2TlPN22pBOELJ97N-FTAkgXkEAk6Af0aG1O3DjK8OjHw/exec';
+  const API = 'https://script.google.com/macros/s/AKfycby9_wvcACIMS-aVcNmJWatiRtbWFH8TvqWJFNnjNcPjZstsqOOc-QmFz4iIWGcu27pHvg/exec';
   const TOKEN_KEY = 'vp_token';
   const THEME_KEY = 'vp_theme';
   const ROLE_KEY  = 'vp_role';
