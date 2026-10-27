@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-27.1';
+const SCRIPT_VERSION = '2026-10-27.2';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -5927,6 +5927,30 @@ function dupInitials(c, first, sur) {
   return letters;
 }
 
+// Words that appear inside thousands of handles (first names, surnames, shop
+// words). Sharing one of these says nothing about two accounts being the same
+// person, so they never count as a shared username block. Add more as needed.
+const DUP_BLOCK_STOPWORDS = ['garcia', 'lopez', 'sanchez', 'martinez', 'hernandez', 'rodriguez', 'perez',
+  'gonzalez', 'ramirez', 'flores', 'torres', 'morales', 'vazquez', 'castillo', 'jimenez', 'reyes', 'gomez',
+  'mendoza', 'aguilar', 'moreno', 'romero', 'alvarez', 'guerrero', 'rivera', 'medina', 'vargas', 'castro',
+  'herrera', 'navarro', 'maria', 'carmen', 'guadalupe', 'fernanda', 'alejandra', 'daniela', 'ariana', 'karla',
+  'andrea', 'valeria', 'sofia', 'camila', 'paola', 'jessica', 'jennifer', 'ximena', 'brenda', 'monica',
+  'official', 'oficial', 'studio', 'store', 'shop', 'nails', 'joyeria', 'papeleria', 'crafts', 'handmade',
+  'design', 'diseno', 'travel', 'beauty', 'journal', 'boutique', 'tienda', 'ventas'];
+
+// The letter-only blocks (5+ letters) of a username, e.g. "xiomara_art2" ->
+// ['xiomara']. TikTok auto-handles ("user4397335094091") have no blocks.
+function dupUserBlocks(names) {
+  const out = [];
+  names.forEach(n => {
+    if (/^user\d{8,}$/.test(n)) return;
+    dupStripAccents(n).toLowerCase().replace(/\d+/g, ' ').split(/[^a-z]+/).forEach(b => {
+      if (b.length >= 5 && DUP_BLOCK_STOPWORDS.indexOf(b) < 0 && out.indexOf(b) < 0) out.push(b);
+    });
+  });
+  return out;
+}
+
 function dupFeatures(c) {
   const names = [normalizeUsername(c['Primary Username'])]
     .concat(String(c['Aliases'] || '').split(',').map(a => normalizeUsername(a.trim())))
@@ -5938,7 +5962,7 @@ function dupFeatures(c) {
   return {
     c: c,
     names: Array.from(new Set(names)),
-    fullName: (first + ' ' + sur).trim(),
+    blocks: dupUserBlocks(Array.from(new Set(names))),    fullName: (first + ' ' + sur).trim(),
     initials: dupInitials(c, first, sur),
     street: street,
     streetNums: street.match(/\d+/g) || [],
@@ -5983,8 +6007,7 @@ function dupScorePair(fa, fb) {
     reasons.push('Teléfono distinto');
   }
 
-  // ── usernames: only counted when similar (two accounts of one person
-  //    normally have DIFFERENT usernames, so a difference proves nothing) ──
+  let sharedBlockLen = 0;   // longest username block both accounts contain
   if (!sharedName && fa.names.length && fb.names.length) {
     let best = 0;
     for (let i = 0; i < fa.names.length; i++) {
@@ -5992,6 +6015,13 @@ function dupScorePair(fa, fb) {
         const s = dupFastSim(fa.names[i], fb.names[j]);
         if (s > best) best = s;
       }
+    }
+    // Shared block ("xiomara" in xiomara_art and xiomara.crafts): the rest of
+    // the handle may differ completely, so whole-string similarity misses it.
+    fa.blocks.forEach(b => { if (fb.blocks.indexOf(b) >= 0 && b.length > sharedBlockLen) sharedBlockLen = b.length; });
+    if (sharedBlockLen >= 5) {
+      const blockSim = sharedBlockLen >= 7 ? 0.85 : 0.75;
+      if (blockSim > best) { best = blockSim; reasons.push('Comparten parte del usuario'); }
     }
     if (best >= 0.75) { add('username', best); reasons.push('Usuarios parecidos (' + Math.round(best * 100) + '%)'); }
   }
@@ -6066,6 +6096,14 @@ function dupScorePair(fa, fb) {
     }
   }
 
+  // A distinctive shared username block (6+ letters, not a common name) PLUS
+  // identical visible initials, with no contradicting ZIP/city, is worth a
+  // look even on a bare stub that has no phone or address yet.
+  if (!sharedName && sharedBlockLen >= 6 && initSim !== null && initSim >= 0.99 && fa.initials.length >= 2 &&
+      !zipDiffers && !cityDiffers) {
+    floor = Math.max(floor, 60);
+  }
+
   return { score: Math.round(Math.min(100, Math.max(score, floor))), reasons: reasons };
 }
 
@@ -6096,6 +6134,7 @@ function dupBlockingKeys(f) {
     keys.push('u:' + n);
     if (n.length >= 5) keys.push('up:' + n.slice(0, 5));
   });
+  f.blocks.forEach(b => keys.push('ub:' + b));
   if (f.fullName.indexOf(' ') > 0) keys.push('n:' + f.fullName);
   return keys;
 }
