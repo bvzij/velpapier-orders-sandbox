@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-26.2';
+const SCRIPT_VERSION = '2026-10-27.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -28,7 +28,7 @@ const STAFF_HIDDEN_ORDER_FIELDS = ['Price'];
 // false = log violations only; flip to true after a week of clean logs.
 const SERVICE_ALLOWLIST_ENFORCE = true;
 const SERVICE_ALLOW = {
-  vps:     ['import_tiktok_orders', 'create_customers_bulk', 'customers', 'orders_index', 'import_qc_history', 'ping', 'whoami'],
+  vps:     ['import_tiktok_orders', 'create_customers_bulk', 'match_new_customers', 'customers', 'orders_index', 'import_qc_history', 'ping', 'whoami'],
   shopify: ['import_shopify_order', 'customers', 'ping', 'whoami'],
 };
 // Login sessions replace sending the raw password on every request.
@@ -1003,6 +1003,8 @@ function dispatchPostAction(action, body, role) {
     if (action === 'import_tiktok_orders') return importTikTokOrders(body);
     if (action === 'import_shopify_order') return importShopifyOrder(body);
     if (action === 'create_customers_bulk') return createCustomersBulk(body);
+    if (action === 'match_new_customers') return matchNewCustomers(body);
+    if (action === 'import_commit_customers') return importCommitCustomers(body);
     // importar-v2
     if (action === 'import_context') return importContextAction(body);
     if (action === 'import_finalize') return importFinalizeAction(body);
@@ -2520,14 +2522,8 @@ function createCustomersBulk(body) {
   });
 
   // Merged-away records (Primary Username like "name (merged→CUST-775)")
-  // must be excluded here. normalizeUsername() strips the "(merged→...)"
-  // suffix, so without this filter a new TikTok order for an
-  // already-merged customer silently matches the RETIRED record and
-  // attaches to a customer ID that is no longer in use, instead of the
-  // keeper it was merged into. Same exclusion findCustomerByUsername()
-  // already applies. Aliases are checked too -- a customer whose primary
-  // is "maria_art" with alias "mariaarts" previously got a duplicate
-  // record created when "mariaarts" came in from TikTok.
+  // must be excluded here, otherwise a new TikTok order for an already-merged
+  // customer silently matches the RETIRED record. Aliases are checked too.
   const activeExisting = existing.filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
 
   const rows = [], created = [];
@@ -2544,11 +2540,17 @@ function createCustomersBulk(body) {
         return;
       }
     }
+    // A near-identical username (1 character off) is NOT merged automatically,
+    // but the new record is flagged so a human sees it in the duplicate tool.
+    const fuzzyHit = cust.primary_username ? findCustomerByUsername(activeExisting, cust.primary_username) : null;
+    const fuzzyNote = (fuzzyHit && fuzzyHit.confidence === 'fuzzy')
+      ? 'Posible duplicado de ' + fuzzyHit.customer['Customer ID'] + ' (usuario parecido: ' + fuzzyHit.customer['Primary Username'] + ')'
+      : '';
+
     maxNum++;
     const customerID = 'CUST-' + String(maxNum).padStart(3, '0');
 
-    // Built by header name, not fixed position -- see the matching note in
-    // createCustomer() for why this matters.
+    // Built by header name, not fixed position.
     const fieldValues = {
       'Customer ID': customerID,
       'Primary Username': cust.primary_username || '',
@@ -2565,11 +2567,14 @@ function createCustomersBulk(body) {
       'Email': cust.email || '',
       'First Order Date': nowISO(),
       'Shipment Count': 0,
-      'Notes': cust.notes || '',
-      'Merge Flag': false,
+      'Notes': [cust.notes || '', fuzzyNote].filter(Boolean).join(' | '),
+      'Merge Flag': fuzzyNote ? true : false,
     };
 
     rows.push(headers.map(h => (fieldValues[h] !== undefined ? fieldValues[h] : '')));
+    // Register the new record so later rows in THIS SAME batch see it. Without
+    // this, one username with 4 orders in a single import created 4 customers.
+    activeExisting.push({ 'Customer ID': customerID, 'Primary Username': cust.primary_username || '', 'Aliases': cust.aliases || '' });
     created.push({ username: cust.primary_username, customer_id: customerID, existed: false });
   });
 
@@ -2581,6 +2586,67 @@ function createCustomersBulk(body) {
   });
 
   return jsonResponse({ result: 'bulk_created', created: created });
+}
+
+// ─── Deferred customer creation (importar) ─────────────────────────────────
+// The TikTok import no longer creates customers. matchNewCustomers tells it
+// whether each would-be-new username already exists (exact/alias) or looks like
+// an existing customer. What is still new is created by importCommitCustomers
+// when the person clicks "Generar PDF" on the import page.
+function matchNewCustomers(body) {
+  const customers = sheetToObjects(getCustomersSheet())
+    .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+  const feats = customers.map(dupFeatures);
+  const buckets = {};
+  feats.forEach((f, i) => new Set(dupBlockingKeys(f)).forEach(k => { (buckets[k] = buckets[k] || []).push(i); }));
+
+  const matches = {};
+  (body.customers || []).forEach(inc => {
+    const key = normalizeUsername(inc.primary_username);
+    if (!key || matches[key]) return;
+
+    const ex = findCustomerByUsername(customers, inc.primary_username);
+    if (ex && ex.confidence !== 'fuzzy') {
+      matches[key] = { exact: true, customer_id: ex.customer['Customer ID'], username: ex.customer['Primary Username'], score: 100, reasons: ['Mismo usuario o alias'] };
+      return;
+    }
+
+    const fi = dupFeatures({
+      'Primary Username': inc.primary_username, 'Aliases': '',
+      'First Name': inc.first_name || '', 'Surname': inc.surname || '',
+      'Initials (TT Format)': inc.initials || '', 'Street + Number': inc.street || '',
+      'City': inc.city || '', 'State': inc.state || '', 'ZIP': inc.zip || '',
+      'Phone Partial': inc.phone_partial || '', 'Phone Full': '', 'Email': '',
+    });
+    const cand = new Set();
+    new Set(dupBlockingKeys(fi)).forEach(k => {
+      const b = buckets[k];
+      if (b && b.length <= DUP_MAX_BUCKET) b.forEach(i => cand.add(i));
+    });
+
+    let best = null;
+    cand.forEach(i => {
+      const r = dupScorePair(fi, feats[i]);
+      let score = r.score;
+      let nameBest = 0;
+      fi.names.forEach(x => feats[i].names.forEach(y => { const v = dupFastSim(x, y); if (v > nameBest) nameBest = v; }));
+      if (nameBest >= 0.88 && score < 60) { score = 60; r.reasons.push('Usuario casi idéntico'); }
+      if (score >= DUPLICATE_SCORE_THRESHOLD && (!best || score > best.score)) {
+        best = { exact: false, customer_id: feats[i].c['Customer ID'], username: feats[i].c['Primary Username'], score: score, reasons: r.reasons };
+      }
+    });
+    if (best) matches[key] = best;
+  });
+  return jsonResponse({ matches: matches });
+}
+
+// Called by the import page when the person generates the PDF: creates the
+// customers that are STILL new (createCustomersBulk re-checks exact/alias and
+// de-duplicates inside the batch) and links the already-imported orders.
+function importCommitCustomers(body) {
+  const res = JSON.parse(createCustomersBulk({ customers: body.customers || [] }).getContent());
+  stampCustomerIDs();
+  return jsonResponse(res);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5986,6 +6052,20 @@ function dupScorePair(fa, fb) {
     floor = Math.max(floor, 60);
   }
 
+  // A username that differs by ~1 character PLUS identical visible initials is
+  // almost always the same person (e.g. _fer5410 / _fer5411). Newly created
+  // stubs have no phone/ZIP/name, so without this rule their score is scaled
+  // down below the threshold and the pair is never suggested.
+  if (!sharedName && initSim !== null && initSim >= 0.99 && fa.initials.length >= 2 &&
+      !zipDiffers && !cityDiffers) {
+    let nameBest = 0;
+    fa.names.forEach(x => fb.names.forEach(y => { const v = dupFastSim(x, y); if (v > nameBest) nameBest = v; }));
+    if (nameBest >= 0.85) {
+      floor = Math.max(floor, 70);
+      reasons.push('Usuario casi idéntico + mismas iniciales');
+    }
+  }
+
   return { score: Math.round(Math.min(100, Math.max(score, floor))), reasons: reasons };
 }
 
@@ -6610,6 +6690,44 @@ function mergeCustomersAction(body) {
     merge_id: loseId,
     orders_repointed: ordersRepointed,
   });
+}
+
+// One-off cleanup: customers whose Primary Username is IDENTICAL (after
+// normalising) are the same TikTok account, so they are merged into one.
+// Keeper = the record with the most filled-in data (lowest ID breaks ties).
+// Orders are repointed and every merge is logged, so Ajustes can still undo it.
+// Run oneoffMergeIdenticalUsernamesPreview first, read the log, then ...Run.
+function mergeIdenticalUsernameCustomers_(dryRun) {
+  const customers = sheetToObjects(getCustomersSheet())
+    .filter(c => !String(c['Primary Username'] || '').includes('(merged→'));
+  const groups = {};
+  customers.forEach(c => {
+    const n = normalizeUsername(c['Primary Username']);
+    if (!n) return;
+    (groups[n] = groups[n] || []).push(c);
+  });
+  const fieldsThatCount = ['First Name', 'Surname', 'Initials (TT Format)', 'Street + Number', 'City', 'State', 'ZIP', 'Phone Partial', 'Phone Full', 'Email', 'Shopify Customer ID'];
+  const idNum = c => parseInt(String(c['Customer ID']).replace('CUST-', ''), 10) || 0;
+  const richness = c => fieldsThatCount.filter(f => String(c[f] || '').trim()).length;
+  let merged = 0, groupCount = 0;
+  Object.keys(groups).forEach(n => {
+    const g = groups[n];
+    if (g.length < 2) return;
+    groupCount++;
+    g.sort((a, b) => (richness(b) - richness(a)) || (idNum(a) - idNum(b)));
+    const keeper = g[0];
+    g.slice(1).forEach(loser => {
+      Logger.log((dryRun ? '[PREVIEW] ' : '') + n + ': ' + loser['Customer ID'] + ' -> ' + keeper['Customer ID']);
+      if (!dryRun) mergeCustomersAction({ keep_id: keeper['Customer ID'], merge_id: loser['Customer ID'] });
+      merged++;
+    });
+  });
+  Logger.log((dryRun ? 'PREVIEW: ' : 'DONE: ') + merged + ' duplicate records in ' + groupCount + ' usernames.');
+  return { merged: merged, groups: groupCount };
+}
+function oneoffMergeIdenticalUsernamesPreview() { mergeIdenticalUsernameCustomers_(true); }
+function oneoffMergeIdenticalUsernamesRun() {
+  withWriteLock(function () { return jsonResponse(mergeIdenticalUsernameCustomers_(false)); });
 }
 
 // Persists a "not a duplicate" decision so this pair stops being suggested
@@ -7900,7 +8018,7 @@ function logAuditSafe(action, target, details) {
 // run retries: already-deleted photos come back "not_found" and the row is
 // still switched to the placeholder.
 // Run archiveOldQcPhotosDryRun() from the dropdown to see counts only.
-const QC_PHOTO_KEEP_DAYS = 30;
+const QC_PHOTO_KEEP_DAYS = 45;
 const QC_ARCHIVE_MAX_ROWS = 800;   // per run; the next run picks up the rest
 const QC_PLACEHOLDER_ID = 'velpapier/qc/airtable/_archivado';
 const QC_PHOTO_COLS = ['Content1', 'Content2', 'Content3', 'Content4', 'Content5',
