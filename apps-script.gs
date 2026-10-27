@@ -1289,9 +1289,26 @@ function updateOrderStatus(body) {
 //   - Anotado -> Pagado / No Pagado clears the link
 // Mutates fields in place. Returns an error string, or null when fine.
 function normalizeAnotadoFields(sheet, rowIndex, headers, fields, oldStatus) {
-  if (!fields || !fields['Status']) return null;
+  if (!fields) return null;
   const iLink = headers.indexOf('Linked Shipment');
   const iChan = headers.indexOf('Channel');
+
+  // Re-link only (Status not sent in this call): if the row is already
+  // Enviado and its Linked Shipment is being changed to a tracking ID that
+  // hasn't shipped yet, the row must drop back to Anotado -- otherwise it
+  // stays Enviado forever and disappears from the Empacar pick list even
+  // though it's still physically waiting to go out. If the new link HAS
+  // shipped, leave Status alone (still correctly Enviado).
+  if (fields['Status'] === undefined) {
+    if (fields['Linked Shipment'] !== undefined && String(oldStatus) === 'Enviado') {
+      const newLink = String(fields['Linked Shipment']).trim();
+      if (newLink && !isTrackingShipped(sheet, headers, newLink)) {
+        fields['Status'] = 'Anotado';
+      }
+    }
+    return null;
+  }
+
   const newStatus = String(fields['Status']);
 
   if (newStatus === 'Anotado') {
