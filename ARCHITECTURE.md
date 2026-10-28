@@ -48,15 +48,26 @@ Static HTML/CSS/JavaScript. No build step, no framework. GitHub → Vercel deplo
 | Análisis | `analytics.html`, `analytics.js` | Charts and reports |
 | Ajustes | `ajustes.html`, `ajustes.js` | Admin: users, data health, merges, backfill |
 | Importar | `import.html`, `import.js` | TikTok CSV + PDF import |
-| Productos | `productos.js` (+ page) | Product catalog |
+| Clientes | `clientes.html`, `clientes.js` | Customer list, detail, timeline, tags, delete/restore |
+| Mayoristas | `mayoristas.html`, `mayoristas.js` | Wholesale (Mayoreo) quotes, orders, clients |
+| Productos | `productos.html`, `productos.js`, `listados.js`, `organizar.js`, `exportadores.js` | Catalog, listing builder, organizing, export to TikTok/Shopify |
+| Archivos | `archivos.html`, `archivos.js` | Self-hosted file storage (product photos) |
 
-Pages for Clientes, Mayoreo and Listings also exist; their file names should be added here when next touched.
+Shared helper scripts loaded by some pages: `uploader.js` (photo compress + upload), `pick.js` (pick/pack line checking), `urgent-tools.js` (urgent-order tools).
 
 ---
 
 ## 3. Backend today: Google Apps Script
 
-One file, `apps-script.gs` (~10,500 lines), deployed as a web app bound to the Orders spreadsheet. It is the **only** thing allowed to read or write the Sheets.
+Three files in one Apps Script project (one shared global scope), deployed as a web app bound to the Orders spreadsheet. Together they are the **only** thing allowed to read or write the Sheets.
+
+| File | Contents |
+| --- | --- |
+| `apps-script.gs` (~10,500 lines) | Router, auth, orders, QC, imports, merges, Mayoreo, pack log, triggers |
+| `clientes.gs` (~550 lines) | Clientes page actions (`cli_…`): detail, timeline, tags, delete/restore. Hides contact fields from staff server-side |
+| `products.gs` (~900 lines) | Productos/listings actions: listing builder, AI attributes, exports |
+
+Some code creates sheets or columns **on first use** (e.g. Deleted Customers, Tags, Product Categories). A missing tab therefore does not always mean a missing feature — check the code.
 
 - `doGet` = read actions (`orders`, `qc`, `customers`, `health`, …)
 - `doPost` = write actions (`save_qc`, `import_tiktok_orders`, `import_shopify_order`, `merge_customers`, `login`, …). Every write runs inside `withWriteLock()` (`LockService.getScriptLock()`) so simultaneous writes can't overwrite each other.
@@ -98,8 +109,8 @@ Ubuntu, 2 CPU cores, 8 GB RAM, 96 GB disk (≈85% RAM and 90% disk free on 28-10
 | `traefik` | Reverse proxy: HTTPS certificates and routing by subdomain | Ports 80/443 |
 | `n8n` | Automation: TikTok import webhook, Shopify order webhook | Own subdomain |
 | `tiktok-import` | Python/FastAPI: parses TikTok CSV + label PDF, sends batches to Apps Script | No |
-| `image-service` | Public image hosting | Own subdomain |
-| `vp-files` | File/photo hosting for Archivos (`files.srv2017849.hstgr.cloud`) | Own subdomain |
+| `image-service` | Public image hosting (role to confirm) | Own subdomain |
+| `vp-files` | Archivos: self-hosted file storage, mainly product photos (`files.srv2017849.hstgr.cloud`) | Own subdomain |
 | `postgres` | PostgreSQL 17 — the future database *(empty, schema not applied yet)* | **No** — no ports exposed |
 | `adminer` | Database browser | **No** — `127.0.0.1:8080`, reached through a VS Code SSH tunnel |
 
@@ -112,6 +123,9 @@ Ubuntu, 2 CPU cores, 8 GB RAM, 96 GB disk (≈85% RAM and 90% disk free on 28-10
 - **Page load:** page JS → `VP.get('<action>')` → Apps Script reads Sheets → JSON back. Some pages cache in `sessionStorage`; Análisis currently refetches on every visit.
 - **TikTok import:** Importar page → n8n webhook (checks the user's session) → `tiktok-import` on the VPS parses CSV + PDF → posts batches to Apps Script `import_tiktok_orders` (machine token) → rows in Orders, Customers, TikTok Import History.
 - **Shopify order:** Shopify webhook → n8n → Apps Script `import_shopify_order`. Status follows Shopify's `financial_status`, moving forward only.
+- **Photo storage — two places, on purpose:**
+  - **QC/packing photos → Cloudinary.** Packing evidence is critical, so it stays on a proven service.
+  - **Product photos → Archivos (`vp-files` on the VPS).** Added after the bulk upload of historical QC photos used up Cloudinary's monthly bandwidth. Keeping product photos off Cloudinary protects the QC upload quota.
 - **Packing:** Empaque page → photos compressed in the browser and uploaded → `save_qc` writes the QC row; "Enviar" finalizes and stamps Packed Date on the order.
 - **Mayoreo:** wholesale orders live in the Mayoreo file and are **mirrored** into Orders (channel `Mayoreo`, ID `MAY-…`) so packing treats them like any order.
 
@@ -168,6 +182,8 @@ Browser ──► FastAPI (new, on the VPS, own HTTPS subdomain via Traefik)
 - **Product Categories:** code exists, but the Sheets tab/columns were never created. Tables are in the schema, empty. Intended for analytics.
 - **Mayoreo cancellations:** currently done by deleting the order (history is lost). Likely future: a `Cancelado` status.
 - **Listing Variants → Stock:** unused; live stock is Product Variants → Stock.
+- **Customer Tags format:** stored as text for now; check how `clientes.gs` writes them before deciding on a separate tags table.
+- **`image-service` vs `vp-files`:** confirm what `image-service` still serves.
 
 ---
 
