@@ -1051,8 +1051,11 @@ function buildPlan(mode) {
   groups.forEach(g => g.items.forEach(i => {
     ships[i.tid] = {
       username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
-  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
-  giftShipSearch, giftShipPick, giftVirtualClose,
+      extras: (extrasByTid[i.tid] || []).map(x => {
+        const cd = candidateById(x.order_id) || {};
+        const num = String(cd.shopify_order_number || '').replace(/^#/, '');
+        return { channel: x.channel, shopify_number: num ? '#' + num : '', label: (x.channel === 'Shopify' && num) ? 'Shopify #' + num : x.channel, items: x.items };
+      }),
       note_segments: segsByTid[i.tid] || [],
     };
   }));
@@ -1995,8 +1998,9 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
   tab, setOpt, setDupeFilter, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
-  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
-  giftShipSearch, giftShipPick, giftVirtualClose,  downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
+  giftShipSearch, giftShipPick, giftVirtualClose,
+  downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   ffpOpen, ffpClose, ffpTest, ffpPrint,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
