@@ -494,7 +494,7 @@ function extraTitle(c) {
     return `Shopify ${num ? '#' + num : ''} · ${plural(n, 'producto', 'productos')}`.replace('  ', ' ');
   }
   if (c.channel === 'Nota') return 'Nota';
-  return `Manual · ${plural(n, 'producto', 'productos')}`;
+  return `Compra Externa · ${plural(n, 'producto', 'productos')}`;
 }
 // Lines for the slip: one item per product; a note sits under the order's last product.
 function extraItems(c) {
@@ -1038,6 +1038,7 @@ function buildPlan(mode) {
       });
     }
     const text = String(ed.text == null ? n.text : ed.text).trim();
+    if (g && (g.labels || []).length) return;   // gift/giveaway: print only the "es para X" line, not the full note
     if (!text) return;
     (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
       order_id: n.nota_pedido, source: n.source === 'Vendedor' ? 'seller' : 'buyer', text, keys: ed.keys || [] });
@@ -1054,8 +1055,7 @@ function buildPlan(mode) {
       extras: (extrasByTid[i.tid] || []).map(x => {
         const cd = candidateById(x.order_id) || {};
         const num = String(cd.shopify_order_number || '').replace(/^#/, '');
-        return { channel: x.channel, shopify_number: num ? '#' + num : '', label: (x.channel === 'Shopify' && num) ? 'Shopify #' + num : x.channel, items: x.items };
-      }),
+        return { channel: x.channel, shopify_number: num ? '#' + num : '', label: (x.channel === 'Shopify' && num) ? 'Shopify #' + num : (x.channel === 'Manual' ? 'Compra Externa' : x.channel), items: x.items };      }),
       note_segments: segsByTid[i.tid] || [],
     };
   }));
