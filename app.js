@@ -108,7 +108,7 @@ function channelTag(channel) {
   if (channel === 'Nota') return '<span class="channel-tag channel-manual" style="background:#f1da65;color:#5c4a00">Nota</span>';
   if (channel === 'Mayorista') return '<span class="channel-tag channel-manual" style="background:#ecebfa;color:#534ab7">Mayorista</span>';
   const cls = channel === 'TikTok' ? 'channel-tiktok' : channel === 'Shopify' ? 'channel-shopify' : 'channel-manual';
-  return `<span class="channel-tag ${cls}">${escapeHtml(channel || 'Manual')}</span>`;
+  return `<span class="channel-tag ${cls}">${escapeHtml(!channel || channel === 'Manual' ? 'Compra Externa' : channel)}</span>`;
 }
 
 // Mayorista rows are mirrors of orders that live in the Mayoristas tab
@@ -812,9 +812,7 @@ function showNewOrderModal(prefillUsername, opts) {
   c.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal"><div class="modal-title">Nueva orden</div>${opts.linkedShipment ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Se vincula a la orden de TikTok de este envío</div>' : ''}<div class="edit-form">
     <input type="text" id="no-username" placeholder="Usuario" autocomplete="off" value="${escapeHtml(prefillUsername || '')}" />
     <select id="no-channel">
-      <option value="Manual" selected>Manual</option>
-      <option value="TikTok">TikTok</option>
-      <option value="Shopify">Shopify</option>
+      <option value="Manual" selected>Compra Externa</option>
       <option value="Nota">Nota</option>
     </select>
     <select id="no-status">${statusOptions.map(s => `<option value="${s}"${s === defaultStatus ? ' selected' : ''}>${s}</option>`).join('')}
@@ -2651,7 +2649,7 @@ function renderTikTokTab() {
         : escapeHtml(label);
     }
     if (x.Channel === 'Nota') return '<span style="background:#f1da65;color:#5c4a00;border-radius:99px;padding:0 6px">Nota</span>' + (x.NotaFuente ? ' · ' + escapeHtml(x.NotaFuente) : '');
-    return x.Channel === 'Mayorista' ? mayoristaLine(x) : 'Manual';
+    return x.Channel === 'Mayorista' ? mayoristaLine(x) : 'Compra Externa';
   };
   // importar-v2: a Nota is text, not a product list
   const notaSectionHtml = x => `
@@ -2831,7 +2829,7 @@ function renderTikTokTabPrev2() {
         ? `<a href="https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/orders/${escapeHtml(x.ShopifyOrderId)}" target="_blank" rel="noopener noreferrer" class="notas-link">${escapeHtml(label)}</a>`
         : escapeHtml(label);
     }
-    return 'Manual';
+    return 'Compra Externa';
   };
 
   const rowHtml = (r, showDay) => {
