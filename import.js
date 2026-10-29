@@ -45,6 +45,7 @@ const S = {
   giftUi: {},          // NOTA-... -> {open, q, recipient:{id,username}|null, newName}
   giftBusy: false,
   render: null,        // {report, pdf, plan, at, manual}
+  dupeFilter: 'all',   // 'all' | 'new_only' -- hide shipments whose Tracking ID already exists in Orders
   facts: null,
   factId: '',
   copies: null,
@@ -355,7 +356,7 @@ async function loadContext() {
 
 // ── model ─────────────────────────────────────────────────────────────────
 function infos() {
-  return S.meta.filter(m => m.in_pdf).map(m => {
+  return S.meta.filter(m => m.in_pdf && (S.dupeFilter !== 'new_only' || m.inserted !== false)).map(m => {
     const c = (S.ctx && S.ctx.shipments && S.ctx.shipments[m.tracking_id]) || {};
     const cust = c.customer_id || m.customer_id || '';
     let count = (c.shipment_count !== undefined && c.shipment_count !== null) ? c.shipment_count : m.shipment_count;
@@ -367,9 +368,17 @@ function infos() {
       pending, tid: m.tracking_id, username: m.username || '', cust, count,
       kind: count === null ? 'unknown' : count === 0 ? 'new' : 'existing',
       ship_by: c.ship_by || m.ship_by || '', deadline: m.deadline, slip: m.slip || {}, order_ids: m.order_ids || [],
-      primary_username: c.primary_username || '',
+      primary_username: c.primary_username || '', dup: m.inserted === false,
     };
   });
+}
+
+// Tracking IDs hidden by the "Solo nuevas" filter -- these must still be
+// explicitly excluded when generating, so the VPS "never drop a page it
+// found in the source PDF" safety net doesn't silently print them anyway.
+function dupExcludedTids() {
+  if (S.dupeFilter !== 'new_only') return [];
+  return S.meta.filter(m => m.in_pdf && m.inserted === false).map(m => m.tracking_id);
 }
 function countLabel(i) { return i.count === null ? '? env' : i.count === 0 ? 'Nuevo' : `${i.count} env`; }
 
@@ -602,6 +611,17 @@ function renderConfigure() {
   const noDeadline = list.filter(i => !i.ship_by);
   const ct = custTids(list);
 
+  const dupCount = S.meta.filter(m => m.in_pdf && m.inserted === false).length;
+  const dupHtml = dupCount ? `
+    <div class="imp-card">
+      <h3>Guías ya importadas <small>· ${dupCount} de ${S.meta.filter(m => m.in_pdf).length} ya existen en el sistema</small></h3>
+      <div class="imp-btns">
+        <button class="imp-btn${S.dupeFilter !== 'new_only' ? ' primary' : ''}" onclick="IMP.setDupeFilter('all')">Todas</button>
+        <button class="imp-btn${S.dupeFilter === 'new_only' ? ' primary' : ''}" onclick="IMP.setDupeFilter('new_only')">Solo nuevas (${S.meta.filter(m => m.in_pdf).length - dupCount})</button>
+      </div>
+      <div class="imp-muted" style="margin-top:4px">Con "Solo nuevas" las guías repetidas no se imprimen ni aparecen en notas, extras o conteos.</div>
+    </div>` : '';
+
   const statsHtml = `
     <div class="imp-card">
       <h3>Esta importación <small>· ${esc(S.importId)}</small></h3>
@@ -697,7 +717,7 @@ function renderConfigure() {
       ${S.render ? renderReportHtml() : ''}
     </div>`;
 
-  el.innerHTML = statsHtml + fbHtml + notaHtml + extrasHtml + multiHtml + optHtml + genHtml + funFactCardHtml();
+  el.innerHTML = dupHtml + statsHtml + fbHtml + notaHtml + extrasHtml + multiHtml + optHtml + genHtml + funFactCardHtml();
   if (!S.facts) loadFacts().then(() => { const f = $('ff-card'); if (f) f.outerHTML = funFactCardHtml(); });
 }
 
@@ -708,6 +728,7 @@ function legacyButtonsHtml() {
 }
 
 function setOpt(k, v) { S.opts[k] = v; renderConfigure(); }
+function setDupeFilter(v) { S.dupeFilter = v; renderConfigure(); }
 function toggleExtra(oid, on) {
   const s = S.extraSel[oid];
   if (s) s.checked = on;
@@ -978,7 +999,7 @@ function buildPlan(mode) {
     g.items.forEach(i => seq.push({ type: 'shipment', tracking_id: i.tid }));
   });
   if (S.opts.invert) seq = seq.reverse();
-  return { mode, sequence: seq, shipments: ships, extrasByTid };
+  return { mode, sequence: seq, shipments: ships, extrasByTid, exclude: dupExcludedTids() };
 }
 
 async function generate(mode) {
@@ -1905,7 +1926,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
-  tab, setOpt, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
+  tab, setOpt, setDupeFilter, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
   giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
   downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
