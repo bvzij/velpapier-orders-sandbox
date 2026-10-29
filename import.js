@@ -573,7 +573,45 @@ function notaBlockHtml(notas, list) {
       ${shown.map(n => noteBoxHtml(n, list)).join('')}
     </div>`;
 }
+// ── Regalo sin mensaje: gift for a product of a shipment that has no buyer/seller note ──
+function giftShipResultsHtml() {
+  const nq = normUser(S.giftShipQ || '');
+  if (nq.length < 2) return '<div class="imp-muted">Escribe al menos 2 letras del usuario…</div>';
+  const hits = infos().filter(i => normUser(i.username).includes(nq) || String(i.tid || '').includes(nq)).slice(0, 8);
+  if (!hits.length) return '<div class="imp-muted">Ningún envío de esta importación coincide.</div>';
+  return hits.map(i => `<div class="imp-list-item"><button class="imp-mini" data-tid="${esc(i.tid)}" onclick="IMP.giftShipPick(this.dataset.tid)">Elegir</button> ${esc(i.username)} <span class="imp-muted">· ${esc(i.tid)}</span></div>`).join('');
+}
+function giftPickerHtml(list) {
+  const visible = new Set(list.map(i => i.tid));
+  const virt = (S.virtualNotas || []).filter(n => visible.has(n.linked_shipment));
+  return `<div class="imp-card">
+    <h3>🎁 Regalo sin mensaje <small>· para un producto que no tiene nota del cliente ni del vendedor</small></h3>
+    <input type="text" id="gift-ship-q" value="${esc(S.giftShipQ || '')}" placeholder="Usuario del cliente que hace el regalo" style="width:100%;box-sizing:border-box;padding:6px 8px;border:0.5px solid var(--border-strong);border-radius:8px;font:inherit;font-size:13px" oninput="IMP.giftShipSearch(this.value)">
+    <div id="gift-ship-res">${giftShipResultsHtml()}</div>
+    ${virt.map(n => noteBoxHtml(n, list)).join('')}
+  </div>`;
+}
+function giftOnlyBoxHtml(n, list) {
+  const ed = S.notaEdit[n.order_id] || { text: '', keys: [] };
+  const i = list.find(x => x.tid === n.linked_shipment) || {};
+  const prods = noteProducts(n, true);
+  return `<div class="imp-nota">
+    <b>${esc(i.username || '')}</b> · 🎁 Regalo sin mensaje
+    <div style="margin-top:6px;font-size:12.5px"><b>¿Qué producto(s) del envío se regalan?</b></div>
+    ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
+        <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" ${(ed.keys || []).includes(p.label) ? 'checked' : ''}
+          onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
+        <span>${esc(p.label)}${(p.qty || 1) > 1 ? ` <span class="imp-muted">(${p.qty} pedidos)</span>` : ''}</span>
+        ${(p.qty || 1) > 1 && (ed.keys || []).includes(p.label) ? `<span style="margin-left:auto;white-space:nowrap;font-size:12.5px">regalar
+          <input type="number" min="1" max="${p.qty}" value="${giftQtyOf(ed, p)}" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" data-max="${p.qty}"
+            onchange="IMP.setGiftQty(this.dataset.nota, this.dataset.label, this.value, this.dataset.max)" style="width:56px;padding:3px 5px;border:0.5px solid var(--border-strong);border-radius:6px;font:inherit"></span>` : ''}</label>`).join('')
+      : '<div class="imp-muted">Este envío no tiene productos en el CSV.</div>'}
+    ${n.virtual ? `<div class="imp-btns" style="margin-top:6px"><button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.giftVirtualClose(this.dataset.nota)">Quitar</button></div>` : ''}
+    ${giftBoxHtml(n, list)}
+  </div>`;
+}
 function noteBoxHtml(n, list) {
+  if (n.source === 'Regalo') return giftOnlyBoxHtml(n, list);
   const ed = S.notaEdit[n.order_id] || { text: n.text, keys: parseList(n.assigned) };
   const i = list.find(x => x.tid === n.linked_shipment) || {};
   const all = !!(S.notaAll || {})[n.order_id];
@@ -648,7 +686,7 @@ function renderConfigure() {
   // of THIS order with checkboxes, and it can be split into more pieces (duplicate).
   const visibleTids = new Set(list.map(i => i.tid));
   const visNotas = (S.ctx.notas || []).filter(n => visibleTids.has(n.linked_shipment));
-  const notaHtml = visNotas.length ? notaBlockHtml(visNotas, list) : '';
+  const notaHtml = (visNotas.length ? notaBlockHtml(visNotas, list) : '') + giftPickerHtml(list);
 
   // Extras per customer
   const byCust = {};
@@ -774,10 +812,26 @@ function giftLine(gifter, c, giveaway) {
   const parts = [kind + clean(gifter), clean(shortTitle(c.product)), clean(c.variation), clean(c.seller_sku)].filter(Boolean);
   return `${c.qty || 1}x ` + parts.join(' · ');
 }
+function giftShipSearch(q) {
+  S.giftShipQ = q;
+  const el = $('gift-ship-res');
+  if (el) el.innerHTML = giftShipResultsHtml();
+}
+function giftShipPick(tid) {
+  const id = 'NEW:' + tid + ':' + Date.now();
+  (S.virtualNotas = S.virtualNotas || []).push({ order_id: id, linked_shipment: tid, text: '', source: 'Regalo', candidates: '', nota_pedido: '', assigned: '', gift: null, virtual: true });
+  S.giftShipQ = '';
+  giftOpen(id);
+}
+function giftVirtualClose(id) {
+  S.virtualNotas = (S.virtualNotas || []).filter(x => x.order_id !== id);
+  delete S.giftUi[id]; delete S.notaEdit[id];
+  renderConfigure();
+}
 function giftItemsFor(n) {
   // the gift can use any product the checkboxes show (this order, or the whole shipment)
   const keys = (S.notaEdit[n.order_id] || {}).keys || [];
-  const all = !!(S.notaAll || {})[n.order_id];
+  const all = n.source === 'Regalo' || !!(S.notaAll || {})[n.order_id];
   const ed = S.notaEdit[n.order_id] || {};
   return noteProducts(n, all).filter(c => keys.includes(c.label))
     .map(c => Object.assign({}, c, { qty: giftQtyOf(ed, c), ordered: c.qty || 1 }));
@@ -888,7 +942,7 @@ function giftPick(oid, cid, username) { const ui = S.giftUi[oid]; ui.recipient =
 function giftPickNew(oid) { const ui = S.giftUi[oid]; ui.newName = String(ui.q || '').trim().replace(/^@/, ''); ui.recipient = null; renderConfigure(); }
 async function giftCreate(oid) {
   if (S.giftBusy) return;
-  const n = (S.ctx.notas || []).find(x => x.order_id === oid);
+  const n = (S.ctx.notas || []).find(x => x.order_id === oid) || (S.virtualNotas || []).find(x => x.order_id === oid);
   const ui = S.giftUi[oid] || {};
   if (!n) return;
   const list = infos();
@@ -903,11 +957,13 @@ async function giftCreate(oid) {
   S.giftBusy = true; renderConfigure();
   try {
     const r = await VP.post({
-      action: 'gift_create', nota_order_id: oid, gifter_username: gifterInfo.username || '', giveaway: ga,
+      action: 'gift_create', nota_order_id: n.virtual ? '' : oid, tracking_id: n.virtual ? n.linked_shipment : '',
+      gifter_username: gifterInfo.username || '', giveaway: ga,
       recipient_customer_id: (!ga && ui.recipient) ? ui.recipient.id : '', new_username: (!ga && ui.newName) || '',
       items: items.map(c => ({ label: c.label, text: giftLine(gifterInfo.username || '', c, ga), qty: c.qty, ordered: c.ordered })),
     });
     S.giftUi[oid] = {};
+    if (n.virtual) { S.virtualNotas = (S.virtualNotas || []).filter(x => x.order_id !== oid); delete S.notaEdit[oid]; }
     if (r.created_customer) allCustomers = [];
     await loadContext();
     initSelectionsKeep();
@@ -995,7 +1051,8 @@ function buildPlan(mode) {
   groups.forEach(g => g.items.forEach(i => {
     ships[i.tid] = {
       username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
-      extras: (extrasByTid[i.tid] || []).map(x => ({ channel: x.channel, items: x.items })),
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
+  giftShipSearch, giftShipPick, giftVirtualClose,
       note_segments: segsByTid[i.tid] || [],
     };
   }));
@@ -1938,8 +1995,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 // ── public handlers for inline onclick ────────────────────────────────────
 window.IMP = {
   tab, setOpt, setDupeFilter, toggleExtra, setExtraTid, markAll, editNota, toggleNotaKey, duplicateNota, generate, reopenPdf,
-  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
-  downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
+  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,  giftOpen, giftClose, giftChange, giftSearch, giftPick, giftPickNew, giftCreate, giftUndo, giftGiveaway, noteFilter, noteAll, setGiftQty,
+  giftShipSearch, giftShipPick, giftVirtualClose,  downloadLegacy, downloadCombinedCsv, pickFact, setCopies, generateStickers, histFile, reopen,
   ffPreview, ffAdd, ffOp, ffFile, ffTemplate, goReview, saveSettings, resetSettings, testSticker,
   ffpOpen, ffpClose, ffpTest, ffpPrint,
   purgeSearch, purgePick, purgeBack, purgeAsk, purgeAskPhotos, purgeRun, setOptEl, settingsChanged, testSlip,
