@@ -189,6 +189,9 @@ Browser ──► FastAPI (new, on the VPS, own HTTPS subdomain via Traefik)
 
 ## 9. Related documents
 
+- `CLAUDE.md` — current project state and the plan → build → document → review → PR workflow for Claude Code
 - `CONVENTIONS.md` — coding rules and shared helpers
+- `plans/` — one approved plan per piece of work (template in `plans/README.md`)
+- `.claude/` — the Claude Code agents (engineer, documenter, reviewer, git) and the planner skill
 - `FIX_LOG.md` — what changed in each fix-pack and how to deploy it
 - `vps-reference/` — reference copies of the VPS Python code
