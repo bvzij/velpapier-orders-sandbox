@@ -236,6 +236,7 @@ async function startImport(data, opts) {
   delete slim.pdf_base64; delete slim.csv_base64;
   S.result = slim;
   S.meta = (data.shipments_meta || []);
+  S.dupeFilter = 'all';
   S.opts = Object.assign({}, DEFAULTS.print, S.settings.print, (S.log && S.log['Settings'] && S.log['Settings'].print) || {});
 
   const s = data.summary || {};
@@ -616,7 +617,7 @@ function renderConfigure() {
     <div class="imp-card">
       <h3>Guías ya importadas <small>· ${dupCount} de ${S.meta.filter(m => m.in_pdf).length} ya existen en el sistema</small></h3>
       <div class="imp-btns">
-        <button class="imp-btn${S.dupeFilter !== 'new_only' ? ' primary' : ''}" onclick="IMP.setDupeFilter('all')">Todas</button>
+        <button class="imp-btn${S.dupeFilter !== 'new_only' ? ' primary' : ''}" onclick="IMP.setDupeFilter('all')">Todas (${S.meta.filter(m => m.in_pdf).length})</button>
         <button class="imp-btn${S.dupeFilter === 'new_only' ? ' primary' : ''}" onclick="IMP.setDupeFilter('new_only')">Solo nuevas (${S.meta.filter(m => m.in_pdf).length - dupCount})</button>
       </div>
       <div class="imp-muted" style="margin-top:4px">Con "Solo nuevas" las guías repetidas no se imprimen ni aparecen en notas, extras o conteos.</div>
@@ -645,7 +646,9 @@ function renderConfigure() {
 
   // Notas: one block per note piece. Its text can be edited, it is linked to products
   // of THIS order with checkboxes, and it can be split into more pieces (duplicate).
-  const notaHtml = (S.ctx.notas || []).length ? notaBlockHtml(S.ctx.notas || [], list) : '';
+  const visibleTids = new Set(list.map(i => i.tid));
+  const visNotas = (S.ctx.notas || []).filter(n => visibleTids.has(n.linked_shipment));
+  const notaHtml = visNotas.length ? notaBlockHtml(visNotas, list) : '';
 
   // Extras per customer
   const byCust = {};
@@ -728,7 +731,12 @@ function legacyButtonsHtml() {
 }
 
 function setOpt(k, v) { S.opts[k] = v; renderConfigure(); }
-function setDupeFilter(v) { S.dupeFilter = v; renderConfigure(); }
+function setDupeFilter(v) {
+  if (S.dupeFilter === v) return;
+  S.dupeFilter = v;
+  if (S.render) showToast('Filtro cambiado — vuelve a generar el PDF');
+  renderConfigure();
+}
 function toggleExtra(oid, on) {
   const s = S.extraSel[oid];
   if (s) s.checked = on;
@@ -1010,6 +1018,7 @@ async function generate(mode) {
     showError(`Elige a qué pedido de TikTok va ${plural(missing.length, 'el producto extra marcado', 'cada uno de los productos extra marcados')} (clientes con varios envíos).`);
     return;
   }
+  if (!infos().length) { showError('No hay guías nuevas para imprimir. Elige "Todas" si quieres reimprimir.'); return; }
   const dupLeft = unresolvedMatches();
   if (dupLeft.length && !confirm(`Quedan ${plural(dupLeft.length, 'posible cliente duplicado sin resolver', 'posibles clientes duplicados sin resolver')} (${dupLeft.map(m => m.username).join(', ')}).\n\nSi continúas se crearán como clientes NUEVOS. ¿Continuar?`)) return;
   S.busy = true;
@@ -1101,7 +1110,9 @@ async function finalizeLinks() {
     newLinked[oid] = { tid: s.tid, prev: prevStatus || 'Pagado' };
   });
   const unlinks = [];
+  const hiddenTids = new Set(dupExcludedTids());
   Object.entries(prev).forEach(([oid, p]) => {
+    if (hiddenTids.has(p.tid)) { newLinked[oid] = p; return; }   // hidden duplicate: keep its link as it was
     if (!newLinked[oid]) unlinks.push({ order_id: oid, restore_status: p.prev || 'Pagado' });
   });
   Object.entries(S.extraSel).forEach(([oid, s]) => {
