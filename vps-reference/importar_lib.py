@@ -1200,12 +1200,13 @@ def render_pdf(pdf_bytes, csv_bytes, plan, settings):
     plan = plan or {}
     seq = list(plan.get("sequence") or [])
     ships = plan.get("shipments") or {}
+    excluded = set(plan.get("exclude") or [])
     in_seq = {s.get("tracking_id") for s in seq if s.get("type") == "shipment"}
     report = {"shipments": {}, "warnings": [], "rebuilt": 0, "basic": 0, "pages": 0}
     if fonts.warning:
         report["warnings"].append(fonts.warning)
-    for key in order_seen:                       # never drop a page TikTok gave us
-        if key not in in_seq:
+    for key in order_seen:                       # never drop a page TikTok gave us, unless explicitly excluded
+        if key not in in_seq and key not in excluded:
             seq.append({"type": "shipment", "tracking_id": key})
             report["warnings"].append(f"{key}: no venía en el orden del plan; se agregó al final")
     out = fitz.open()
