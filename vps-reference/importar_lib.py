@@ -1033,7 +1033,7 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
                 txt = clean_text(sg.get("text", ""), fonts.reg)
                 if txt:
                     src = sg.get("source")
-                    blocks.append(("Mensaje del cliente:" if src == "buyer" else "Aviso:" if src == "gift" else "Nota del vendedor:", txt))
+                    blocks.append(("Mensaje del cliente:" if src == "buyer" else "Aviso:" if src == "gift" else "Nota:" if src == "pedido" else "Nota del vendedor:", txt))
         else:
             n = data["notes"].get(oid) or {}
             e = edits.get(oid) or {}
@@ -1081,7 +1081,7 @@ def render_rebuilt_slip(out, data, ship, st, fonts, tracking_id):
             if idx == 0:
                 pg.page.draw_line(fitz.Point(M, y), fitz.Point(W - M, y), color=(0, 0, 0), width=0.6)
                 y += 3
-                _text(pg.page, fonts, M, y + es + 1, "AGREGAR AL PAQUETE", es + 1, True)
+                _text(pg.page, fonts, M, y + es + 1, "CAMBIOS EN EL ENVÍO", es + 1, True)
                 y += (es + 1) * 1.4
             else:
                 pg.page.draw_line(fitz.Point(M, y), fitz.Point(W - M, y), color=(0.45, 0.45, 0.45), width=0.5)
