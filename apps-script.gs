@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-27.4';
+const SCRIPT_VERSION = '2026-10-29.1';
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -348,7 +348,6 @@ function doGet(e) {
   try {
     _ssCache = {};
     const action = e.parameter.action || 'orders';
-
     // 'ping' is what the frontend's ensureToken() uses to validate a saved
     // token. It previously answered OK *before* the auth check, so ANY
     // token -- wrong, blank, or rotated -- passed validation and the user
@@ -8674,7 +8673,7 @@ const IMPORT_LOG_HEADERS = ['Import ID', 'Created', 'By', 'CSV Name', 'PDF Name'
   'Folder ID', 'Status'];
 const IMPORT_LOG_JSON = ['Settings', 'Linked', 'Files'];
 const FUN_FACT_HEADERS = ['ID', 'Order', 'Title', 'Answer', 'Status', 'Added', 'Used Date', 'Used Import'];
-const NOTA_SOURCES_CSV = ['Comprador', 'Vendedor'];
+const NOTA_SOURCES_CSV = ['Comprador', 'Vendedor', 'Regalo'];
 
 function getOrCreateSheet_(ssId, name, headers) {
   const ss = openSheetCached(ssId);
@@ -9490,7 +9489,41 @@ function giftCustomerById_(custId) {
 
 // body: { nota_order_id, recipient_customer_id | new_username, gifter_username,
 //         items: [{ label, text }] }
+// REGALO SIN MENSAJE (2026-10-29): gift for a product whose shipment has no buyer/seller note.
+// The page sends tracking_id instead of nota_order_id; an empty Nota row (Nota Fuente "Regalo")
+// is created on that shipment to carry the gift, then the normal gift code runs.
 function giftCreateAction(body) {
+  const tid = String(body.tracking_id || '').trim();
+  if (String(body.nota_order_id || '').trim() || !tid) return giftCreateCore_(body);
+  if (!(Array.isArray(body.items) && body.items.length)) return jsonResponse({ error: 'Marca al menos un producto para el regalo' });
+  if (!body.giveaway && !body.recipient_customer_id && !String(body.new_username || '').trim()) return jsonResponse({ error: 'Falta el destinatario' });
+  const sheet = getOrdersSheet();
+  ['Nota Original', 'Nota Fuente', 'Nota Pedido', 'Nota Productos', 'Nota Asignada', 'Nota Regalo'].forEach(n => ensureHeader(sheet, n));
+  const oh = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const iTrk = oh.indexOf('Tracking ID'), iCh = oh.indexOf('Channel'), iOid = oh.indexOf('Order ID');
+  const trk = readColumn(sheet, iTrk), chs = readColumn(sheet, iCh);
+  let r = -1;
+  for (let i = 0; i < trk.length; i++) { if (String(trk[i]).trim() === tid && String(chs[i]) === 'TikTok') { r = i + 2; break; } }
+  // TROUBLESHOOT: "No se encontró el envío" = no TikTok row in Orders has this Tracking ID. Check the Tracking ID column.
+  if (r < 0) return jsonResponse({ error: 'No se encontró el envío de TikTok ' + tid });
+  const ship = sheet.getRange(r, 1, 1, oh.length).getValues()[0];
+  let n = 1, id = '';
+  do { id = 'NOTA-GIFT-' + tid + '-' + n; n++; } while (findOrderRow(sheet, id));
+  const firstOrder = String(ship[iOid] || '').split('+')[0].replace(/[^\d]/g, '');
+  const vals = {
+    'Order ID': id, 'Tracking ID': '', 'Customer ID': ship[oh.indexOf('Customer ID')] || '', 'Primary Username': ship[oh.indexOf('Primary Username')] || '',
+    'Channel': 'Nota', 'Status': 'Anotado', 'Products': '', 'Price': 0, 'Notes': 'Regalo sin mensaje', 'Created Date': nowISO(),
+    'Linked Shipment': tid, 'Nota Original': '', 'Nota Fuente': 'Regalo', 'Nota Pedido': firstOrder, 'Nota Productos': '', 'Nota Asignada': '',
+  };
+  const start = sheet.getLastRow() + 1;
+  forceTextFormat(sheet, oh, ['Order ID', 'Tracking ID', 'Nota Pedido'], start, 1);
+  sheet.getRange(start, 1, 1, oh.length).setValues([oh.map(h => (vals[h] !== undefined ? vals[h] : ''))]);
+  logAuditEvent('nota_gift_create', 'Order', id, { tracking_id: tid });
+  body.nota_order_id = id;
+  return giftCreateCore_(body);
+}
+
+function giftCreateCore_(body) {
   const notaId = String(body.nota_order_id || '').trim();
   const items = (Array.isArray(body.items) ? body.items : [])
     .map(it => ({ label: String(it.label || '').trim(),
