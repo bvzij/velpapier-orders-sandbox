@@ -407,13 +407,15 @@ function initSelections() {
     const options = cust.startsWith('USER:') ? [cust.slice(5)] : (ct[cust] || []);
     const prelinked = c.status === 'Anotado' && tids.has(c.linked_shipment);
     S.extraSel[c.order_id] = {
-      checked: prelinked,
+      checked: prelinked || (c.channel === 'Nota' && options.length === 1),   // Pedido Nota: included by default
       tid: prelinked ? c.linked_shipment : (options.length === 1 ? options[0] : ''),
       prelinked,
     };
   });
   S.notaEdit = {};
   (S.ctx.notas || []).forEach(n => { S.notaEdit[n.order_id] = { text: n.text, keys: parseList(n.assigned), giftQty: {} }; });
+  (S.ctx.candidates || []).filter(c => c.channel === 'Nota')
+    .forEach(c => { S.notaEdit[c.order_id] = { text: c.products, keys: parseList(c.assigned), giftQty: {} }; });
   S.factId = (S.log && S.log['Fun Fact ID']) || '';
 }
 
@@ -544,6 +546,7 @@ function settingsChanged() { S.settings = readSettingsForm(); renderSettings(); 
 function noteOwner(n, list) { return (list.find(x => x.tid === n.linked_shipment) || {}).username || '?'; }
 // Products a note can be linked to. Default: the products of ITS order. "Todos": every product of the shipment.
 function noteProducts(n, all) {
+  if (n.pedido) all = true;
   const base = parseCands(n.candidates);
   if (!all) return base;
   const seen = new Set(base.map(c => c.label));
@@ -617,11 +620,11 @@ function noteBoxHtml(n, list) {
   const all = !!(S.notaAll || {})[n.order_id];
   const prods = noteProducts(n, all);
   return `<div class="imp-nota">
-    <b>${esc(i.username || '')}</b> · ${n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente'} · pedido ${esc(n.nota_pedido)}
+    <b>${esc(i.username || '')}</b> · ${n.pedido ? 'Nota de Pedidos' : (n.source === 'Vendedor' ? 'Nota del vendedor' : 'Mensaje del cliente') + ' · pedido ' + esc(n.nota_pedido)}
     ${n.original && n.original !== ed.text ? `<div class="imp-muted">Original: ${esc(n.original)}</div>` : ''}
     <textarea data-nota="${esc(n.order_id)}" oninput="IMP.editNota(this.dataset.nota, this.value)">${esc(ed.text)}</textarea>
     <div style="margin-top:6px;font-size:12.5px"><b>¿A qué producto(s) se refiere?</b>
-      <button data-nota="${esc(n.order_id)}" onclick="IMP.noteAll(this.dataset.nota)" style="margin-left:8px;font:inherit;font-size:12px;background:none;border:none;color:var(--blue-text, #185fa5);cursor:pointer;text-decoration:underline">${all ? 'Solo productos de este pedido' : 'Ver todos los productos del envío'}</button></div>
+      ${n.pedido ? '' : `<button data-nota="${esc(n.order_id)}" onclick="IMP.noteAll(this.dataset.nota)" style="margin-left:8px;font:inherit;font-size:12px;background:none;border:none;color:var(--blue-text, #185fa5);cursor:pointer;text-decoration:underline">${all ? 'Solo productos de este pedido' : 'Ver todos los productos del envío'}</button>`}</div>
     ${prods.length ? prods.map(p => `<label style="display:flex;gap:6px;align-items:flex-start;font-size:13px;margin:3px 0">
         <input type="checkbox" data-nota="${esc(n.order_id)}" data-label="${esc(p.label)}" ${(ed.keys || []).includes(p.label) ? 'checked' : ''}
           onchange="IMP.toggleNotaKey(this.dataset.nota, this.dataset.label, this.checked)" style="margin-top:3px">
@@ -634,6 +637,45 @@ function noteBoxHtml(n, list) {
       <button class="imp-mini" data-nota="${esc(n.order_id)}" onclick="IMP.duplicateNota(this.dataset.nota)">Duplicar nota (para otro producto)</button>
     </div>
     ${giftBoxHtml(n, list)}
+  </div>`;
+}
+// ── Pedido Notas: Notas typed in Pedidos (Channel Nota, no CSV source) ──
+// They stay candidates (so linking / Anotado / "Va con" work as before), but are shown,
+// edited and printed with the same note box as CSV notes.
+function pedidoNotas() {
+  return (S.ctx.candidates || []).filter(c => c.channel === 'Nota').map(c => {
+    const s = S.extraSel[c.order_id] || {};
+    return { order_id: c.order_id, linked_shipment: s.tid || '', text: c.products, original: '', source: 'Pedido', pedido: true,
+             included: !!s.checked, nota_pedido: '', candidates: '', assigned: c.assigned || '', gift: c.gift || null,
+             customer_id: c.customer_id || '', username: c.username || '' };
+  });
+}
+// Every note that goes with a shipment of this import: CSV notes + included Pedido Notas.
+function allNotes() { return (S.ctx.notas || []).concat(pedidoNotas().filter(n => n.included && n.linked_shipment)); }
+function pedidoNotaBlockHtml(list) {
+  const ct = custTids(list);
+  const notes = pedidoNotas().filter(n => candidateCust(candidateById(n.order_id) || {}, list));
+  if (!notes.length) return '';
+  return `<div class="imp-card">
+    <h3><span class="nota-tag">Nota</span> Notas de Pedidos <small>· ${notes.length}</small></h3>
+    <div class="imp-muted" style="margin-bottom:6px">Notas escritas en Pedidos para clientes de esta importación. Marca a qué producto(s) se refiere cada una; sin producto marcado sale al final de la hoja.</div>
+    ${notes.map(n => {
+      const c = candidateById(n.order_id) || {};
+      const cust = candidateCust(c, list);
+      const tids = cust.startsWith('USER:') ? [cust.slice(5)] : (ct[cust] || []);
+      const who = (list.find(i => i.tid === (n.linked_shipment || tids[0])) || {}).username || n.username;
+      const head = `<label style="display:flex;gap:6px;align-items:center;font-size:13px;margin:4px 0">
+          <input type="checkbox" ${n.included ? 'checked' : ''} data-oid="${esc(n.order_id)}" onchange="IMP.toggleExtra(this.dataset.oid, this.checked)">
+          <b>${esc(who)}</b> · incluir en este paquete${c.status === 'No Pagado' ? ' <span class="imp-nopagado">⚠ No pagado</span>' : ''}</label>
+        ${n.included && tids.length > 1 ? `<div style="margin:4px 0">Va con:
+          <select data-oid="${esc(n.order_id)}" onchange="IMP.setExtraTid(this.dataset.oid, this.value)">
+            <option value="">— elegir pedido —</option>
+            ${tids.map(t => { const ii = list.find(x => x.tid === t) || {}; return `<option value="${esc(t)}"${n.linked_shipment === t ? ' selected' : ''}>${esc(ii.username)} · ${esc(t)}</option>`; }).join('')}
+          </select></div>` : ''}`;
+      if (!n.included) return `<div class="imp-nota">${head}<div class="imp-muted">${esc(n.text)}</div></div>`;
+      if (!n.linked_shipment) return `<div class="imp-nota">${head}<div class="imp-muted">${esc(n.text)}</div><div class="imp-warn">Elige a qué envío va.</div></div>`;
+      return `<div class="imp-nota" style="padding:0;border:none;background:none">${head}${noteBoxHtml(n, list)}</div>`;
+    }).join('')}
   </div>`;
 }
 function noteFilter(f) { S.noteFilter = f; renderConfigure(); }
@@ -686,11 +728,12 @@ function renderConfigure() {
   // of THIS order with checkboxes, and it can be split into more pieces (duplicate).
   const visibleTids = new Set(list.map(i => i.tid));
   const visNotas = (S.ctx.notas || []).filter(n => visibleTids.has(n.linked_shipment));
-  const notaHtml = (visNotas.length ? notaBlockHtml(visNotas, list) : '') + giftPickerHtml(list);
+  const notaHtml = (visNotas.length ? notaBlockHtml(visNotas, list) : '') + pedidoNotaBlockHtml(list) + giftPickerHtml(list);
 
   // Extras per customer
   const byCust = {};
   (S.ctx.candidates || []).forEach(cd => {
+    if (cd.channel === 'Nota') return;   // Pedido Notas have their own card
     const cust = candidateCust(cd, list);
     if (cust) (byCust[cust] = byCust[cust] || []).push(cd);
   });
@@ -942,7 +985,7 @@ function giftPick(oid, cid, username) { const ui = S.giftUi[oid]; ui.recipient =
 function giftPickNew(oid) { const ui = S.giftUi[oid]; ui.newName = String(ui.q || '').trim().replace(/^@/, ''); ui.recipient = null; renderConfigure(); }
 async function giftCreate(oid) {
   if (S.giftBusy) return;
-  const n = (S.ctx.notas || []).find(x => x.order_id === oid) || (S.virtualNotas || []).find(x => x.order_id === oid);
+  const n = allNotes().find(x => x.order_id === oid) || (S.virtualNotas || []).find(x => x.order_id === oid);
   const ui = S.giftUi[oid] || {};
   if (!n) return;
   const list = infos();
@@ -1024,7 +1067,7 @@ function buildPlan(mode) {
   const ships = {};
   // Every note piece of each shipment, with its text and the products it is linked to.
   const segsByTid = {};
-  (S.ctx.notas || []).forEach(n => {
+  allNotes().forEach(n => {
     const ed = S.notaEdit[n.order_id] || { text: n.text, keys: [] };
     const g = n.gift;
     if (g && (g.labels || []).length) {
@@ -1041,7 +1084,7 @@ function buildPlan(mode) {
     if (g && (g.labels || []).length) return;   // gift/giveaway: print only the "es para X" line, not the full note
     if (!text) return;
     (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
-      order_id: n.nota_pedido, source: n.source === 'Vendedor' ? 'seller' : 'buyer', text, keys: ed.keys || [] });
+      order_id: n.nota_pedido, source: (n.source === 'Vendedor' || n.pedido) ? 'seller' : 'buyer', text, keys: ed.keys || [] });
   });
   const extrasByTid = {};
   Object.entries(S.extraSel).forEach(([oid, s]) => {
@@ -1052,7 +1095,7 @@ function buildPlan(mode) {
   groups.forEach(g => g.items.forEach(i => {
     ships[i.tid] = {
       username: i.username, count_label: countLabel(i), no_postal: i.no_postal, lapiz: i.lapiz,
-      extras: (extrasByTid[i.tid] || []).map(x => {
+      extras: (extrasByTid[i.tid] || []).filter(x => x.channel !== 'Nota').map(x => {
         const cd = candidateById(x.order_id) || {};
         const num = String(cd.shopify_order_number || '').replace(/^#/, '');
         return { channel: x.channel, shopify_number: num ? '#' + num : '', label: (x.channel === 'Shopify' && num) ? 'Shopify #' + num : (x.channel === 'Manual' ? 'Compra Externa' : x.channel), items: x.items };      }),
@@ -1179,7 +1222,7 @@ async function finalizeLinks() {
     if (s.prelinked && !s.checked && !prev[oid]) unlinks.push({ order_id: oid, restore_status: 'Pagado' });
   });
   const nota_edits = [];
-  (S.ctx.notas || []).forEach(n => {
+  allNotes().forEach(n => {
     const ed = S.notaEdit[n.order_id] || {};
     const text = String(ed.text == null ? n.text : ed.text).trim();
     const keys = ed.keys || [];
