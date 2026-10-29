@@ -1,20 +1,17 @@
 # Vel Papier dashboard — conventions
 
-Paste this file into every AI session that will touch this repo.
+Claude Code loads this file automatically through `CLAUDE.md`.
 Repo: `bvzij/velpapier-orders-sandbox`, branch `main` (the live one).
 
 ## How changes are delivered
 
-- Vel edits only through the GitHub web UI and the Apps Script editor.
-- Small or medium change: exact find/replace text. Large or structural change: a complete file.
-- `apps-script.gs`: one or the other per response, never both.
-- Before editing any file, fetch the current version:
-  `curl -s "https://raw.githubusercontent.com/bvzij/velpapier-orders-sandbox/refs/heads/main/<FILE>" -o "<FILE>"`
+- Work happens locally with Claude Code, on a branch, through a pull request merged in the GitHub UI. The workflow is in `CLAUDE.md`.
+- Apps Script files in the repo are the source of truth. After merge, the deploy notes say which file to paste into the Apps Script editor.
 - VPS code: Python patch scripts with exact-string `str.replace()`, count check (must match exactly once), backup, OK/FAILED per edit. Never nano. Never replace `tiktok_lib.py` wholesale (its logo images are stripped from the reference copy).
 - VPS rebuild: `docker compose build tiktok-import && docker compose up -d --force-recreate tiktok-import`.
 - Apps Script deploy: bump `SCRIPT_VERSION` → Manage deployments → Edit → New version (same URL) → check `?action=version`.
 - One-off scripts go in a separate Apps Script file, run once from the dropdown, then get deleted.
-- Every terminal command ends with `echo "END OF MESSAGE"`.
+- Commands for a person to paste into the VPS terminal end with `echo "END OF MESSAGE"`.
 
 ## Backend rules (apps-script.gs)
 
@@ -32,7 +29,7 @@ Repo: `bvzij/velpapier-orders-sandbox`, branch `main` (the live one).
 - Shipment count definition: `buildShippedCountMap()` only. Recompute with `reconcileCustomerAggregates()`.
 - Status only moves forward: `STATUS_RANK` (No Pagado → Pagado → Enviado → Archivado).
 - Admin-only actions: `requireAdmin(role)` in the dispatcher. Machine tokens: add the action to `SERVICE_ALLOW`.
-- Staff never receive or write `Price` (`HIDE_PRICES_FROM_STAFF`).
+- Staff see and write `Price` (`HIDE_PRICES_FROM_STAFF = false`). Keep the flag's checks in place; don't add new price hiding.
 
 ## Frontend rules
 
