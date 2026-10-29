@@ -1084,7 +1084,7 @@ function buildPlan(mode) {
     if (g && (g.labels || []).length) return;   // gift/giveaway: print only the "es para X" line, not the full note
     if (!text) return;
     (segsByTid[n.linked_shipment] = segsByTid[n.linked_shipment] || []).push({
-      order_id: n.nota_pedido, source: (n.source === 'Vendedor' || n.pedido) ? 'seller' : 'buyer', text, keys: ed.keys || [] });
+      order_id: n.nota_pedido, source: n.pedido ? 'pedido' : (n.source === 'Vendedor' ? 'seller' : 'buyer'), text, keys: ed.keys || [] });
   });
   const extrasByTid = {};
   Object.entries(S.extraSel).forEach(([oid, s]) => {
