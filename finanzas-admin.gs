@@ -516,7 +516,9 @@ function finAiCall_(prov, req) {
     headers = { 'x-goog-api-key': prov.key };
     const gen = { maxOutputTokens: req.maxTokens || 2000, temperature: 0 };
     if (req.json) gen.responseMimeType = 'application/json';
-    if (/^gemini-/.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };   // no hidden "thinking" eating the output budget
+    // Reading a ticket needs no reasoning: switch "thinking" off (the main cause of slow replies).
+    if (/^gemini-2\./.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };
+    else if (/^gemini-/.test(prov.model)) gen.thinkingConfig = { thinkingLevel: 'minimal' };
     payload = {
       contents: [{ role: 'user', parts: req.parts.map(p => p.image ? { inline_data: { mime_type: p.image.mime, data: p.image.data } } : { text: p.text }) }],
       generationConfig: gen,
@@ -531,7 +533,10 @@ function finAiCall_(prov, req) {
     };
     if (req.system) payload.system = req.system;
   }
-  const res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
+  const send = () => UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
+  let res = send();
+  // A model that does not accept the thinking setting answers 400: retry once without it.
+  if (res.getResponseCode() === 400 && payload.generationConfig && payload.generationConfig.thinkingConfig) { delete payload.generationConfig.thinkingConfig; res = send(); }
   const code = res.getResponseCode();
   const body = res.getContentText();
   if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
@@ -602,6 +607,7 @@ function finAiExtractAction(body, identity) {
   });
   parts.push({ text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
   const logId = ids.join(',');
+  const t0 = Date.now();
   let out, parsed;
   try {
     out = finAiCall_(prov, { system: system, parts: parts, maxTokens: 8000, json: true });
@@ -614,7 +620,7 @@ function finAiExtractAction(body, identity) {
   }
   const tin = out.tokensIn, tout = out.tokensOut;
   const cost = Math.round((tin * prov.priceIn + tout * prov.priceOut) / 1e6 * 1e6) / 1e6;
-  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s)' }]);
+  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s) · ' + Math.round((Date.now() - t0) / 1000) + ' s' }]);;
 
   // Normalise + match vendor (suggest-only: the person confirms in the form).
   let vendorId = '';
