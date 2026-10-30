@@ -72,7 +72,7 @@ const FIN_TABS = {
     num: [],
   },
   'Archivos': {
-    headers: ['File ID', 'Nombre', 'Mime', 'Kind', 'Expense ID', 'Invoice ID', 'Scope', 'Subido Por', 'Subido En', 'Bytes'],
+    headers: ['File ID', 'Nombre', 'Mime', 'Kind', 'Expense ID', 'Invoice ID', 'Scope', 'Subido Por', 'Subido En', 'Bytes', 'Storage', 'URL', 'Thumb URL'],
     num: ['Bytes'],
   },
   'Config': {
@@ -630,12 +630,17 @@ function finLearnFromLines_(vendorId, lines, fecha, identity) {
   });
 }
 
-function finLinkFiles_(fileIds, expenseId, scope) {
+function finLinkFiles_(fileIds, expenseId, scope, vendorId, fecha) {
   if (!fileIds.length) return;
   const tab = finRead_('Archivos');
+  const vps = [];
   tab.rows.forEach(r => {
-    if (fileIds.indexOf(String(r['File ID'])) >= 0) finUpdate_('Archivos', r._row, { 'Expense ID': expenseId, 'Scope': scope });
+    if (fileIds.indexOf(String(r['File ID'])) >= 0) {
+      finUpdate_('Archivos', r._row, { 'Expense ID': expenseId, 'Scope': scope });
+      if (String(r['Storage']) === 'vps') vps.push(String(r['File ID']));
+    }
   });
+  if (vps.length) finVpsPlace_(vps, fecha, vendorId);
 }
 
 // Which of these file ids may the caller attach? (their own uploads, or ones already on a visible expense)
@@ -696,7 +701,7 @@ function finCreateExpenseAction(body, identity) {
   e['Flags'] = finComputeFlags_(e, lines, cfg);
   finAppend_('Gastos', [e]);
   const written = lines.length ? finWriteLines_(e['Expense ID'], e['Vendor ID'], lines, identity) : [];
-  finLinkFiles_(fileIds, e['Expense ID'], e['Scope']);
+  finLinkFiles_(fileIds, e['Expense ID'], e['Scope'], e['Vendor ID'], e['Fecha Compra']);
   finLearnFromLines_(e['Vendor ID'], written, e['Fecha Compra'], identity);
   logAuditEvent('fin_create_expense', 'Gasto', e['Expense ID'], { total: e['Total MXN'], vendor: e['Vendor ID'], lines: written.length });
   return jsonResponse({ result: 'ok', expense: finExpenseOut_(e, cfg), lines: finLinesOut_(e['Expense ID']) });
@@ -763,7 +768,7 @@ function finUpdateExpenseAction(body, identity) {
     written = lines.length ? finWriteLines_(cur['Expense ID'], e['Vendor ID'], lines, identity) : [];
     finLearnFromLines_(e['Vendor ID'], written, e['Fecha Compra'], identity);
   }
-  finLinkFiles_(fileIds, cur['Expense ID'], e['Scope']);
+  finLinkFiles_(fileIds, cur['Expense ID'], e['Scope'], e['Vendor ID'] || cur['Vendor ID'], e['Fecha Compra'] || cur['Fecha Compra']);
   logAuditEvent('fin_update_expense', 'Gasto', cur['Expense ID'], { total: e['Total MXN'], before_total: cur['Total MXN'], lines_replaced: wantsLines });
   return jsonResponse({ result: 'ok', expense: finExpenseOut_(Object.assign({}, e, { _row: cur._row }), cfg), lines: finLinesOut_(cur['Expense ID']) });
 }
@@ -842,7 +847,7 @@ function finGetExpenseGet_(p, identity) {
   const r = finFindExpenseRow_(finStr_(p.id));
   if (!r || !finCanSeeExpense_(r, identity, caps)) return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
   const cfg = finConfig_();
-  const files = finRead_('Archivos').rows.filter(f => f['Expense ID'] === r['Expense ID']).map(f => ({ id: f['File ID'], name: f['Nombre'], mime: f['Mime'], kind: f['Kind'] }));
+  const files = finRead_('Archivos').rows.filter(f => f['Expense ID'] === r['Expense ID']).map(f => ({ id: f['File ID'], name: f['Nombre'], mime: f['Mime'], kind: f['Kind'], url: f['Storage'] === 'vps' ? f['URL'] : '', thumb_url: f['Storage'] === 'vps' ? f['Thumb URL'] : '' }));
   let invoice = null;
   if (r['Invoice ID']) {
     const inv = finRead_('Facturas').rows.find(i => i['Invoice ID'] === r['Invoice ID']);
@@ -933,12 +938,62 @@ function finGetFileGet_(p, identity) {
   const id = finStr_(p.id);
   const reg = finRead_('Archivos').rows.find(r => String(r['File ID']) === id);
   if (!reg || !finMayReadFile_(reg, identity, caps)) return finErr_('No se encontró ese archivo.');   // TROUBLESHOOT: file not in the Archivos registry, or the caller cannot see its expense/invoice
+  // Files on the VPS: hand out the links; the browser loads them straight from vp-files.
+  if (String(reg['Storage']) === 'vps') return jsonResponse({ id: id, name: reg['Nombre'], mime: reg['Mime'], url: reg['URL'], thumb_url: reg['Thumb URL'] });
   let file;
   try { file = DriveApp.getFileById(id); } catch (e) { return finErr_('El archivo ya no está en Drive.'); }   // TROUBLESHOOT: the Drive file was deleted by hand
   let blob = null;
   if (p.size === 'thumb' && String(reg['Mime']).indexOf('image/') === 0) { try { blob = file.getThumbnail(); } catch (e) { blob = null; } }
   if (!blob) blob = file.getBlob();
   return jsonResponse({ id: id, name: reg['Nombre'], mime: blob.getContentType() || reg['Mime'], data: Utilities.base64Encode(blob.getBytes()) });
+}
+
+// ─── Ticket files on the VPS (vp-files: Archivos/Finanzas/<yyyy-mm>/<proveedor>, admin-only) ──
+// Older files stay on Drive (Storage blank); new ticket uploads go to the VPS (Storage = 'vps').
+const FIN_VPS_URL_DEFAULT = 'https://files.srv2017849.hstgr.cloud';
+function finVpsBase_() { return String(PropertiesService.getScriptProperties().getProperty('VPFILES_URL') || FIN_VPS_URL_DEFAULT).replace(/\/+$/, ''); }
+function finVpsKey_() {
+  const k = PropertiesService.getScriptProperties().getProperty('VPFILES_FIN_KEY');
+  if (!k) throw new Error('Falta VPFILES_FIN_KEY en Script Properties.');   // TROUBLESHOOT: copy it from the VPS (/data/fin_key.txt in the vp-files container)
+  return k;
+}
+
+// Bytes of a registered file, wherever it lives.
+function finFileBytes_(reg) {
+  if (String(reg['Storage']) === 'vps') {
+    const res = UrlFetchApp.fetch(finVpsBase_() + '/api/fin/file/' + encodeURIComponent(reg['File ID']), { headers: { 'X-Fin-Key': finVpsKey_() }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('el servidor de archivos respondió HTTP ' + res.getResponseCode());   // TROUBLESHOOT: 401 = VPFILES_FIN_KEY wrong; 404 = file deleted on the VPS
+    return res.getBlob().getBytes();
+  }
+  return DriveApp.getFileById(String(reg['File ID'])).getBlob().getBytes();
+}
+
+// Files the expense owns move into Finanzas/<month of purchase>/<supplier>. Never blocks a save.
+function finVpsPlace_(ids, fecha, vendorId) {
+  try {
+    const v = vendorId ? finVendorById_(vendorId) : null;
+    const res = UrlFetchApp.fetch(finVpsBase_() + '/api/fin/place', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'X-Fin-Key': finVpsKey_() },
+      payload: JSON.stringify({ ids: ids, periodo: String(fecha || '').slice(0, 7), vendor: v ? v['Nombre'] : '' }),
+    });
+    if (res.getResponseCode() !== 200) Logger.log('vp-files place HTTP ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));   // TROUBLESHOOT: files stay in "Sin proveedor"; check VPFILES_FIN_KEY
+  } catch (e) { Logger.log('vp-files place failed: ' + e.message); }
+}
+
+function finRegisterFileAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.create']) return finDenied_();
+  const id = finStr_(body.vps_id), url = finStr_(body.url), thumb = finStr_(body.thumb_url), base = finVpsBase_();
+  if (!/^F[0-9a-f]{10}$/.test(id) || url.indexOf(base + '/f/') !== 0 || (thumb && thumb.indexOf(base + '/t/') !== 0)) return finErr_('El archivo subido no es válido.');   // TROUBLESHOOT: the browser sent something that did not come from vp-files; check FIN_VPS in finanzas.js vs VPFILES_URL
+  const mime = finStr_(body.mime).toLowerCase();
+  if (FIN_FILE_MIMES.indexOf(mime) < 0) return finErr_('Ese tipo de archivo no se puede subir (usa foto o PDF).');   // TROUBLESHOOT: mime not in FIN_FILE_MIMES
+  const name = finStr_(body.name).slice(0, 80) || 'ticket';
+  finAppend_('Archivos', [{
+    'File ID': id, 'Nombre': name, 'Mime': mime, 'Kind': 'ticket', 'Expense ID': '', 'Invoice ID': '', 'Scope': 'operativo',
+    'Subido Por': personKey_(identity), 'Subido En': finNow_(), 'Bytes': Math.max(0, finNum_(body.size)), 'Storage': 'vps', 'URL': url, 'Thumb URL': thumb,
+  }]);
+  logAuditEvent('fin_upload_file', 'Archivo', id, { kind: 'ticket', storage: 'vps', bytes: finNum_(body.size) });
+  return jsonResponse({ result: 'ok', file_id: id, name: name, mime: mime, kind: 'ticket' });
 }
 
 // ─── Vendors & categories ──────────────────────────────────────────────────
@@ -1181,6 +1236,7 @@ function finRoutePost(action, body, identity) {
       case 'fin_void_expense':      return finVoidExpenseAction(body, identity);
       case 'fin_mark_paid':         return finMarkPaidAction(body, identity);
       case 'fin_upload_file':       return finUploadFileAction(body, identity);
+      case 'fin_register_file':     return finRegisterFileAction(body, identity);
       case 'fin_create_invoice':    return finCreateInvoiceAction(body, identity);
       case 'fin_link_invoice':      return finLinkInvoiceAction(body, identity);
       case 'fin_unlink_invoice':    return finUnlinkInvoiceAction(body, identity);
