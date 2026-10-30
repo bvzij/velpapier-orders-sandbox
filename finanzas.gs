@@ -451,7 +451,7 @@ function finBootstrapGet_(params, identity) {
     vendors: finVendorsFor_(identity, caps),
     closed_periods: finClosedPeriods_(),
     enums: { metodos: FIN_METODOS, estados_factura: FIN_ESTADOS_FACTURA, captura: FIN_CAPTURA, tipos_linea: FIN_TIPOS_LINEA, unidades: FIN_UNIDADES, scopes: FIN_SCOPES },
-    ai_ready: !!(caps['finance.ai_prefill'] && props.getProperty('FIN_ANTHROPIC_KEY')),
+    ai_ready: !!(caps['finance.ai_prefill'] && finAiProvider_()),
   });
 }
 
