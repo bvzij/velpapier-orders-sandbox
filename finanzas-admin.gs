@@ -478,7 +478,7 @@ function finExportZipGet_(p, identity) {
 //   FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL -> optional: override the model name without a code change
 
 const FIN_AI_PROVIDERS = {
-  gemini:    { keyProp: 'FIN_GEMINI_KEY',    modelProp: 'FIN_GEMINI_MODEL',    model: 'gemini-2.5-flash', priceIn: 0,    priceOut: 0 },      // free tier: cost logged as 0
+  gemini:    { keyProp: 'FIN_GEMINI_KEY',    modelProp: 'FIN_GEMINI_MODEL',    model: 'gemini-3.8-flash', priceIn: 0,    priceOut: 0 },      // free tier: cost logged as 0
   anthropic: { keyProp: 'FIN_ANTHROPIC_KEY', modelProp: 'FIN_ANTHROPIC_MODEL', model: 'claude-haiku-5-5', priceIn: 0.10, priceOut: 0.50 },  // USD per million tokens
 };
 
@@ -516,7 +516,7 @@ function finAiCall_(prov, req) {
     headers = { 'x-goog-api-key': prov.key };
     const gen = { maxOutputTokens: req.maxTokens || 2000, temperature: 0 };
     if (req.json) gen.responseMimeType = 'application/json';
-    if (/^gemini-2\.5-flash/.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };   // no hidden "thinking" eating the output budget
+    if (/^gemini-/.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };   // no hidden "thinking" eating the output budget
     payload = {
       contents: [{ role: 'user', parts: req.parts.map(p => p.image ? { inline_data: { mime_type: p.image.mime, data: p.image.data } } : { text: p.text }) }],
       generationConfig: gen,
