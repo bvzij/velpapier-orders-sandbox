@@ -257,7 +257,7 @@
   // Tickets waiting for a person: 'Por capturar' (just photos) and 'Borrador IA' (the AI filled a draft).
   // Selecting cards (in tap order) opens a bar to read them with AI or join them into one ticket.
   const INBOX_SEL = [];          // Expense IDs in the order they were tapped (photo 1 = top of the ticket)
-  let INBOX_POLL = null, INBOX_KICK = 0;
+  let INBOX_POLL = null, INBOX_KICK = 0, INBOX_UPLOADING = 0;
   function ensureAiStyle() {
     if (document.getElementById('fin-ai-style')) return;
     const st = document.createElement('style');
@@ -302,7 +302,7 @@
     c.innerHTML = `
       <div class="fin-dropzone" id="fin-dz" data-act="pick">Toma o sube la foto del ticket ahora y captura los datos después. También puedes arrastrar fotos aquí.</div>
       <div id="fin-selbar-wrap"></div>
-      ${res.rows.length ? `<div class="fin-inbox">${res.rows.map(o => {
+      ${res.rows.length || INBOX_UPLOADING ? `<div class="fin-inbox">${Array.from({ length: INBOX_UPLOADING }, () => '<div class="fin-inbox-card"><div class="fin-thumb-doc" style="width:100%;height:150px"><span class="fin-spin"></span>Subiendo…</div></div>').join('')}${res.rows.map(o => {
         const id = o['Expense ID'], n = INBOX_SEL.indexOf(id) + 1, ready = o['Captura Status'] === 'Borrador IA';
         return `
         <div class="fin-inbox-card ${ready ? 'ai-ready' : ''} ${n ? 'is-sel' : ''}" data-id="${esc(id)}">
@@ -393,22 +393,21 @@
       if (same === null) return;
       groups = same ? [files] : files.map(f => [f]);
     }
-    const ov = busy('Subiendo…');
-    let ok = 0;
-    try {
-      for (let g = 0; g < groups.length; g++) {
-        const ids = [];
-        for (let i = 0; i < groups[g].length; i++) {
-          ov.set('Subiendo ' + (ok + 1) + ' de ' + files.length + '…');
-          const r = await uploadTicket(groups[g][i]);
-          ids.push(r.file_id); ok++;
-        }
+    // Uploads run in the background: the Bandeja shows a "Subiendo…" card per ticket and stays usable.
+    // Each ticket is created as soon as its own photos are up (photo order inside a ticket is kept).
+    INBOX_UPLOADING += groups.length;
+    if (can('finance.create')) show('bandeja');
+    let done = 0;
+    await Promise.all(groups.map(async group => {
+      try {
+        const ids = await Promise.all(group.map(f => uploadTicket(f).then(r => r.file_id)));
         await post('fin_create_expense', { expense: { captura_status: 'Por capturar', archivos: ids, fecha_compra: B.today } });
-      }
-      VP.toast(groups.length > 1 ? groups.length + ' tickets en la bandeja' : 'Foto guardada en la bandeja');
-    } catch (e) { fail(e); }
-    ov.done();
-    if (can('finance.create')) { show('bandeja'); }
+        done++;
+      } catch (e) { fail(e); }
+      INBOX_UPLOADING--;
+      if (TAB === 'bandeja' && !document.querySelector('.vp-modal-card')) RENDER.bandeja().catch(() => {}); else refreshInboxCount();
+    }));
+    if (done) VP.toast(done > 1 ? done + ' tickets en la bandeja' : 'Foto guardada en la bandeja');
   }
 
   ACT.cam = () => { const i = $('fin-cam'); i.value = ''; i.click(); };
