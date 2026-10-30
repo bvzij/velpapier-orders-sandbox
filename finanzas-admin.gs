@@ -20,10 +20,10 @@ function finCloseCheckGet_(p, identity) {
   const lines = finRead_('Gasto Líneas').rows;
   const ids = {};
   inP.forEach(r => { ids[r['Expense ID']] = true; });
-  const pendInv = inP.filter(r => r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0 && r['Captura Status'] !== 'Por capturar');
+  const pendInv = inP.filter(r => r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0 && !finIsDraft_(r));
   return jsonResponse({
     periodo: periodo, closed: finIsClosed_(periodo),
-    por_capturar: inP.filter(r => r['Captura Status'] === 'Por capturar').length,
+    por_capturar: inP.filter(r => finIsDraft_(r)).length,
     por_pagar: inP.filter(r => r['Captura Status'] === 'Por pagar').length,
     sin_revisar: inP.filter(r => r['Captura Status'] === 'Capturado').length,
     facturas_pendientes: pendInv.length,
@@ -62,7 +62,7 @@ function finReopenMonthAction(body, identity) {
 
 function finPettyBalances_() {
   const moves = finRead_('Caja Chica').rows;
-  const spent = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Método Pago'] === 'Caja chica' && r['Captura Status'] !== 'Por capturar');
+  const spent = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Método Pago'] === 'Caja chica' && !finIsDraft_(r));
   const people = {};
   const ensure = n => (people[n] = people[n] || { responsable: n, fondeos: 0, ajustes: 0, gastos: 0, saldo: 0 });
   moves.forEach(m => { const o = ensure(String(m['Responsable']).toUpperCase()); if (m['Tipo'] === 'Fondeo') o.fondeos += finNum_(m['Monto']); else o.ajustes += finNum_(m['Monto']); });
@@ -380,7 +380,7 @@ function finSummaryGet_(p, identity) {
     },
     iva_acreditable: finR2_(withInv.reduce((s, r) => s + finNum_(r['IVA']), 0)),
     por_pagar: { count: inP.filter(r => r['Captura Status'] === 'Por pagar').length, total: sum(inP.filter(r => r['Captura Status'] === 'Por pagar')) },
-    por_capturar: inP.filter(r => r['Captura Status'] === 'Por capturar').length,
+    por_capturar: inP.filter(r => finIsDraft_(r)).length,
     reembolsos_pendientes: { count: rows.filter(r => r['Reembolso Status'] === 'Pendiente').length, total: sum(rows.filter(r => r['Reembolso Status'] === 'Pendiente')) },
     lineas_sin_vincular: allLines.filter(l => l['Status'] === 'Activo' && l['Tipo Línea'] === 'Inventario' && !l['Catalog ID'] && idsP[l['Expense ID']]).length,
     months: series,
@@ -396,7 +396,7 @@ function finSlimGet_(p, identity) {
   const cats = {};
   finRead_('Categorías').rows.forEach(c => { cats[c['Category ID']] = c; });
   const rows = finRead_('Gastos').rows
-    .filter(r => r['Status'] === 'Activo' && r['Captura Status'] !== 'Por capturar' && finCanSeeExpense_(r, identity, caps))
+    .filter(r => r['Status'] === 'Activo' && !finIsDraft_(r) && finCanSeeExpense_(r, identity, caps))
     .map(r => ({
       periodo: r['Periodo'], fecha: r['Fecha Compra'], vendorId: r['Vendor ID'], categoryId: r['Category ID'],
       tipoContable: cats[r['Category ID']] ? cats[r['Category ID']]['Tipo Contable'] : '', scope: r['Scope'],
@@ -421,7 +421,7 @@ function finExportMonthGet_(p, identity) {
   finRead_('Categorías').rows.forEach(c => { cats[c['Category ID']] = c; });
   finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = v; });
   finRead_('Facturas').rows.forEach(i => { invoices[i['Invoice ID']] = i; });
-  const exps = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Periodo'] === periodo && r['Captura Status'] !== 'Por capturar' && finCanSeeExpense_(r, identity, caps));
+  const exps = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Periodo'] === periodo && !finIsDraft_(r) && finCanSeeExpense_(r, identity, caps));
   const h1 = ['ID', 'Fecha compra', 'Fecha pago', 'Proveedor', 'RFC proveedor', 'Categoría', 'Tipo contable', 'Alcance', 'Descripción', 'Método de pago', 'Cuenta', 'Moneda', 'Subtotal', 'IVA', 'Total', 'Total MXN', 'Estado factura', 'UUID factura', 'Folio ticket', 'Deducible', 'Banderas', 'Notas'];
   const r1 = exps.sort((a, b) => String(a['Fecha Compra']).localeCompare(String(b['Fecha Compra']))).map(r => {
     const v = vendors[r['Vendor ID']] || {}, c = cats[r['Category ID']] || {}, inv = invoices[r['Invoice ID']] || {};
@@ -576,6 +576,7 @@ function finAiCall_(prov, req) {
   const code = res.getResponseCode();
   const body = res.getContentText();
   if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
+  if (code >= 500) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 500)); throw new Error('La IA está saturada (HTTP ' + code + '). Se reintenta sola.'); }   // TROUBLESHOOT: Google's servers were overloaded; temporary, the queue retries up to 3 times
   if (code !== 200) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 1000)); throw new Error('La IA no respondió (HTTP ' + code + ').'); }   // TROUBLESHOOT: 400/403 = wrong key or model; 404 = model name no longer exists (set FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL); body is in the Executions log
   const out = JSON.parse(body);
   if (prov.name === 'gemini') {
@@ -726,6 +727,177 @@ function finAiSelfTest() {
   if (!prov) { Logger.log('Falta FIN_GEMINI_KEY o FIN_ANTHROPIC_KEY en Script Properties.'); return; }
   const out = finAiCall_(prov, { parts: [{ text: 'Reply with the single word OK.' }], maxTokens: 20 });
   Logger.log('Proveedor: ' + prov.name + ' · modelo: ' + prov.model + ' · respuesta: ' + out.text + ' · tokens: ' + out.tokensIn + '/' + out.tokensOut);
+}
+
+// ─── AI reading queue: Bandeja tickets are read on the server, one at a time ───
+// The browser only queues tickets and starts the worker; the reading itself runs on Google's side,
+// so closing the tab or changing page never loses a result. Results are saved on the ticket as a
+// draft (Captura Status = 'Borrador IA', AI Borrador = JSON) until a person opens and saves it.
+//   AI Estado: '' | 'En cola' | 'Leyendo' | 'Error'      AI Borrador: the draft (or the error text)
+const FIN_AI_WORKER_BUDGET_MS = 200000;   // stop picking new tickets after ~3.3 min (Apps Script stops at 6)
+const FIN_AI_STALE_MS = 10 * 60 * 1000;   // a 'Leyendo' older than this was cut off: read it again
+
+// Short write under the global lock; re-finds the row each time (rows can move when others are deleted).
+function finAiPatch_(expenseId, patch) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('Servidor ocupado');   // TROUBLESHOOT: another save held the lock 20 s; the worker retries on its next run
+  try {
+    const cur = finFindExpenseRow_(expenseId);
+    if (cur) finUpdate_('Gastos', cur._row, patch);
+    return cur;
+  } finally { lock.releaseLock(); }
+}
+
+function finAiEnqueueAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.ai_prefill'] || !caps['finance.create']) return finDenied_();
+  if (!finAiProvider_()) return finErr_('La lectura con IA todavía no está activada.');   // TROUBLESHOOT: add FIN_GEMINI_KEY or FIN_ANTHROPIC_KEY in Script Properties
+  const ids = (Array.isArray(body.expense_ids) ? body.expense_ids : []).map(finStr_).filter(Boolean).slice(0, 200);
+  const imgs = {};
+  finRead_('Archivos').rows.forEach(f => { if (String(f['Mime']).indexOf('image/') === 0) imgs[String(f['File ID'])] = true; });
+  const queued = [], skipped = [];
+  finRead_('Gastos').rows.forEach(r => {
+    if (ids.indexOf(String(r['Expense ID'])) < 0) return;
+    const hasImg = finStr_(r['Archivos']).split('|').some(f => imgs[f]);
+    if (r['Status'] !== 'Activo' || !finIsDraft_(r) || !hasImg || r['AI Estado'] === 'Leyendo' || !finCanSeeExpense_(r, identity, caps)) { skipped.push(r['Expense ID']); return; }
+    // A re-read replaces any earlier draft, so the old one never shows up as if it were the new result.
+    finUpdate_('Gastos', r._row, { 'AI Estado': 'En cola', 'AI Fecha': finNow_(), 'AI Pedido Por': personKey_(identity), 'Captura Status': 'Por capturar', 'AI Borrador': '' });
+    queued.push(r['Expense ID']);
+  });
+  if (queued.length) PropertiesService.getScriptProperties().setProperty('FIN_AI_QUEUE', '1');
+  logAuditEvent('fin_ai_enqueue', 'Gasto', queued.slice(0, 20).join(','), { queued: queued.length, skipped: skipped.length });
+  return jsonResponse({ result: 'ok', queued: queued, skipped: skipped });
+}
+
+// Browser "start now": runs the worker inside this request (outside the write lock, see doPost).
+function finAiWorkAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.ai_prefill']) return finDenied_();
+  return jsonResponse({ result: 'ok', done: finAiWorker() });
+}
+
+// Also the time-driven trigger entry point (install once with finAiInstallTrigger).
+function finAiWorker() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('FIN_AI_QUEUE') !== '1') return 0;   // nothing queued: costs a few ms
+  const lock = LockService.getUserLock();                     // one worker at a time (separate from the write lock)
+  if (!lock.tryLock(500)) return 0;                           // another worker is already busy
+  const t0 = Date.now();
+  let done = 0;
+  try {
+    while (Date.now() - t0 < FIN_AI_WORKER_BUDGET_MS) {
+      const now = Date.now();
+      const next = finRead_('Gastos').rows
+        .filter(r => r['Status'] === 'Activo' && finIsDraft_(r) && (r['AI Estado'] === 'En cola'
+          || (r['AI Estado'] === 'Leyendo' && now - finParseNow_(r['AI Fecha']) > FIN_AI_STALE_MS)))
+        .sort((a, b) => String(a['AI Fecha']).localeCompare(String(b['AI Fecha'])))[0];
+      if (!next) { props.deleteProperty('FIN_AI_QUEUE'); break; }
+      const id = next['Expense ID'];
+      finAiPatch_(id, { 'AI Estado': 'Leyendo', 'AI Fecha': finNow_() });
+      const who = { name: finStr_(next['AI Pedido Por']) || 'IA', role: 'admin' };   // permission was checked when it was queued
+      let out;
+      try {
+        const files = finStr_(next['Archivos']).split('|').filter(Boolean);   // stored in ticket order (photo 1 = top)
+        out = JSON.parse(finAiExtractAction({ file_ids: files }, who).getContent());
+      } catch (e) { out = { error: e.message }; }
+      if (out && out.result === 'ok') {
+        const draft = JSON.stringify(out.suggestion);
+        if (draft.length > 45000) finAiPatch_(id, { 'AI Estado': 'Error', 'AI Borrador': 'El ticket es demasiado largo para guardarse como borrador. Divídelo en dos.' });   // TROUBLESHOOT: Sheets cells hold 50,000 characters
+        else finAiPatch_(id, { 'AI Estado': '', 'AI Borrador': draft, 'Captura Status': 'Borrador IA', 'AI Fecha': finNow_() });
+      } else {
+        const msg = String((out && out.error) || 'Error desconocido');
+        // Overload / rate limit is temporary: back in the queue (behind the others), up to 3 tries, before showing Error.
+        const cache = CacheService.getScriptCache(), rk = 'finai_retry_' + id, tries = Number(cache.get(rk) || 0) + 1;
+        if (/saturada|HTTP 5\d\d|límite gratuito/i.test(msg) && tries <= 3) {
+          cache.put(rk, String(tries), 21600);
+          finAiPatch_(id, { 'AI Estado': 'En cola', 'AI Fecha': finNow_() });
+          props.setProperty('FIN_AI_QUEUE', '1');
+        } else {
+          cache.remove(rk);
+          finAiPatch_(id, { 'AI Estado': 'Error', 'AI Borrador': msg.slice(0, 500), 'AI Fecha': finNow_() });
+        }
+      }
+      done++;
+    }
+  } finally { lock.releaseLock(); }
+  return done;
+}
+
+// 'yyyy-MM-dd HH:mm' (Mexico City) -> ms. Unreadable -> 0 (treated as old).
+function finParseNow_(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] + 6, +m[5]) : 0;   // Mexico City is UTC-6
+}
+
+// Editor helper: run ONCE. A 5-minute safety net that finishes the queue even when nobody has the page open.
+function finAiInstallTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => { if (t.getHandlerFunction() === 'finAiWorker') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('finAiWorker').timeBased().everyMinutes(5).create();
+  Logger.log('finAiWorker trigger installed (every 5 minutes).');
+}
+
+// ─── Bandeja: join several photos into one ticket, split them again, reorder ───
+function finInboxGuard_(r, identity, caps) {
+  return r && r['Status'] === 'Activo' && finIsDraft_(r) && finCanSeeExpense_(r, identity, caps)
+    && (caps['finance.edit_any'] || String(r['Creado Por']).toUpperCase() === personKey_(identity));
+}
+function finSetFilesExpense_(fileIds, expenseId) {
+  finRead_('Archivos').rows.forEach(f => { if (fileIds.indexOf(String(f['File ID'])) >= 0) finUpdate_('Archivos', f._row, { 'Expense ID': expenseId }); });
+}
+
+// ids in tap order: the first ticket keeps its row; the others' photos are appended and their rows voided.
+function finInboxMergeAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.create']) return finDenied_();
+  const ids = (Array.isArray(body.expense_ids) ? body.expense_ids : []).map(finStr_).filter(Boolean);
+  if (ids.length < 2) return finErr_('Elige al menos dos fotos para unir.');
+  const rows = ids.map(id => finFindExpenseRow_(id));
+  if (rows.some(r => !finInboxGuard_(r, identity, caps))) return finErr_('Solo se pueden unir tickets de la bandeja que puedes editar.');   // TROUBLESHOOT: one of them was already captured, voided, or belongs to someone else
+  if (rows.some(r => r['AI Estado'] === 'Leyendo')) return finErr_('Espera a que la IA termine de leer antes de unir.');
+  const target = rows[0], files = [];
+  rows.forEach(r => finStr_(r['Archivos']).split('|').filter(Boolean).forEach(f => { if (files.indexOf(f) < 0) files.push(f); }));
+  finUpdate_('Gastos', target._row, { 'Archivos': files.join('|'), 'Captura Status': 'Por capturar', 'AI Estado': '', 'AI Borrador': '', 'Editado Por': personKey_(identity), 'Editado En': finNow_() });
+  rows.slice(1).forEach(r => {
+    const cur = finFindExpenseRow_(r['Expense ID']);
+    finUpdate_('Gastos', cur._row, { 'Archivos': '', 'Status': 'Anulado', 'Anulado Por': personKey_(identity), 'Anulado En': finNow_(), 'Motivo Anulación': 'Unida en ' + target['Expense ID'] });
+  });
+  finSetFilesExpense_(files, target['Expense ID']);
+  logAuditEvent('fin_inbox_merge', 'Gasto', target['Expense ID'], { merged: ids.slice(1), photos: files.length });
+  return jsonResponse({ result: 'ok', expense_id: target['Expense ID'], photos: files.length });
+}
+
+// One Bandeja ticket per photo again (the first photo stays on the original ticket).
+function finInboxSplitAction(body, identity) {
+  const caps = resolveCaps(identity);
+  const cur = finFindExpenseRow_(finStr_(body.expense_id));
+  if (!finInboxGuard_(cur, identity, caps)) return finErr_('Solo se pueden separar tickets de la bandeja que puedes editar.');
+  const files = finStr_(cur['Archivos']).split('|').filter(Boolean);
+  if (files.length < 2) return finErr_('Este ticket tiene una sola foto.');
+  finUpdate_('Gastos', cur._row, { 'Archivos': files[0], 'Captura Status': 'Por capturar', 'AI Estado': '', 'AI Borrador': '', 'Editado Por': personKey_(identity), 'Editado En': finNow_() });
+  const created = [];
+  files.slice(1).forEach(f => {
+    const id = finNextId_('GST', 6);
+    finAppend_('Gastos', [{ 'Expense ID': id, 'Captura Status': 'Por capturar', 'Status': 'Activo', 'Fecha Compra': cur['Fecha Compra'], 'Periodo': cur['Periodo'],
+      'Scope': cur['Scope'], 'Moneda': cur['Moneda'] || 'MXN', 'Tipo Cambio': cur['Tipo Cambio'] || 1, 'Archivos': f, 'Notas': cur['Notas'],
+      'Creado Por': cur['Creado Por'], 'Creado En': finNow_() }]);
+    finSetFilesExpense_([f], id);
+    created.push(id);
+  });
+  logAuditEvent('fin_inbox_split', 'Gasto', cur['Expense ID'], { created: created });
+  return jsonResponse({ result: 'ok', created: created });
+}
+
+// New photo order for a ticket (photo 1 = top of the ticket; the AI reads them in this order).
+function finReorderFilesAction(body, identity) {
+  const caps = resolveCaps(identity);
+  const cur = finFindExpenseRow_(finStr_(body.expense_id));
+  if (!cur || !finCanSeeExpense_(cur, identity, caps)) return finErr_('No se encontró ese gasto.');
+  if (!(caps['finance.edit_any'] || String(cur['Creado Por']).toUpperCase() === personKey_(identity))) return finDenied_();
+  const have = finStr_(cur['Archivos']).split('|').filter(Boolean);
+  const want = (Array.isArray(body.files) ? body.files : []).map(finStr_);
+  if (want.length !== have.length || want.some(f => have.indexOf(f) < 0)) return finErr_('Las fotos no coinciden; recarga la página.');   // TROUBLESHOOT: someone changed the photos meanwhile
+  finUpdate_('Gastos', cur._row, { 'Archivos': want.join('|') });
+  return jsonResponse({ result: 'ok' });
 }
 
 // ─── Clean slate + bulk delete (admin only) ───────────────────────────────
