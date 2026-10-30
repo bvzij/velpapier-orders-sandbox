@@ -346,6 +346,7 @@
         <label class="fin-field fin-span2">Página para pedir factura<input class="vp-input" id="pv-portal" value="${esc(v['Portal Facturación URL'] || '')}" placeholder="https://…"></label>
         <label class="fin-field">¿Hasta cuándo se puede facturar?<select class="vp-input" id="pv-regla">${['Mismo mes', 'N días', 'Sin límite'].map(r => `<option ${r === (v['Regla Plazo Factura'] || 'Mismo mes') ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
         <label class="fin-field">Días (si es “N días”)<input class="vp-input" id="pv-dias" type="number" min="0" value="${esc(v['Días Plazo'] || '')}"></label>
+        <label class="fin-field">Método de pago habitual<select class="vp-input" id="pv-metodo"><option value="">—</option>${(B.enums.metodos || []).map(x => `<option ${x === v['Método Pago Default'] ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
         <label class="fin-field">¿Normalmente dan factura?<select class="vp-input" id="pv-req"><option ${v['Requiere Factura Default'] !== 'No' ? 'selected' : ''}>Sí</option><option ${v['Requiere Factura Default'] === 'No' ? 'selected' : ''}>No</option></select></label>
         <label class="fin-field">Alias (nombres en tickets, separados por |)<input class="vp-input" id="pv-alias" value="${esc(v['Alias'] || '')}"></label>
         <label class="fin-field">Teléfono / contacto<input class="vp-input" id="pv-contacto" value="${esc(v['Contacto'] || v['Teléfono'] || '')}"></label>
@@ -359,7 +360,7 @@
     q('#pv-save').onclick = async () => {
       const vendor = {
         nombre: q('#pv-nombre').value.trim(), rfc: q('#pv-rfc').value.trim(), default_category_id: q('#pv-cat').value, portal: q('#pv-portal').value.trim(),
-        regla_plazo: q('#pv-regla').value, dias_plazo: q('#pv-dias').value, requiere_default: q('#pv-req').value, alias: q('#pv-alias').value.trim(),
+        regla_plazo: q('#pv-regla').value, dias_plazo: q('#pv-dias').value, requiere_default: q('#pv-req').value, metodo_default: q('#pv-metodo').value, alias: q('#pv-alias').value.trim(),
         contacto: q('#pv-contacto').value.trim(), notas: q('#pv-notas').value.trim(),
       };
       if (!vendor.nombre) { VP.toast('Escribe el nombre del proveedor.', true); return; }
@@ -403,16 +404,18 @@
     return `
       <h3 class="fin-modal-h">${isNew ? 'Nuevo gasto' : 'Gasto ' + esc(e['Expense ID'])}</h3>
       ${e['Captura Status'] === 'Por capturar' ? '<div class="fin-note">Viene de la bandeja: completa los datos del ticket.</div>' : ''}
-      <div class="fin-h3" style="margin-top:12px">Fotos del ticket</div>
+      <div class="fin-h3" style="margin-top:12px;display:flex;justify-content:space-between;align-items:center">Fotos del ticket
+        <button class="btn btn-sm fin-ai-btn" type="button" data-f="ai" id="ff-ai" style="display:none" title="Llena los campos marcados con ✨ a partir de las fotos. Tú revisas antes de guardar.">✨ Leer ticket con IA</button></div>
       <div class="fin-photos" id="ff-photos"></div>
+      <div class="fin-note" id="ff-ai-hint" style="display:none">Los campos con ✨ los puede llenar la IA. Lo que llene queda en azul hasta que lo cambies.</div>
       <div class="fin-grid" style="margin-top:12px">
-        <label class="fin-field fin-span2">Proveedor<div style="display:flex;gap:6px"><input class="vp-input" id="ff-vendor" list="fin-vendors" autocomplete="off" placeholder="Escribe para buscar…" value="${esc(vendorName(e['Vendor ID']))}"><button class="btn btn-sm" type="button" data-f="new-vendor">+ Nuevo</button></div></label>
-        <label class="fin-field">Fecha de compra<input class="vp-input" id="ff-fecha" type="date" value="${esc(e['Fecha Compra'] || B.today)}"></label>
-        <label class="fin-field">Total del ticket<input class="vp-input" id="ff-total" type="number" step="0.01" min="0" inputmode="decimal" value="${num(e['Total']) ? esc(e['Total']) : ''}" placeholder="0.00"></label>
+        <label class="fin-field fin-span2">✨ Proveedor<div style="display:flex;gap:6px"><input class="vp-input" id="ff-vendor" list="fin-vendors" autocomplete="off" placeholder="Escribe para buscar…" value="${esc(vendorName(e['Vendor ID']))}"><button class="btn btn-sm" type="button" data-f="new-vendor">+ Nuevo</button></div></label>
+        <label class="fin-field">✨ Fecha de compra<input class="vp-input" id="ff-fecha" type="date" value="${esc(e['Fecha Compra'] || B.today)}"></label>
+        <label class="fin-field">✨ Total del ticket<input class="vp-input" id="ff-total" type="number" step="0.01" min="0" inputmode="decimal" value="${num(e['Total']) ? esc(e['Total']) : ''}" placeholder="0.00"></label>
         <label class="fin-field">Método de pago<select class="vp-input" id="ff-metodo">${(B.enums.metodos || []).map(x => `<option ${x === m ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
         <label class="fin-field">Tarjeta / cuenta<input class="vp-input" id="ff-cuenta" list="fin-accounts" value="${esc(e['Cuenta Pago'] || '')}" placeholder="Ej. BBVA 4417"></label>
         <label class="fin-field">Categoría<select class="vp-input" id="ff-cat">${catOptions(e['Category ID'])}</select></label>
-        <label class="fin-field">Folio del ticket<input class="vp-input" id="ff-folio" value="${esc(e['Folio Ticket'] || '')}"></label>
+        <label class="fin-field">✨ Folio del ticket<input class="vp-input" id="ff-folio" value="${esc(e['Folio Ticket'] || '')}"></label>
         <label class="fin-field fin-span2">Descripción<input class="vp-input" id="ff-desc" value="${esc(e['Descripción'] || '')}" placeholder="¿Qué se compró?"></label>
         <label class="fin-field">¿Piden factura?<select class="vp-input" id="ff-req"><option value="">Según el proveedor</option><option ${e['Requiere Factura'] === 'Sí' ? 'selected' : ''}>Sí</option><option ${e['Requiere Factura'] === 'No' ? 'selected' : ''}>No</option></select></label>
         <label class="fin-field fin-span2">Datos para facturar en línea (folio web, código…)<input class="vp-input" id="ff-datos" value="${esc(e['Datos Facturación'] || '')}"></label>
@@ -429,7 +432,7 @@
         </div>
       </details>
       <div class="fin-h3" style="display:flex;justify-content:space-between;align-items:center">Productos del ticket (opcional)
-        <span><button class="btn btn-sm" type="button" data-f="ai" id="ff-ai" style="display:none">✨ Leer ticket con IA</button> <button class="btn btn-sm" type="button" data-f="add-line">+ Línea</button></span></div>
+        <span><button class="btn btn-sm" type="button" data-f="add-line">+ Línea</button></span></div>
       <div class="fin-lines" id="ff-lines"></div>
       <div class="fin-note" id="ff-sum"></div>
       <div id="ff-msg"></div>
@@ -450,7 +453,8 @@
 
   function renderLines() {
     const el = $('ff-lines'); if (!el) return;
-    const units = B.enums.unidades || ['pz'];
+    // Unit and pieces-per-unit are hidden for now: every line is loose pieces (pz, 1 pza c/u).
+    // The values still travel to the server, so re-showing the two fields later needs no backend change.
     el.innerHTML = FM.lines.map((l, i) => {
       const linked = l.catalog_id ? (prodById(l.catalog_id) ? prodById(l.catalog_id).name : l.catalog_id) : '';
       return `<div class="fin-line ${l._ai ? 'fin-ai' : ''}" data-i="${i}">
@@ -463,8 +467,6 @@
           <button type="button" class="fin-line-x" data-f="rm-line" data-i="${i}" title="Quitar línea">×</button>
         </div>
         <div class="fin-line-sub">
-          <select class="vp-input" data-k="unidad">${units.map(u => `<option ${u === l.unidad ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select>
-          <span>con</span><input class="vp-input" data-k="ppu" type="number" step="any" min="0" style="width:64px" value="${esc(l.ppu)}"><span>pzas c/u</span>
           <select class="vp-input" data-k="tipo">${(B.enums.tipos_linea || []).map(t => `<option ${t === l.tipo ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>
           <input class="vp-input" data-k="_prod" list="fin-products" placeholder="Producto del catálogo (opcional)" style="flex:1;min-width:150px" value="${esc(linked)}">
           ${l._sug && !l.catalog_id ? `<span class="fin-badge fin-b-blue fin-sug" data-f="use-sug" data-i="${i}">Sugerido: ${esc((prodById(l._sug.catalog_id) || {}).name || l._sug.catalog_id)} — usar</span>` : ''}
@@ -498,6 +500,9 @@
     const v = vendorByName(val('ff-vendor'));
     if (!v) return;
     if (!val('ff-cat') && v['Default Category ID'] && $('ff-cat').querySelector(`option[value="${v['Default Category ID']}"]`)) $('ff-cat').value = v['Default Category ID'];
+    // Payment method and invoice rule follow the supplier; the person can still change them for this expense.
+    if (v['Método Pago Default'] && (B.enums.metodos || []).indexOf(v['Método Pago Default']) >= 0) $('ff-metodo').value = v['Método Pago Default'];
+    if (v['Requiere Factura Default'] && !val('ff-req')) $('ff-req').value = v['Requiere Factura Default'];
   }
 
   async function suggestFor(i) {
@@ -505,7 +510,7 @@
     if (!l || !v || l.catalog_id || !(l.codigo || l.descripcion)) return;
     try {
       const r = await api('fin_map_suggest&' + qsOf({ vendor_id: v['Vendor ID'], code: l.codigo, desc: l.descripcion }));
-      if (r.suggestions && r.suggestions[0]) { l._sug = r.suggestions[0]; if (!l.ppu || l.ppu === 1) l.ppu = r.suggestions[0].ppu || 1; renderLines(); }
+      if (r.suggestions && r.suggestions[0]) { l._sug = r.suggestions[0]; renderLines(); }   // ppu stays 1 while the pieces field is hidden
     } catch (e) { /* suggestions are optional */ }
   }
 
@@ -563,8 +568,13 @@
     const setIfEmpty = (id, v) => { const el = $(id); if (!el || v === '' || v === undefined || v === null || v === 0) return; if (el.value && String(el.value).trim() !== '') return; el.value = v; el.classList.add('fin-ai'); };
     if (s.vendor_id) setIfEmpty('ff-vendor', vendorName(s.vendor_id));
     else if (s.vendor_name && !val('ff-vendor')) { const msg = $('ff-msg'); msg.dataset.sticky = '1'; msg.innerHTML = `<div class="fin-msg info">La IA leyó el proveedor “${esc(s.vendor_name)}”, que no está en tu lista. <button type="button" class="fin-link" data-f="new-vendor" data-name="${esc(s.vendor_name)}">Crearlo</button></div>`; }
-    setIfEmpty('ff-fecha', s.fecha_compra); setIfEmpty('ff-total', s.total); setIfEmpty('ff-folio', s.folio_ticket);
-    if (s.metodo_pago && $('ff-metodo')) { $('ff-metodo').value = s.metodo_pago; $('ff-metodo').classList.add('fin-ai'); }
+    // A new expense starts with today's date; the date printed on the ticket replaces it.
+    if (s.fecha_compra && !FM.id && val('ff-fecha') === B.today) { $('ff-fecha').value = s.fecha_compra; $('ff-fecha').classList.add('fin-ai'); }
+    else setIfEmpty('ff-fecha', s.fecha_compra);
+    setIfEmpty('ff-total', s.total); setIfEmpty('ff-folio', s.folio_ticket);
+    const vd = vendorByName(val('ff-vendor'));
+    if (vd) applyVendorDefaults();
+    if (s.metodo_pago && $('ff-metodo') && !(vd && vd['Método Pago Default'])) { $('ff-metodo').value = s.metodo_pago; $('ff-metodo').classList.add('fin-ai'); }
     setIfEmpty('ff-sub', s.subtotal); setIfEmpty('ff-iva', s.iva); setIfEmpty('ff-notas', s.notas);
     FM.aiPiezas = num(s.total_piezas) || 0;
     if (!FM.lines.some(l => l.codigo || l.descripcion) && s.lines && s.lines.length) {
@@ -589,7 +599,7 @@
     const m = VP.showModal(formHtml(e, isNew), { maxWidth: '900px' });
     FM = { id: opts.expenseId || '', files: files, lines: lines.length ? lines : [], modal: m };
     renderPhotos(); renderLines();
-    if (B.ai_ready) $('ff-ai').style.display = '';
+    if (B.ai_ready) { $('ff-ai').style.display = ''; $('ff-ai-hint').style.display = ''; }
     const syncTc = () => { $('ff-tc-wrap').style.display = val('ff-moneda') !== 'MXN' ? '' : 'none'; };
     syncTc();
 
@@ -601,7 +611,10 @@
         l[k] = t.value; l._ai = false;
         const tot = t.closest('.fin-line').querySelector('[data-total]'); if (tot) tot.textContent = money(lineTotal(l));
         if (['cantidad', 'costo'].indexOf(k) >= 0) updateWarnings();
-      } else if (['ff-total', 'ff-vendor'].indexOf(t.id) >= 0) { t.classList.remove('fin-ai'); updateWarnings(); }
+      } else {
+        if (t.classList) t.classList.remove('fin-ai');
+        if (['ff-total', 'ff-vendor'].indexOf(t.id) >= 0) updateWarnings();
+      }
     });
     m.el.addEventListener('change', ev => {
       const t = ev.target;
