@@ -290,6 +290,7 @@ window.VP = (function () {
     { id: 'calidad',   href: 'calidad.html',   label: 'Calidad' },
     { id: 'importar',  href: 'import.html',    label: 'Importar' },
     { id: 'mayoristas', href: 'mayoristas.html', label: 'Mayoristas', adminOnly: true, extraUsers: ['KARIN'] },
+    { id: 'finanzas',  href: 'finanzas.html',  label: 'Finanzas',  scope: 'finanzas' },
     { id: 'productos', href: 'productos.html', label: 'Productos', scope: 'productos' },
     { id: 'archivos',  href: 'archivos.html',  label: 'Archivos',  scope: 'archivos' },
     { id: 'analisis',  href: 'analytics.html', label: 'Análisis',  adminOnly: true },
