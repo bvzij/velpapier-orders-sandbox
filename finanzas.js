@@ -92,6 +92,8 @@
       const j = fileQueue.shift();
       fileActive++;
       api('fin_get_file&id=' + encodeURIComponent(j.id) + '&size=' + j.size).then(r => {
+        // Files on the VPS come back as links: the browser loads them straight from there.
+        if (r.url) return j.resolve({ url: j.size === 'thumb' && r.thumb_url ? r.thumb_url : r.url + '?t=' + encodeURIComponent(VP.token), mime: r.mime, name: r.name });
         const bin = atob(r.data), bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         const blob = new Blob([bytes], { type: r.mime });
@@ -146,6 +148,7 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
   // Photos are shrunk in the browser first (same helper as packing photos); PDFs go as they are.
+  const FIN_VPS = 'https://files.srv2017849.hstgr.cloud';   // vp-files (Archivos) on the VPS
   async function uploadTicket(file) {
     let blob = file, mime = file.type, name = file.name || 'ticket';
     if (/^image\//.test(file.type) || /\.(heic|heif)$/i.test(name)) {
@@ -155,9 +158,14 @@
     } else if (file.type !== 'application/pdf') {
       throw new Error('Usa una foto o un PDF.');
     }
-    const data = await readB64(blob);
-    const r = await post('fin_upload_file', { name: name, mime: mime, kind: 'ticket', data: data });
-    // Show the photo from the copy already in the browser instead of downloading it back from Drive.
+    // The file goes straight from the browser to the VPS (Archivos/Finanzas, admin-only), then gets registered.
+    const res = await fetch(FIN_VPS + '/api/fin/upload?name=' + encodeURIComponent(name) + '&mime=' + encodeURIComponent(mime), {
+      method: 'POST', headers: { 'Authorization': 'Bearer ' + VP.token, 'Content-Type': mime }, body: blob,
+    });
+    const up = await res.json().catch(() => ({}));
+    if (!res.ok || !up.id) throw new Error(up.detail || 'No se pudo subir el archivo (' + res.status + ').');   // TROUBLESHOOT: 401 = session expired; 413/502 = check the vp-files container (docker logs)
+    const r = await post('fin_register_file', { vps_id: up.id, name: up.name, mime: mime, size: up.size, url: up.url, thumb_url: up.thumb_url });
+    // Show the photo from the copy already in the browser instead of downloading it back.
     const local = Promise.resolve({ mime: mime, url: URL.createObjectURL(blob) });
     FILE_CACHE.set(r.file_id + '|thumb', local); FILE_CACHE.set(r.file_id + '|full', local);
     return r;
@@ -613,6 +621,12 @@
         const r = await api('fin_get_expense&id=' + encodeURIComponent(opts.expenseId));
         e = r.expense; lines = (r.lines || []).map(lineFromServer);
         files = (e.files || []).map(id => { const f = (r.files || []).find(x => x.id === id); return { id: id, mime: f ? f.mime : 'image/jpeg', name: f ? f.name : '' }; });
+        // VPS files: show them from their links right away (no extra server round trip per photo).
+        (r.files || []).forEach(f => {
+          if (!f.url || FILE_CACHE.has(f.id + '|thumb')) return;
+          FILE_CACHE.set(f.id + '|thumb', Promise.resolve({ url: f.thumb_url || f.url + '?t=' + encodeURIComponent(VP.token), mime: f.mime, name: f.name }));
+          FILE_CACHE.set(f.id + '|full', Promise.resolve({ url: f.url + '?t=' + encodeURIComponent(VP.token), mime: f.mime, name: f.name }));
+        });
       }
     } catch (err) { fail(err); return; }
     if (can('finance.create')) ensureCatalog();
