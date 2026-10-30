@@ -100,6 +100,9 @@ def init_db():
             con.execute("INSERT INTO folders VALUES ('root', NULL, 'Archivos', 1, 'Sistema', ?, NULL, NULL)", (t,))
             for name, pub in (("Productos", 1), ("Contenido TikTok", 1), ("Privado", 0)):
                 con.execute("INSERT INTO folders VALUES (?, 'root', ?, ?, 'Sistema', ?, NULL, NULL)", (new_id("D"), name, pub, t))
+        # Finanzas: admin-only folder for purchase tickets (fixed id, see ADMIN_ONLY_ROOTS)
+        if not con.execute("SELECT 1 FROM folders WHERE id='finanzas'").fetchone():
+            con.execute("INSERT INTO folders VALUES ('finanzas', 'root', 'Finanzas', 0, 'Sistema', ?, NULL, NULL)", (now_iso(),))
 
 
 def new_id(prefix="F"):
@@ -151,6 +154,24 @@ def need_user(authorization, t=None):
 def need_admin(ident):
     if ident.get("role") != "admin":
         raise HTTPException(403, "Solo para administradores")
+
+
+# Folders whose whole subtree only admins may browse. Files inside are still served by their
+# secret per-file link to logged-in users (the dashboard hands those links out per permission).
+ADMIN_ONLY_ROOTS = {"finanzas"}
+
+
+def is_admin(ident):
+    return bool(ident) and ident.get("role") == "admin"
+
+
+def is_admin_only(con, fid):
+    return any(p["id"] in ADMIN_ONLY_ROOTS for p in folder_path(con, fid))
+
+
+def guard_folder(con, fid, ident):
+    if not is_admin(ident) and is_admin_only(con, fid):
+        raise HTTPException(403, "Carpeta solo para administradores")
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -277,11 +298,12 @@ def me(authorization: str = Header(None)):
 
 @app.get("/api/list")
 def list_folder(folder: str = "root", authorization: str = Header(None)):
-    need_user(authorization)
+    ident = need_user(authorization)
     with db() as con:
         f = folder_row(con, folder)
         if not f or f["trashed_at"]:
             raise HTTPException(404, "Carpeta no encontrada")
+        guard_folder(con, folder, ident)
         folders = con.execute("SELECT f.*, (SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id AND x.trashed_at IS NULL) AS n "
                               "FROM folders f WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
         files = con.execute("SELECT * FROM files WHERE folder_id=? AND trashed_at IS NULL ORDER BY uploaded_at DESC", (folder,)).fetchall()
@@ -290,14 +312,15 @@ def list_folder(folder: str = "root", authorization: str = Header(None)):
             "folder": {"id": f["id"], "name": f["name"], "public": bool(f["public"]), "effective_public": is_public(con, f["id"])},
             "path": folder_path(con, folder),
             "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]), "files": r["n"],
-                         "created_by": r["created_by"], "created_at": r["created_at"]} for r in folders],
+                         "created_by": r["created_by"], "created_at": r["created_at"]} for r in folders
+                        if is_admin(ident) or r["id"] not in ADMIN_ONLY_ROOTS],
             "files": [file_out(con, r, cache) for r in files],
         }
 
 
 @app.get("/api/recent")
 def recent(kind: str = "", limit: int = 200, authorization: str = Header(None)):
-    need_user(authorization)
+    ident = need_user(authorization)
     limit = max(1, min(limit, 1000))
     with db() as con:
         sql = "SELECT * FROM files WHERE trashed_at IS NULL"
@@ -309,6 +332,8 @@ def recent(kind: str = "", limit: int = 200, authorization: str = Header(None)):
         rows = con.execute(sql + " ORDER BY uploaded_at DESC LIMIT ?", args + [limit]).fetchall()
         cache, paths, out = {}, {}, []
         for r in rows:
+            if not is_admin(ident) and is_admin_only(con, r["folder_id"]):
+                continue
             d = file_out(con, r, cache)
             if r["folder_id"] not in paths:
                 paths[r["folder_id"]] = " / ".join(p["name"] for p in folder_path(con, r["folder_id"])[1:])
@@ -319,7 +344,7 @@ def recent(kind: str = "", limit: int = 200, authorization: str = Header(None)):
 
 @app.get("/api/search")
 def search(q: str = "", authorization: str = Header(None)):
-    need_user(authorization)
+    ident = need_user(authorization)
     q = q.strip()
     if len(q) < 2:
         return {"files": [], "folders": []}
@@ -329,18 +354,23 @@ def search(q: str = "", authorization: str = Header(None)):
         folders = con.execute("SELECT * FROM folders WHERE trashed_at IS NULL AND id<>'root' AND name LIKE ? LIMIT 100", (like,)).fetchall()
         cache, out = {}, []
         for r in files:
+            if not is_admin(ident) and is_admin_only(con, r["folder_id"]):
+                continue
             d = file_out(con, r, cache)
             d["folder_path"] = " / ".join(p["name"] for p in folder_path(con, r["folder_id"])[1:])
             out.append(d)
         return {"files": out, "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]),
-                                           "path": " / ".join(p["name"] for p in folder_path(con, r["id"])[1:])} for r in folders]}
+                                           "path": " / ".join(p["name"] for p in folder_path(con, r["id"])[1:])} for r in folders
+                                          if is_admin(ident) or not is_admin_only(con, r["id"])]}
 
 
 @app.get("/api/trash")
 def trash_list(authorization: str = Header(None)):
-    need_user(authorization)
+    ident = need_user(authorization)
     with db() as con:
         files = con.execute("SELECT * FROM files WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC LIMIT 1000").fetchall()
+        if not is_admin(ident):
+            files = [r for r in files if not is_admin_only(con, r["folder_id"])]
         folders = con.execute("SELECT * FROM folders WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC").fetchall()
         cache, out = {}, []
         for r in files:
@@ -378,6 +408,7 @@ def create_folder(body: dict = Body(...), authorization: str = Header(None)):
         p = folder_row(con, parent)
         if not p or p["trashed_at"]:
             raise HTTPException(404, "Carpeta no encontrada")
+        guard_folder(con, parent, ident)
         if con.execute("SELECT 1 FROM folders WHERE parent_id=? AND name=? AND trashed_at IS NULL", (parent, name)).fetchone():
             raise HTTPException(400, "Ya existe una carpeta con ese nombre aquí")
         fid = new_id("D")
@@ -448,12 +479,13 @@ def _descendants(con, fid):
 
 @app.post("/api/move")
 def move(body: dict = Body(...), authorization: str = Header(None)):
-    need_user(authorization)
+    ident = need_user(authorization)
     to = body.get("to") or "root"
     with _db_lock, db() as con:
         dest = folder_row(con, to)
         if not dest or dest["trashed_at"]:
             raise HTTPException(404, "Carpeta destino no encontrada")
+        guard_folder(con, to, ident)
         for fid in body.get("folder_ids") or []:
             if fid == "root" or to in _descendants(con, fid):
                 raise HTTPException(400, "No puedes mover una carpeta dentro de sí misma")
@@ -539,6 +571,7 @@ def upload_init(body: dict = Body(...), authorization: str = Header(None)):
         f = folder_row(con, folder)
         if not f or f["trashed_at"]:
             raise HTTPException(404, "Carpeta no encontrada")
+        guard_folder(con, folder, ident)
         uid = new_id("U")
         chunks = (size + CHUNK - 1) // CHUNK
         con.execute("INSERT INTO uploads VALUES (?,?,?,?,?,0,?,?,?)",
@@ -677,6 +710,106 @@ def zip_files(background: BackgroundTasks, ids: str = "", t: str = Query(None), 
             z.write(r["orig_path"], n)
     background.add_task(lambda: os.path.exists(path) and os.remove(path))
     return FileResponse(path, media_type="application/zip", filename="velpapier_" + datetime.now().strftime("%Y%m%d_%H%M") + ".zip")
+
+
+# ─── Finanzas tickets: Archivos/Finanzas/<yyyy-mm>/<proveedor>/ ─────────────
+# Upload: any logged-in dashboard user (Apps Script decides who may attach it to an expense).
+# Place / read: only Apps Script, with the secret in /data/fin_key.txt (Script Property VPFILES_FIN_KEY).
+FIN_KEY_PATH = os.path.join(DATA, "fin_key.txt")
+FIN_MAX = 25 * 1024 * 1024
+
+
+def fin_key():
+    if not os.path.exists(FIN_KEY_PATH):
+        with open(FIN_KEY_PATH, "w") as fh:
+            fh.write(secrets.token_urlsafe(32))
+    with open(FIN_KEY_PATH) as fh:
+        return fh.read().strip()
+
+
+def need_fin_key(key):
+    if not key or not secrets.compare_digest(str(key), fin_key()):
+        raise HTTPException(401, "Llave de Finanzas inválida")   # TROUBLESHOOT: Script Property VPFILES_FIN_KEY must equal /data/fin_key.txt
+
+
+def fin_month(periodo=""):
+    p = str(periodo or "")
+    if len(p) == 7 and p[4] == "-" and p[:4].isdigit() and p[5:].isdigit():
+        return p
+    from datetime import timedelta
+    return datetime.now(timezone(timedelta(hours=-6))).strftime("%Y-%m")   # Mexico City (no DST)
+
+
+def ensure_folder(con, parent, name):
+    name = safe_name(name).replace("/", "-")[:80] or "Sin nombre"
+    r = con.execute("SELECT id FROM folders WHERE parent_id=? AND name=? AND trashed_at IS NULL", (parent, name)).fetchone()
+    if r:
+        return r["id"]
+    fid = new_id("D")
+    con.execute("INSERT INTO folders VALUES (?,?,?,0,'Sistema',?,NULL,NULL)", (fid, parent, name, now_iso()))
+    return fid
+
+
+@app.post("/api/fin/upload")
+async def fin_upload(request: Request, name: str = "ticket.jpg", mime: str = "", periodo: str = "", authorization: str = Header(None)):
+    ident = need_user(authorization)
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "Archivo vacío")
+    if len(data) > FIN_MAX:
+        raise HTTPException(400, "El archivo pasa de 25 MB")
+    name = safe_name(name)
+    ext = os.path.splitext(name)[1].lower()[:10] or ".jpg"
+    mime = (mime or mimetypes.guess_type(name)[0] or "application/octet-stream")[:100]
+    if not (mime.startswith("image/") or mime == "application/pdf"):
+        raise HTTPException(400, "Solo fotos o PDF")
+    fid = new_id("F")
+    stamp = datetime.now(timezone.utc)
+    dest_dir = os.path.join(DATA, "orig", stamp.strftime("%Y"), stamp.strftime("%m"))
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, fid + ext)
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    w, h, dur, has_web, has_thumb = make_previews(fid, dest, mime)
+    with _db_lock, db() as con:
+        folder = ensure_folder(con, ensure_folder(con, "finanzas", fin_month(periodo)), "Sin proveedor")
+        con.execute("INSERT INTO files (id, folder_id, name, ext, mime, size, width, height, duration, sha256, token, orig_path, "
+                    "has_web, has_thumb, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (fid, folder, name, ext, mime, len(data), w, h, dur, hashlib.sha256(data).hexdigest(), secrets.token_urlsafe(12),
+                     dest, has_web, has_thumb, ident["name"], now_iso()))
+        out = file_out(con, con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone())
+    log.info("fin upload %s %s (%d bytes) by %s", fid, name, len(data), ident["name"])
+    return out
+
+
+@app.post("/api/fin/place")
+def fin_place(body: dict = Body(...), x_fin_key: str = Header(None)):
+    need_fin_key(x_fin_key)
+    ids = [str(i) for i in (body.get("ids") or [])][:200]
+    moved = 0
+    with _db_lock, db() as con:
+        dest = ensure_folder(con, ensure_folder(con, "finanzas", fin_month(body.get("periodo"))), body.get("vendor") or "Sin proveedor")
+        for fid in ids:
+            r = con.execute("SELECT folder_id FROM files WHERE id=?", (fid,)).fetchone()
+            if r and r["folder_id"] != dest and is_admin_only(con, r["folder_id"]):   # only ever moves files already under Finanzas
+                con.execute("UPDATE files SET folder_id=? WHERE id=?", (dest, fid))
+                moved += 1
+    return {"ok": True, "moved": moved, "folder_id": dest}
+
+
+@app.get("/api/fin/file/{fid}")
+def fin_file(fid: str, x_fin_key: str = Header(None)):
+    need_fin_key(x_fin_key)
+    with db() as con:
+        r = con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+        if not r or not is_admin_only(con, r["folder_id"]):
+            raise HTTPException(404, "No encontrado")
+    if not os.path.exists(r["orig_path"]):
+        raise HTTPException(404, "El archivo ya no está en el disco")
+    return FileResponse(r["orig_path"], media_type=r["mime"], filename=r["name"])
+
+
+fin_key()   # create the secret on first start
 
 
 # ─── housekeeping ──────────────────────────────────────────────────────────
