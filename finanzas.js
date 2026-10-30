@@ -156,7 +156,11 @@
       throw new Error('Usa una foto o un PDF.');
     }
     const data = await readB64(blob);
-    return post('fin_upload_file', { name: name, mime: mime, kind: 'ticket', data: data });
+    const r = await post('fin_upload_file', { name: name, mime: mime, kind: 'ticket', data: data });
+    // Show the photo from the copy already in the browser instead of downloading it back from Drive.
+    const local = Promise.resolve({ mime: mime, url: URL.createObjectURL(blob) });
+    FILE_CACHE.set(r.file_id + '|thumb', local); FILE_CACHE.set(r.file_id + '|full', local);
+    return r;
   }
   function busy(text) {
     const o = document.createElement('div');
@@ -450,6 +454,7 @@
   function renderPhotos() {
     const el = $('ff-photos'); if (!el) return;
     el.innerHTML = FM.files.map(f => `<div style="position:relative">${thumb(f.id)}<button type="button" class="fin-line-x" data-f="rm-photo" data-id="${esc(f.id)}" style="position:absolute;top:-6px;right:-6px;background:var(--surface);border-radius:50%;width:22px;height:22px;line-height:1;font-size:14px;border:0.5px solid var(--border-strong)">×</button></div>`).join('')
+      + Array.from({ length: FM.uploading || 0 }, () => '<div class="fin-thumb-doc">Subiendo…</div>').join('')
       + `<button class="btn btn-sm" type="button" data-f="add-photo">📷 Agregar foto</button>`;
     hydrate(el);
   }
@@ -527,6 +532,7 @@
   }
 
   function readForm() {
+    if (FM.uploading) return { error: 'Espera a que terminen de subir las fotos.' };
     const vName = val('ff-vendor').trim();
     const v = vName ? vendorByName(vName) : null;
     if (vName && !v) { return { error: `El proveedor “${vName}” no está en la lista. Pulsa “+ Nuevo” para crearlo.` }; }
@@ -671,9 +677,15 @@
       else if (f === 'add-photo') {
         const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*,application/pdf'; inp.multiple = true;
         inp.onchange = async () => {
-          const ov = busy('Subiendo…');
-          try { for (const file of inp.files) { const r = await uploadTicket(file); FM.files.push({ id: r.file_id, mime: r.mime, name: r.name }); } renderPhotos(); } catch (err) { fail(err); }
-          ov.done();
+          // Upload in the background, all photos at once: the form stays usable meanwhile.
+          const form = FM, files = Array.from(inp.files);
+          form.uploading = (form.uploading || 0) + files.length; renderPhotos();
+          await Promise.all(files.map(async file => {
+            try { const r = await uploadTicket(file); form.files.push({ id: r.file_id, mime: r.mime, name: r.name }); }
+            catch (err) { fail(err); }
+            form.uploading--;
+            if (FM === form) renderPhotos();
+          }));
         };
         inp.click();
       }
@@ -682,15 +694,21 @@
   }
 
   async function aiFill() {
+    if (FM.uploading) { VP.toast('Espera a que terminen de subir las fotos.', true); return; }
+    if (FM.reading) return;
     const ids = FM.files.filter(f => String(f.mime || 'image/').indexOf('image/') === 0).map(f => f.id);
     if (!ids.length) { VP.toast('Agrega primero la foto del ticket.', true); return; }
-    const ov = busy(ids.length > 1 ? 'Leyendo ' + ids.length + ' fotos del ticket…' : 'Leyendo el ticket…');
+    // Reads in the background: the button shows progress and the form stays usable.
+    const form = FM, btn = $('ff-ai'), label = btn.textContent, t0 = Date.now();
+    form.reading = true; btn.disabled = true;
+    const tick = setInterval(() => { btn.textContent = `✨ Leyendo… ${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
+    btn.textContent = '✨ Leyendo…';
     try {
       const r = await post('fin_ai_extract', { file_ids: ids });
-      applySuggestion(r.suggestion);
-      VP.toast('Listo. Revisa los campos marcados en azul antes de guardar.');
-    } catch (e) { fail(e); }
-    ov.done();
+      if (FM === form && form.modal.el.isConnected) { applySuggestion(r.suggestion); VP.toast('Listo. Revisa los campos marcados en azul antes de guardar.'); }
+    } catch (e) { if (FM === form) fail(e); }
+    clearInterval(tick); form.reading = false;
+    if (FM === form && btn.isConnected) { btn.disabled = false; btn.textContent = label; }
   }
 
   ACT['new-expense'] = () => openForm({});
