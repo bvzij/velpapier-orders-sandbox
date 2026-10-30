@@ -665,6 +665,78 @@ function finAiSelfTest() {
   Logger.log('Proveedor: ' + prov.name + ' · modelo: ' + prov.model + ' · respuesta: ' + out.text + ' · tokens: ' + out.tokensIn + '/' + out.tokensOut);
 }
 
+// ─── Clean slate + bulk delete (admin only) ───────────────────────────────
+// Both always make a full copy of the Finanzas spreadsheet first; that copy is the undo.
+// Setup stays: Proveedores, Categorías, Mapa Proveedor-Producto, Gastos Fijos, Config.
+// Ticket files themselves are never deleted (Drive / VPS); only their registry rows go.
+const FIN_RESET_TABS = ['Gastos', 'Gasto Líneas', 'Facturas', 'Factura Conceptos', 'Caja Chica', 'Cierres', 'Archivos', 'AI Log', 'Movimientos Inventario'];
+const FIN_RESET_SEQS = ['GST', 'GSL', 'FAC', 'CON', 'CCH'];
+
+function finBackupCopy_(label) {
+  const stamp = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH-mm');
+  const copy = DriveApp.getFileById(finSsId_()).makeCopy('Finanzas — respaldo ' + label + ' ' + stamp, finRootFolder_());
+  return copy.getUrl();
+}
+
+function finResetPreviewGet_(p, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const counts = {};
+  FIN_RESET_TABS.forEach(t => { try { counts[t] = finRead_(t).rows.length; } catch (e) { counts[t] = 0; } });
+  const g = finRead_('Gastos').rows;
+  const fechas = g.map(r => String(r['Fecha Compra'] || '')).filter(Boolean).sort();
+  return jsonResponse({
+    counts: counts, desde: fechas[0] || '', hasta: fechas[fechas.length - 1] || '',
+    total_mxn: finR2_(g.filter(r => r['Status'] === 'Activo').reduce((s, r) => s + finNum_(r['Total MXN']), 0)),
+  });
+}
+
+function finResetDataAction(body, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  if (finStr_(body.confirm) !== 'BORRAR') return finErr_('Escribe BORRAR para confirmar.');   // TROUBLESHOOT: the browser asks for the word BORRAR before sending
+  let backup;
+  try { backup = finBackupCopy_('antes de empezar de cero'); } catch (e) { return finErr_('No se pudo hacer el respaldo, no se borró nada: ' + e.message); }   // TROUBLESHOOT: Drive copy failed (quota/permissions); nothing was deleted
+  const cleared = {};
+  FIN_RESET_TABS.forEach(t => {
+    let sh;
+    try { sh = finSheet_(t); } catch (e) { return; }
+    const last = sh.getLastRow(), lc = sh.getLastColumn();
+    cleared[t] = Math.max(0, last - 1);
+    if (last > 1 && lc > 0) sh.getRange(2, 1, last - 1, lc).clearContent();   // keeps headers and the text format of the columns
+  });
+  const props = PropertiesService.getScriptProperties();
+  FIN_RESET_SEQS.forEach(s => props.deleteProperty('FIN_SEQ_' + s));
+  logAuditEvent('fin_reset_data', 'Finanzas', 'todo', { backup: backup, cleared: cleared });
+  return jsonResponse({ result: 'ok', backup_url: backup, cleared: cleared });
+}
+
+function finDeleteExpensesAction(body, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(finStr_).filter(Boolean);
+  if (!ids.length) return finErr_('No hay gastos seleccionados.');
+  if (ids.length > 300) return finErr_('Máximo 300 gastos a la vez.');   // TROUBLESHOOT: limit keeps the call under Apps Script's time limit
+  const gastos = finRead_('Gastos').rows.filter(r => ids.indexOf(String(r['Expense ID'])) >= 0);
+  if (!gastos.length) return finErr_('No se encontraron esos gastos.');
+  const closed = gastos.filter(r => finIsClosed_(r['Periodo'])).map(r => r['Periodo']);
+  if (closed.length) return finErr_('Hay gastos en meses cerrados (' + closed.filter((x, i, a) => a.indexOf(x) === i).join(', ') + '). Reabre el mes primero.');   // TROUBLESHOOT: reopen the period in Finanzas > Cierre
+  let backup;
+  try { backup = finBackupCopy_('antes de eliminar ' + gastos.length + ' gastos'); } catch (e) { return finErr_('No se pudo hacer el respaldo, no se borró nada: ' + e.message); }   // TROUBLESHOOT: Drive copy failed; nothing was deleted
+  gastos.forEach(r => { if (r['Invoice ID']) { try { finUnlinkExpenseFromInvoice_(r['Invoice ID'], r['Expense ID']); } catch (e) { /* invoice already gone */ } } });
+  const del = (tab, rows) => {
+    if (!rows.length) return 0;
+    const sh = finSheet_(tab);
+    rows.map(r => r._row).sort((a, b) => b - a).forEach(n => sh.deleteRow(n));   // bottom-up so row numbers stay valid
+    return rows.length;
+  };
+  const isMine = r => ids.indexOf(String(r['Expense ID'])) >= 0;
+  const n = {
+    gastos: del('Gastos', gastos),
+    lineas: del('Gasto Líneas', finRead_('Gasto Líneas').rows.filter(isMine)),
+    archivos: del('Archivos', finRead_('Archivos').rows.filter(isMine)),
+  };
+  logAuditEvent('fin_delete_expenses', 'Gasto', ids.slice(0, 20).join(','), { count: n.gastos, lines: n.lineas, files: n.archivos, backup: backup });
+  return jsonResponse({ result: 'ok', deleted: n, backup_url: backup });
+}
+
 // ─── Permisos screen (Finanzas > Configuración) ────────────────────────────
 
 function finCapsGet_(p, identity) {
