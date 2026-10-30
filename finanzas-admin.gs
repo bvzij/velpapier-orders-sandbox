@@ -575,9 +575,11 @@ function finAiCall_(prov, req) {
   }
   const code = res.getResponseCode();
   const body = res.getContentText();
-  if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
-  if (code >= 500) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 500)); throw new Error('La IA está saturada (HTTP ' + code + '). Se reintenta sola.'); }   // TROUBLESHOOT: Google's servers were overloaded; temporary, the queue retries up to 3 times
-  if (code !== 200) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 1000)); throw new Error('La IA no respondió (HTTP ' + code + ').'); }   // TROUBLESHOOT: 400/403 = wrong key or model; 404 = model name no longer exists (set FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL); body is in the Executions log
+  if (code !== 200) Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 500));
+  if (code === 429) throw new Error('HTTP 429: la IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
+  if (code === 404) throw new Error('HTTP 404: el modelo "' + prov.model + '" no existe. Revisa FIN_GEMINI_MODEL en Script Properties.');   // TROUBLESHOOT: Google renamed/retired this model name; set FIN_GEMINI_MODEL to the current one from aistudio.google.com
+  if (code === 400) throw new Error('HTTP 400: la IA rechazó la solicitud. Body: ' + body.slice(0, 200));   // TROUBLESHOOT: usually a malformed request; see the Executions log for the full body
+  if (code !== 200) throw new Error('HTTP ' + code + ': la IA no respondió.');   // TROUBLESHOOT: see the Executions log for the full body
   const out = JSON.parse(body);
   if (prov.name === 'gemini') {
     const cand = (out.candidates || [])[0] || {};
@@ -787,8 +789,9 @@ function finAiWorker() {
   try {
     while (Date.now() - t0 < FIN_AI_WORKER_BUDGET_MS) {
       const now = Date.now();
+      const cache0 = CacheService.getScriptCache();
       const next = finRead_('Gastos').rows
-        .filter(r => r['Status'] === 'Activo' && finIsDraft_(r) && (r['AI Estado'] === 'En cola'
+        .filter(r => r['Status'] === 'Activo' && finIsDraft_(r) && !cache0.get('finai_wait_' + r['Expense ID']) && (r['AI Estado'] === 'En cola'
           || (r['AI Estado'] === 'Leyendo' && now - finParseNow_(r['AI Fecha']) > FIN_AI_STALE_MS)))
         .sort((a, b) => String(a['AI Fecha']).localeCompare(String(b['AI Fecha'])))[0];
       if (!next) { props.deleteProperty('FIN_AI_QUEUE'); break; }
@@ -809,8 +812,9 @@ function finAiWorker() {
         const msg = String((out && out.error) || 'Error desconocido');
         // Overload / rate limit is temporary: back in the queue (behind the others), up to 3 tries, before showing Error.
         const cache = CacheService.getScriptCache(), rk = 'finai_retry_' + id, tries = Number(cache.get(rk) || 0) + 1;
-        if (/saturada|HTTP 5\d\d|HTTP 429|límite gratuito/i.test(msg) && tries <= 3) {
+        if (/HTTP (429|5\d\d)/.test(msg) && tries <= 3) {
           cache.put(rk, String(tries), 21600);
+          cache.put('finai_wait_' + id, '1', 60);   // don't retry this ticket again for 60s, even across separate trigger runs
           finAiPatch_(id, { 'AI Estado': 'En cola', 'AI Fecha': finNow_() });
           props.setProperty('FIN_AI_QUEUE', '1');
         } else {
