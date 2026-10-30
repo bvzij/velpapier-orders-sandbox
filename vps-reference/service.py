@@ -304,14 +304,14 @@ def list_folder(folder: str = "root", authorization: str = Header(None)):
         if not f or f["trashed_at"]:
             raise HTTPException(404, "Carpeta no encontrada")
         guard_folder(con, folder, ident)
-        folders = con.execute("SELECT f.*, (SELECT COUNT(*) FROM files x WHERE x.folder_id=f.id AND x.trashed_at IS NULL) AS n "
-                              "FROM folders f WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
+        folders = con.execute("SELECT * FROM folders WHERE parent_id=? AND trashed_at IS NULL ORDER BY name COLLATE NOCASE", (folder,)).fetchall()
         files = con.execute("SELECT * FROM files WHERE folder_id=? AND trashed_at IS NULL ORDER BY uploaded_at DESC", (folder,)).fetchall()
         cache = {}
         return {
             "folder": {"id": f["id"], "name": f["name"], "public": bool(f["public"]), "effective_public": is_public(con, f["id"])},
             "path": folder_path(con, folder),
-            "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]), "files": r["n"],
+            "folders": [{"id": r["id"], "name": r["name"], "public": bool(r["public"]),
+                         "files": folder_file_count(con, r["id"]), "subfolders": folder_subfolder_count(con, r["id"]),
                          "created_by": r["created_by"], "created_at": r["created_at"]} for r in folders
                         if is_admin(ident) or r["id"] not in ADMIN_ONLY_ROOTS],
             "files": [file_out(con, r, cache) for r in files],
@@ -475,6 +475,19 @@ def _descendants(con, fid):
         out.append(cur)
         stack.extend(r["id"] for r in con.execute("SELECT id FROM folders WHERE parent_id=?", (cur,)).fetchall())
     return out
+
+
+def folder_file_count(con, fid):
+    # recursive: a folder's count includes files sitting in its subfolders,
+    # not just direct children (Vel: "0 archivos" was wrong when the 8
+    # photos were one level down).
+    ids = _descendants(con, fid)
+    q = ",".join("?" * len(ids))
+    return con.execute(f"SELECT COUNT(*) FROM files WHERE folder_id IN ({q}) AND trashed_at IS NULL", ids).fetchone()[0]
+
+
+def folder_subfolder_count(con, fid):
+    return con.execute("SELECT COUNT(*) FROM folders WHERE parent_id=? AND trashed_at IS NULL", (fid,)).fetchone()[0]
 
 
 @app.post("/api/move")
@@ -782,8 +795,39 @@ async def fin_upload(request: Request, name: str = "ticket.jpg", mime: str = "",
     return out
 
 
+FIN_KEEP_MAX = 1600     # long side kept after the expense is saved (the AI already read the sharp upload)
+FIN_KEEP_Q = 75
+
+
+def fin_shrink(ids):
+    """Background: replace saved ticket originals with a 1600 px / 75% JPEG. Web + thumb copies stay."""
+    for fid in ids:
+        try:
+            with db() as con:
+                r = con.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+                if not r or r["mime"] != "image/jpeg" or not is_admin_only(con, r["folder_id"]):
+                    continue
+            if max(r["width"] or 0, r["height"] or 0) <= FIN_KEEP_MAX or not os.path.exists(r["orig_path"]):
+                continue
+            with Image.open(r["orig_path"]) as im:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                im.thumbnail((FIN_KEEP_MAX, FIN_KEEP_MAX), Image.LANCZOS)
+                tmp = r["orig_path"] + ".tmp"
+                im.save(tmp, "JPEG", quality=FIN_KEEP_Q, optimize=True)
+                w, h = im.size
+            with open(tmp, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            size = os.path.getsize(tmp)
+            os.replace(tmp, r["orig_path"])
+            with _db_lock, db() as con:
+                con.execute("UPDATE files SET size=?, width=?, height=?, sha256=? WHERE id=?", (size, w, h, digest, fid))
+            log.info("fin shrink %s %d -> %d bytes", fid, r["size"] or 0, size)
+        except Exception as e:
+            log.warning("fin shrink %s failed: %s", fid, e)
+
+
 @app.post("/api/fin/place")
-def fin_place(body: dict = Body(...), x_fin_key: str = Header(None)):
+def fin_place(background: BackgroundTasks, body: dict = Body(...), x_fin_key: str = Header(None)):
     need_fin_key(x_fin_key)
     ids = [str(i) for i in (body.get("ids") or [])][:200]
     moved = 0
@@ -794,6 +838,7 @@ def fin_place(body: dict = Body(...), x_fin_key: str = Header(None)):
             if r and r["folder_id"] != dest and is_admin_only(con, r["folder_id"]):   # only ever moves files already under Finanzas
                 con.execute("UPDATE files SET folder_id=? WHERE id=?", (dest, fid))
                 moved += 1
+    background.add_task(fin_shrink, ids)   # runs after the answer is sent: saving never waits for it
     return {"ok": True, "moved": moved, "folder_id": dest}
 
 
@@ -847,6 +892,10 @@ def startup():
     threading.Thread(target=housekeeping_loop, daemon=True).start()
     log.info("vp-files ready, data=%s public=%s", DATA, PUBLIC_BASE)
 
+
+@app.exception_handler(HTTPException)
+def http_err(request, exc):
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 @app.exception_handler(HTTPException)
 def http_err(request, exc):
