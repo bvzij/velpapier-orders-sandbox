@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('vp_theme') || 'light');</script>
+  <style>body{padding-top:56px}body::before{content:'';position:fixed;top:0;left:0;right:0;height:56px;background:var(--surface);border-bottom:0.5px solid var(--border);z-index:119;pointer-events:none}</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vel Papier · Finanzas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .fin-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:1rem; }
+    .fin-tabs { display:flex; gap:3px; background:var(--surface2); border-radius:var(--radius-md); padding:3px; overflow-x:auto; max-width:100%; }
+    .fin-tab { border:none; background:none; padding:7px 13px; border-radius:var(--radius-sm); font-size:13px; font-family:inherit; color:var(--text-muted); cursor:pointer; white-space:nowrap; display:inline-flex; gap:6px; align-items:center; }
+    .fin-tab:hover { color:var(--text); }
+    .fin-tab.is-active { background:var(--surface); color:var(--text); box-shadow:var(--shadow-card); font-weight:500; }
+    .fin-tab-badge { min-width:18px; height:18px; padding:0 5px; border-radius:20px; font-size:11px; display:inline-flex; align-items:center; justify-content:center; background:var(--amber-bg); color:var(--amber-text); }
+    .fin-actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+    .fin-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-md); overflow-x:auto; }
+    .fin-card + .fin-card, .fin-card + .fin-h2, .fin-h2 + .fin-card { margin-top:14px; }
+    .fin-pad { padding:16px 18px; }
+    .fin-h2 { font-family:'Fraunces',serif; font-size:20px; font-weight:500; margin:22px 0 10px; }
+    .fin-h2:first-child { margin-top:0; }
+    .fin-h3 { font-size:13px; font-weight:600; margin:18px 0 8px; color:var(--text-muted); }
+    .fin-note { font-size:12px; color:var(--text-faint); margin-top:4px; line-height:1.45; }
+    .fin-empty { padding:2.5rem 1rem; text-align:center; color:var(--text-faint); font-size:13.5px; }
+    .fin-filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+    .fin-filters .vp-input { min-width:0; }
+    .fin-check { display:inline-flex; gap:6px; align-items:center; font-size:12.5px; color:var(--text-muted); }
+
+    .fin-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+    .fin-tbl th { text-align:left; font-size:11px; font-weight:600; color:var(--text-faint); text-transform:uppercase; letter-spacing:.04em; padding:11px 10px 8px; white-space:nowrap; }
+    .fin-tbl td { padding:9px 10px; border-top:0.5px solid var(--border); vertical-align:middle; }
+    .fin-tbl .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .fin-tbl tr.fin-row { cursor:pointer; }
+    .fin-tbl tr.fin-row:hover { background:var(--surface2); }
+    .fin-tbl tr.is-void td { opacity:.5; text-decoration:line-through; }
+    .fin-tbl tfoot td { font-weight:600; background:var(--surface2); }
+    .fin-sub { font-size:11.5px; color:var(--text-faint); }
+
+    .fin-badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11.5px; font-weight:500; white-space:nowrap; background:var(--surface2); color:var(--text-muted); }
+    .fin-b-green { background:var(--green-bg); color:var(--green-text); }
+    .fin-b-amber { background:var(--amber-bg); color:var(--amber-text); }
+    .fin-b-red { background:var(--red-bg); color:var(--red-text); }
+    .fin-b-blue { background:var(--blue-bg); color:var(--blue-text); }
+    .fin-b-purple { background:var(--purple-bg); color:var(--purple-text); }
+    .fin-flag { font-size:11px; margin-left:5px; color:var(--amber-text); }
+
+    .fin-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; }
+    .fin-field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-muted); min-width:0; }
+    .fin-field .vp-input, .fin-field select, .fin-field textarea { width:100%; box-sizing:border-box; }
+    .fin-span2 { grid-column:span 2; }
+    .fin-full { grid-column:1/-1; }
+    @media (max-width:520px) { .fin-span2 { grid-column:1/-1; } }
+    .fin-ai { border-color:var(--blue-text) !important; background:var(--blue-bg) !important; }
+    .fin-msg { padding:9px 12px; border-radius:var(--radius-sm); font-size:12.5px; margin-top:10px; }
+    .fin-msg.warn { background:var(--amber-bg); color:var(--amber-text); }
+    .fin-msg.err { background:var(--red-bg); color:var(--red-text); }
+    .fin-msg.ok { background:var(--green-bg); color:var(--green-text); }
+    .fin-msg.info { background:var(--blue-bg); color:var(--blue-text); }
+
+    .fin-photos { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .fin-thumb { width:84px; height:84px; object-fit:cover; border-radius:var(--radius-sm); border:0.5px solid var(--border-strong); background:var(--surface2); cursor:pointer; display:block; }
+    .fin-thumb-doc { width:84px; height:84px; border-radius:var(--radius-sm); border:0.5px solid var(--border-strong); background:var(--surface2); display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-muted); cursor:pointer; text-align:center; padding:4px; box-sizing:border-box; }
+
+    .fin-inbox { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; }
+    .fin-inbox-card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-md); padding:10px; display:flex; flex-direction:column; gap:8px; }
+    .fin-inbox-card .fin-thumb { width:100%; height:150px; }
+    .fin-inbox-acts { display:flex; gap:6px; }
+    .fin-inbox-acts .btn { flex:1; justify-content:center; }
+    .fin-dropzone { border:1.5px dashed var(--border-strong); border-radius:var(--radius-md); padding:18px; text-align:center; font-size:13px; color:var(--text-muted); margin-bottom:14px; cursor:pointer; }
+    .fin-dropzone.is-over { border-color:var(--text); background:var(--surface2); }
+
+    .fin-lines { display:flex; flex-direction:column; gap:8px; }
+    .fin-line { border:0.5px solid var(--border); border-radius:var(--radius-sm); padding:8px; background:var(--bg); }
+    .fin-line-main { display:grid; grid-template-columns:minmax(80px,120px) minmax(120px,1fr) 62px 86px 86px 30px; gap:6px; align-items:center; }
+    .fin-line-sub { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:12px; color:var(--text-muted); }
+    .fin-line .vp-input, .fin-line select { padding:6px 8px; font-size:13px; width:100%; box-sizing:border-box; min-width:0; }
+    .fin-line-sub select, .fin-line-sub .vp-input { width:auto; }
+    .fin-line-total { text-align:right; font-variant-numeric:tabular-nums; font-size:13px; font-weight:500; }
+    .fin-line-x { border:none; background:none; color:var(--text-faint); cursor:pointer; font-size:18px; }
+    .fin-line-x:hover { color:var(--red-text); }
+    .fin-sug { cursor:pointer; }
+    @media (max-width:640px) { .fin-line-main { grid-template-columns:1fr 1fr 1fr 1fr; } .fin-line-main > :nth-child(2) { grid-column:1/-1; order:-1; } }
+
+    .fin-bal { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:12px; }
+    .fin-kpi { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius-lg); padding:14px 16px; }
+    .fin-kpi-l { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); }
+    .fin-kpi-v { font-size:24px; font-weight:600; margin-top:4px; font-variant-numeric:tabular-nums; }
+    .fin-kpi-s { font-size:12px; color:var(--text-faint); margin-top:2px; }
+    .fin-up { color:var(--red-text); } .fin-down { color:var(--green-text); }
+    .fin-two { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; }
+    .fin-link { color:var(--blue-text); cursor:pointer; text-decoration:none; background:none; border:none; font:inherit; padding:0; }
+    .fin-link:hover { text-decoration:underline; }
+    .fin-copy { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:7px 0; border-bottom:0.5px solid var(--border); font-size:13px; }
+    .fin-copy:last-child { border-bottom:none; }
+    .fin-copy b { font-weight:500; word-break:break-all; }
+    .fin-perm-group { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin:14px 0 6px; }
+    .fin-perm-row { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:6px 0; font-size:13px; border-bottom:0.5px solid var(--border); }
+    .fin-scopes { display:flex; gap:10px; flex-wrap:wrap; }
+    .fin-video { width:100%; max-height:60vh; background:#000; border-radius:var(--radius-sm); }
+    .fin-overlay { position:fixed; inset:0; background:rgba(20,19,17,.6); z-index:950; display:flex; align-items:center; justify-content:center; color:#fff; font-size:15px; font-weight:500; }
+    .fin-actions-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:16px; }
+    .fin-modal-h { font-family:'Fraunces',serif; font-size:21px; font-weight:500; margin:0 0 4px; padding-right:60px; }
+  </style>
+</head>
+<body>
+
+<main class="vp-shell vp-shell--wide">
+
+  <section class="vp-hero" style="padding-bottom:1.25rem">
+    <h1 class="vp-hero-greet" style="font-size:clamp(26px,4vw,38px)">Finanzas</h1>
+    <div class="vp-hero-date" id="fin-sub">—</div>
+  </section>
+
+  <div id="fin-gate"></div>
+
+  <div class="fin-toolbar" id="fin-toolbar" style="display:none">
+    <div class="fin-tabs" id="fin-tabs"></div>
+    <div class="fin-actions" id="fin-actions"></div>
+  </div>
+
+  <div id="fin-content"><div class="vp-loading">Cargando finanzas</div></div>
+
+</main>
+
+<datalist id="fin-vendors"></datalist>
+<datalist id="fin-products"></datalist>
+<datalist id="fin-accounts"></datalist>
+<input type="file" id="fin-cam" accept="image/*" capture="environment" style="display:none">
+<input type="file" id="fin-pick" accept="image/*,application/pdf" multiple style="display:none">
+
+<script src="common.js"></script>
+<script src="uploader.js"></script>
+<script src="finanzas.js"></script>
+</body>
+</html>
