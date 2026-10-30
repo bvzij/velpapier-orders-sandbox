@@ -595,7 +595,8 @@
     if (s.vendor_id) setIfEmpty('ff-vendor', vendorName(s.vendor_id));
     else if (s.vendor_name && !val('ff-vendor')) { const msg = $('ff-msg'); msg.dataset.sticky = '1'; msg.innerHTML = `<div class="fin-msg info">La IA leyó el proveedor “${esc(s.vendor_name)}”, que no está en tu lista. <button type="button" class="fin-link" data-f="new-vendor" data-name="${esc(s.vendor_name)}">Crearlo</button></div>`; }
     // A new expense starts with today's date; the date printed on the ticket replaces it.
-    if (s.fecha_compra && !FM.id && val('ff-fecha') === B.today) { $('ff-fecha').value = s.fecha_compra; $('ff-fecha').classList.add('fin-ai'); }
+    // New and Bandeja expenses start with a placeholder date; the date printed on the ticket replaces it, unless the person typed one.
+    if (s.fecha_compra && (!FM.id || FM.inbox) && !FM.fechaTouched) { $('ff-fecha').value = s.fecha_compra; $('ff-fecha').classList.add('fin-ai'); }
     else setIfEmpty('ff-fecha', s.fecha_compra);
     setIfEmpty('ff-total', s.total); setIfEmpty('ff-folio', s.folio_ticket);
     const vd = vendorByName(val('ff-vendor'));
@@ -632,7 +633,7 @@
     if (can('finance.create')) ensureCatalog();
     const isNew = !opts.expenseId;
     const m = VP.showModal(formHtml(e, isNew), { maxWidth: '900px' });
-    FM = { id: opts.expenseId || '', files: files, lines: lines.length ? lines : [], modal: m };
+    FM = { id: opts.expenseId || '', files: files, lines: lines.length ? lines : [], modal: m, inbox: e['Captura Status'] === 'Por capturar' };
     renderPhotos(); renderLines();
     if (B.ai_ready) { $('ff-ai').style.display = ''; $('ff-ai-hint').style.display = ''; }
     const syncTc = () => { $('ff-tc-wrap').style.display = val('ff-moneda') !== 'MXN' ? '' : 'none'; };
@@ -648,6 +649,7 @@
         if (['cantidad', 'costo', 'descuento'].indexOf(k) >= 0) updateWarnings();
       } else {
         if (t.classList) t.classList.remove('fin-ai');
+        if (t.id === 'ff-fecha') FM.fechaTouched = true;
         if (['ff-total', 'ff-vendor'].indexOf(t.id) >= 0) updateWarnings();
       }
     });
