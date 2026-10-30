@@ -1215,6 +1215,7 @@ let scmShipments = [];
 let scmSingle = false;
 let scmBulk = '';
 let scmSaving = false;
+let scmPaid = [];   // per row: the target set by a "marcar como pagado" button (paid confirmed)
 
 function shortDate(dateStr) {
   const s = formatDate(dateStr);   // dd/mm/yyyy
@@ -1231,11 +1232,22 @@ function shortWeekday(dateStr) {
 }
 
 function shipmentLabel(s) {
-  if (s.unknown) return `Guía …${String(s.tid).slice(-6)}`;
+  if (s.unknown) return `${shipmentUser(s.tid) || 'Guía'} · ${s.tid}`;
   const d = shortDate(s.date);
   const when = d ? `${shortWeekday(s.date)} ${d}` : 'Sin fecha';
-  const ids = (s.ids || []).join(' + ') || `${s.count} pedido${s.count !== 1 ? 's' : ''} TikTok`;
-  return `${when} · ${ids}${s.shipped ? ' · ya salió' : ''}`;
+  return `${when} · ${shipmentUser(s.tid) || '?'} · ${s.tid}${s.shipped ? ' · ya salió' : ''}`;
+}
+
+// Username the TikTok SHIPMENT was bought under (the order row's own username),
+// never the customer's Primary Username -- one customer can buy with 2 accounts.
+function shipmentUser(tid) {
+  const names = [];
+  allRecords.forEach(r => {
+    if (r.Channel !== 'TikTok' || r.TrackingId !== tid) return;
+    const u = String(r.Cliente || '').replace(/^@/, '').trim();
+    if (u && !names.includes(u)) names.push(u);
+  });
+  return names.join(' / ');
 }
 
 function shipmentLabelOld(s) {
@@ -1290,13 +1302,27 @@ function scmWarnings(r, target) {
   if (scmIsNoChange(r, target)) return [];
   const [st, tid] = target.split('|');
   const out = [];
-  if ((st === 'Anotado' || st === 'Enviado') && r.Status === 'No Pagado') out.push('Sin pagar');
+  if ((st === 'Anotado' || st === 'Enviado') && r.Status === 'No Pagado' && scmPaid[scmOrders.indexOf(r)] !== target) out.push('Sin pagar');
   if (st === 'Anotado') {
     const s = scmShipments.find(x => x.tid === tid);
     if (s && s.shipped) out.push('Este envío ya salió: quedará como Enviado');
   }
   if (r.Status === 'Anotado' && st !== 'Anotado') out.push('Se quitará el vínculo con el envío TikTok');
   return out;
+}
+
+// No Pagado rows: two always-visible shortcuts. "Pagado y anotar" saves Anotado
+// in one step (Anotado already means paid -- undo/return go back to Pagado).
+function scmPayButtons(r, i, target) {
+  if (r.Status !== 'No Pagado') return '';
+  const btn = (t, label) => `<button type="button" class="scm-pay-btn${target === t && scmPaid[i] === t ? ' active' : ''}" data-row="${i}" data-target="${escapeHtml(t)}">${escapeHtml(label)}</button>`;
+  let html = btn('Pagado', 'Marcar como pagado');
+  if (r.Channel !== 'TikTok') {
+    const cur = target.startsWith('Anotado|') ? target.split('|')[1] : '';
+    const s = scmShipments.find(x => x.tid === cur) || scmShipments.find(x => !x.shipped && !x.unknown);
+    if (s) html += btn('Anotado|' + s.tid, 'Marcar como pagado y anotar · ' + shipmentLabel(s));
+  }
+  return `<div class="scm-pay-row">${html}</div>`;
 }
 
 function scmChipKind(target) {
@@ -1384,6 +1410,7 @@ function scmRender() {
         <span class="scm-arrow">→</span>
         <select class="scm-chip scm-chip--${scmChipKind(changed ? target : '')}" data-row="${i}" aria-label="Nuevo estado">${scmOptionsHtml(r, changed ? target : '')}</select>
       </div>
+      ${scmPayButtons(r, i, changed ? target : '')}
       ${warns.length ? `<div class="scm-row-warn">⚠ ${escapeHtml(warns.join(' · '))}</div>` : ''}
     </div>`;
   }).join('');
@@ -1391,6 +1418,14 @@ function scmRender() {
   list.querySelectorAll('.scm-chip').forEach(sel => sel.addEventListener('change', () => {
     scmTargets[Number(sel.dataset.row)] = sel.value;
     scmBulk = '';   // a hand edit means the rows no longer match one bulk action
+    scmRender();
+  }));
+
+  list.querySelectorAll('.scm-pay-btn').forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.dataset.row);
+    scmTargets[i] = b.dataset.target;
+    scmPaid[i] = b.dataset.target;
+    scmBulk = '';
     scmRender();
   }));
 
@@ -1429,6 +1464,7 @@ function openStatusChangeModal(cliente, orders, single) {
   const custId = (orders[0] && orders[0].CustomerId) || '';
   scmShipments = getShipmentOptions(custId, orders);
   scmTargets = orders.map(() => '');
+  scmPaid = orders.map(() => '');
   const pendingShipments = scmShipments.filter(s => !s.shipped && !s.unknown);
   const disabledAttr = scmSingle ? ' disabled' : '';
 
@@ -2170,6 +2206,7 @@ function renderOrderRow(r, showActions) {
   if (isShipped(status)) rowClass += ' shipped-row';
 
   let pillClass = statusPillClass(status), pillText = status === 'No Pagado' ? `No Pagado${isOverdueUnpaid ? ' ⚠' : ''}` : status === 'Pagado' ? `Pagado${isOverduePaid ? ' ⚠' : ''}` : status;
+  if (status === 'Anotado' && r.LinkedShipment) pillText = `Anotado - ${shipmentUser(r.LinkedShipment) || '?'} - ${r.LinkedShipment}`;
 
   const metaParts = [formatDateTime(created), days === 0 ? 'hoy' : `hace ${days}d`].filter(Boolean);
   if (status === 'Anotado') metaParts.push(anotadoShipmentText(r));
