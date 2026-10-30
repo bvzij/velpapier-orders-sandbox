@@ -1,1265 +1,999 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// FINANZAS — expense tracking (new file: finanzas.gs)
-//
-// Lives in its own spreadsheet ("Vel Papier - Finanzas", id in Script Property
-// FINANZAS_SHEET_ID, created by the admin button Finanzas > Configuración).
-// Files (ticket photos, CFDI XML/PDF) live in a PRIVATE Drive folder (id in
-// FINANZAS_DRIVE_FOLDER_ID) and are only ever served through fin_get_file,
-// which checks permissions on every request.
-//
-// Related files:  permisos.gs (who may do what) · finanzas-cfdi.gs (facturas)
-//                 finanzas-admin.gs (cierre, caja chica, fijos, resumen, IA)
-//
-// Rules this module follows (see the plan doc):
-//   - the server filters, the browser only hides
-//   - nothing is ever hard-deleted: rows become 'Anulado' / 'Reemplazada'
-//   - writes go by HEADER NAME; ID/date columns are forced to text
-//   - every error message carries a "// TROUBLESHOOT:" comment next to it
-//   - all names here start with "fin" so they can never shadow apps-script.gs
+// FINANZAS — admin side (new file: finanzas-admin.gs)
+// Month close · petty cash · reimbursements · recurring costs + daily job ·
+// summary · analytics feed · exports for the contador · AI ticket reading ·
+// the capability toggles screen.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const FIN_VERSION = '2026-10-25.1';
+const FIN_PAID_STATES = ['Capturado', 'Revisado'];
+const FIN_ORDER_PAID = ['Pagado', 'Anotado', 'Enviado', 'Archivado'];   // same statuses Análisis counts as revenue
 
-const FIN_TABS = {
-  'Gastos': {
-    headers: ['Expense ID', 'Captura Status', 'Status', 'Fecha Compra', 'Fecha Pago', 'Periodo', 'Vendor ID', 'Category ID', 'Scope',
-      'Descripción', 'Método Pago', 'Cuenta Pago', 'Pagado Por', 'Reembolso Status', 'Reembolso Fecha', 'Moneda', 'Tipo Cambio',
-      'Subtotal', 'IVA', 'Otros Impuestos', 'Total', 'Total MXN', 'Folio Ticket', 'Datos Facturación', 'Requiere Factura',
-      'Estado Factura', 'Fecha Límite Factura', 'Invoice ID', 'Archivos', 'Recurring ID', 'Deducible', 'Flags', 'Notas',
-      'Creado Por', 'Creado En', 'Editado Por', 'Editado En', 'Anulado Por', 'Anulado En', 'Motivo Anulación'],
-    num: ['Tipo Cambio', 'Subtotal', 'IVA', 'Otros Impuestos', 'Total', 'Total MXN'],
-  },
-  'Gasto Líneas': {
-    headers: ['Line ID', 'Expense ID', 'Línea #', 'Vendor ID', 'Código Proveedor', 'Descripción', 'Catalog ID', 'Vínculo', 'Tipo Línea',
-      'Cantidad', 'Unidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea', 'Status', 'Creado Por', 'Creado En', 'Condición'],
-    num: ['Línea #', 'Cantidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea'],
-  },
-  'Facturas': {
-    headers: ['Invoice ID', 'UUID', 'Status', 'Scope', 'RFC Emisor', 'Nombre Emisor', 'Vendor ID', 'RFC Receptor', 'Uso CFDI', 'Fecha Emisión',
-      'Serie', 'Folio', 'Subtotal', 'Descuento', 'IVA Trasladado', 'Retenciones', 'Total', 'Moneda', 'Forma Pago', 'Método Pago',
-      'Archivo XML', 'Archivo PDF', 'Expense IDs', 'Match Status', 'Flags', 'Creado Por', 'Creado En'],
-    num: ['Subtotal', 'Descuento', 'IVA Trasladado', 'Retenciones', 'Total'],
-  },
-  'Factura Conceptos': {
-    headers: ['Concepto ID', 'Invoice ID', 'Clave ProdServ', 'No Identificación', 'Descripción', 'Cantidad', 'Clave Unidad', 'Valor Unitario', 'Importe', 'Descuento'],
-    num: ['Cantidad', 'Valor Unitario', 'Importe', 'Descuento'],
-  },
-  'Proveedores': {
-    headers: ['Vendor ID', 'Nombre', 'Alias', 'RFC', 'Status', 'Default Category ID', 'Portal Facturación URL', 'Regla Plazo Factura',
-      'Días Plazo', 'Requiere Factura Default', 'Contacto', 'Teléfono', 'Notas', 'Creado Por', 'Creado En', 'Método Pago Default', 'Cuenta Pago Default', 'Porcentaje Factura'],
-    num: ['Días Plazo'],
-  },
-  'Categorías': {
-    headers: ['Category ID', 'Nombre', 'Parent ID', 'Scope', 'Tipo Contable', 'Deducible Default', 'Activa', 'Orden'],
-    num: ['Orden'],
-  },
-  'Mapa Proveedor-Producto': {
-    headers: ['Map ID', 'Vendor ID', 'Código Proveedor', 'Descripción Normalizada', 'Catalog ID', 'Piezas por Unidad', 'Último Costo Unitario',
-      'Última Fecha', 'Veces Usado', 'Confirmado Por', 'Status'],
-    num: ['Piezas por Unidad', 'Último Costo Unitario', 'Veces Usado'],
-  },
-  'Gastos Fijos': {
-    headers: ['Recurring ID', 'Nombre', 'Vendor ID', 'Category ID', 'Monto Estimado', 'Moneda', 'Frecuencia', 'Día', 'Método Pago',
-      'Cuenta Pago', 'Requiere Factura', 'Activo', 'Desde', 'Hasta', 'Último Generado', 'Notas'],
-    num: ['Monto Estimado', 'Día'],
-  },
-  'Caja Chica': {
-    headers: ['Movimiento ID', 'Fecha', 'Responsable', 'Tipo', 'Monto', 'Notas', 'Creado Por', 'Creado En'],
-    num: ['Monto'],
-  },
-  'Cierres': {
-    headers: ['Periodo', 'Estado', 'Cerrado Por', 'Cerrado En', 'Notas'],
-    num: [],
-  },
-  'Archivos': {
-    headers: ['File ID', 'Nombre', 'Mime', 'Kind', 'Expense ID', 'Invoice ID', 'Scope', 'Subido Por', 'Subido En', 'Bytes', 'Storage', 'URL', 'Thumb URL'],
-    num: ['Bytes'],
-  },
-  'Config': {
-    headers: ['Clave', 'Valor'],
-    num: [],
-  },
-  'AI Log': {
-    headers: ['Fecha', 'Persona', 'File ID', 'Modelo', 'Tokens In', 'Tokens Out', 'Costo USD', 'Resultado'],
-    num: ['Tokens In', 'Tokens Out', 'Costo USD'],
-  },
-  // Created now so the structure is ready; no screen uses these two yet.
-  'Nómina': {
-    headers: ['Payroll ID', 'Periodo', 'Empleado', 'Concepto', 'Monto Bruto', 'Deducciones', 'Monto Neto', 'Fecha Pago', 'Expense ID'],
-    num: ['Monto Bruto', 'Deducciones', 'Monto Neto'],
-  },
-  'Movimientos Inventario': {
-    headers: ['Movement ID', 'Fecha', 'Catalog ID', 'Cantidad', 'Tipo', 'Referencia', 'Costo Unitario', 'Creado Por', 'Creado En'],
-    num: ['Cantidad', 'Costo Unitario'],
-  },
-};
+// ─── Month close ───────────────────────────────────────────────────────────
 
-const FIN_METODOS = ['Efectivo', 'Tarjeta débito', 'Tarjeta crédito', 'Transferencia', 'Caja chica', 'Otro'];
-const FIN_ESTADOS_FACTURA = ['No requiere', 'Pendiente', 'Solicitada', 'Recibida', 'Perdida'];
-const FIN_CAPTURA = ['Por capturar', 'Capturado', 'Revisado', 'Por pagar'];
-const FIN_TIPOS_LINEA = ['Inventario', 'Insumo', 'Gasto'];
-const FIN_UNIDADES = ['pz', 'caja', 'paquete', 'kg', 'm'];
-const FIN_FILE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf', 'text/xml', 'application/xml'];
-const FIN_MAX_FILE_BYTES = 12 * 1024 * 1024;
-const FIN_SCOPE_RANK = { operativo: 0, fijo: 1, nomina: 2, confidencial: 3 };
-
-const FIN_CONFIG_DEFAULTS = {
-  razon_social: '', rfc: '', regimen_fiscal: '', codigo_postal: '', uso_cfdi: 'G03', email_factura: '',
-  cash_limit: '2000', invoice_alert_days: '3', ai_monthly_cap_usd: '5',
-};
-
-// [name, scope, tipo contable, deducible default]
-const FIN_SEED_CATEGORIES = [
-  ['Mercancía para venta', 'operativo', 'COGS', 'Sí'],
-  ['Empaque e insumos de envío', 'operativo', 'Envíos', 'Sí'],
-  ['Guías y paquetería', 'operativo', 'Envíos', 'Sí'],
-  ['Papelería y oficina', 'operativo', 'Operativo', 'Sí'],
-  ['Limpieza y mantenimiento', 'operativo', 'Operativo', 'Sí'],
-  ['Transporte y gasolina', 'operativo', 'Operativo', 'Sí'],
-  ['Comida y viáticos', 'operativo', 'Operativo', 'Revisar'],
-  ['Giveaways y muestras', 'operativo', 'Marketing', 'Sí'],
-  ['Publicidad (TikTok ads, etc.)', 'fijo', 'Marketing', 'Sí'],
-  ['Software y suscripciones', 'fijo', 'Software', 'Sí'],
-  ['Renta', 'fijo', 'Renta', 'Sí'],
-  ['Luz, agua, internet, teléfono', 'fijo', 'Servicios', 'Sí'],
-  ['Contador y honorarios', 'fijo', 'Honorarios', 'Sí'],
-  ['Sueldos y bonos', 'nomina', 'Nómina', 'Sí'],
-  ['IMSS y aguinaldo', 'nomina', 'Nómina', 'Sí'],
-  ['Comisiones de plataformas', 'confidencial', 'Comisiones', 'Sí'],
-  ['Impuestos', 'confidencial', 'Impuestos', 'No'],
-  ['Préstamos e intereses', 'confidencial', 'Financiero', 'Revisar'],
-  ['Retiros de socios', 'confidencial', 'Retiro socio', 'No'],
-];
-
-// ─── Small helpers ─────────────────────────────────────────────────────────
-
-function finToday_() { return Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd'); }
-function finNow_() { return Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH:mm'); }
-function finIsDate_(s) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;
-  const d = new Date(s + 'T12:00:00Z');
-  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
-}
-function finAddDays_(dateStr, n) {
-  const d = new Date(dateStr + 'T12:00:00Z');
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-function finEndOfMonth_(dateStr) {
-  const y = Number(dateStr.slice(0, 4)), m = Number(dateStr.slice(5, 7));
-  const d = new Date(Date.UTC(y, m, 0, 12));
-  return d.toISOString().slice(0, 10);
-}
-function finDaysBetween_(a, b) {   // b - a, whole days
-  return Math.round((new Date(b + 'T12:00:00Z') - new Date(a + 'T12:00:00Z')) / 86400000);
-}
-function finNum_(v) {
-  if (v === null || v === undefined || v === '') return 0;
-  const n = Number(String(v).replace(/[$,\s]/g, ''));
-  return isNaN(n) ? 0 : n;
-}
-function finR2_(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
-function finStr_(v) { return v === null || v === undefined ? '' : String(v).trim(); }
-function finNorm_(s) {
-  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-function finErr_(msg) { return jsonResponse({ error: msg }); }   // TROUBLESHOOT: the message is shown to the user as-is; the code that returned it is the caller, search for the message text
-function finDenied_() { return jsonResponse({ error: 'unauthorized' }); }   // TROUBLESHOOT: the person lacks the capability; check Finanzas > Configuración > Permisos or permisos.gs
-
-// ─── Spreadsheet access ────────────────────────────────────────────────────
-
-function finSsId_() { return PropertiesService.getScriptProperties().getProperty('FINANZAS_SHEET_ID') || ''; }
-function finIsSetup_() { return !!finSsId_(); }
-
-function finSheet_(name) {
-  const id = finSsId_();
-  if (!id) throw new Error('Finanzas todavía no está configurado. Un admin debe crear la hoja en Finanzas > Configuración.');   // TROUBLESHOOT: Script Property FINANZAS_SHEET_ID is empty; press "Crear hoja de Finanzas" once
-  const sh = openSheetCached(id).getSheetByName(name);
-  if (!sh) throw new Error('Falta la pestaña de Finanzas: ' + name + '. Un admin debe usar Configuración > Reparar estructura.');   // TROUBLESHOOT: someone renamed/deleted a tab; press "Reparar estructura" (recreates it empty)
-  return sh;
+function finCloseCheckGet_(p, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.month_close']) return finDenied_();
+  const periodo = finStr_(p.periodo);
+  if (!/^\d{4}-\d{2}$/.test(periodo)) return finErr_('Elige un mes válido.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const rows = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo');
+  const inP = rows.filter(r => r['Periodo'] === periodo);
+  const lines = finRead_('Gasto Líneas').rows;
+  const ids = {};
+  inP.forEach(r => { ids[r['Expense ID']] = true; });
+  const pendInv = inP.filter(r => r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0 && !finIsDraft_(r));
+  return jsonResponse({
+    periodo: periodo, closed: finIsClosed_(periodo),
+    por_capturar: inP.filter(r => finIsDraft_(r)).length,
+    por_pagar: inP.filter(r => r['Captura Status'] === 'Por pagar').length,
+    sin_revisar: inP.filter(r => r['Captura Status'] === 'Capturado').length,
+    facturas_pendientes: pendInv.length,
+    facturas_vencidas: pendInv.filter(r => finIsDate_(r['Fecha Límite Factura']) && r['Fecha Límite Factura'] < finToday_()).length,
+    lineas_sin_vincular: lines.filter(l => l['Status'] === 'Activo' && l['Tipo Línea'] === 'Inventario' && !l['Catalog ID'] && ids[l['Expense ID']]).length,
+    reembolsos_pendientes: rows.filter(r => r['Reembolso Status'] === 'Pendiente').length,
+  });
 }
 
-function finRead_(name) {
-  const sh = finSheet_(name);
-  const last = sh.getLastRow(), lc = sh.getLastColumn();
-  if (last < 1 || lc < 1) return { headers: [], rows: [] };
-  const data = sh.getRange(1, 1, last, lc).getValues();
-  const headers = data[0].map(String);
-  const rows = [];
-  for (let i = 1; i < data.length; i++) {
-    const r = data[i];
-    if (r.every(v => v === '' || v === null)) continue;
-    const o = { _row: i + 1 };
-    headers.forEach((h, j) => {
-      let v = r[j];
-      if (v instanceof Date) v = Utilities.formatDate(v, MX_TZ, 'yyyy-MM-dd');
-      o[h] = v;
-    });
-    rows.push(o);
-  }
-  return { headers: headers, rows: rows };
+function finCloseMonthAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.month_close']) return finDenied_();
+  const periodo = finStr_(body.periodo);
+  if (!/^\d{4}-\d{2}$/.test(periodo)) return finErr_('Elige un mes válido.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  if (periodo > finToday_().slice(0, 7)) return finErr_('No se puede cerrar un mes que todavía no empieza.');   // TROUBLESHOOT: month state is kept in the Cierres tab (last row per period wins)
+  if (finIsClosed_(periodo)) return finErr_('Ese mes ya está cerrado.');   // TROUBLESHOOT: the period is closed in the Cierres tab; an admin reopens it in Finanzas > Cierre
+  finAppend_('Cierres', [{ 'Periodo': periodo, 'Estado': 'Cerrado', 'Cerrado Por': personKey_(identity), 'Cerrado En': finNow_(), 'Notas': finStr_(body.notas) }]);
+  logAuditEvent('fin_close_month', 'Cierre', periodo, {});
+  return jsonResponse({ result: 'ok', closed_periods: finClosedPeriods_() });
 }
 
-function finHeaders_(sh) {
-  return sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+function finReopenMonthAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.month_close']) return finDenied_();
+  const periodo = finStr_(body.periodo);
+  if (!finIsClosed_(periodo)) return finErr_('Ese mes no está cerrado.');   // TROUBLESHOOT: the period is closed in the Cierres tab; an admin reopens it in Finanzas > Cierre
+  finAppend_('Cierres', [{ 'Periodo': periodo, 'Estado': 'Reabierto', 'Cerrado Por': personKey_(identity), 'Cerrado En': finNow_(), 'Notas': finStr_(body.notas) }]);
+  logAuditEvent('fin_reopen_month', 'Cierre', periodo, {});
+  return jsonResponse({ result: 'ok', closed_periods: finClosedPeriods_() });
 }
 
-function finAppend_(name, objs) {
-  if (!objs || !objs.length) return;
-  const sh = finSheet_(name);
-  const headers = finHeaders_(sh);
-  const start = Math.max(sh.getLastRow(), 1) + 1;
-  const need = start + objs.length - 1 - sh.getMaxRows();
-  if (need > 0) {   // tab is full: add rows, and re-apply the text format so dates/IDs in the new rows are never auto-converted
-    const from = sh.getMaxRows() + 1;
-    sh.insertRowsAfter(sh.getMaxRows(), need + 200);
-    const numCols = (FIN_TABS[name] || { num: [] }).num;
-    headers.forEach((h, j) => { if (numCols.indexOf(h) < 0) sh.getRange(from, j + 1, sh.getMaxRows() - from + 1, 1).setNumberFormat('@'); });
-  }
-  const vals = objs.map(o => headers.map(h => (o[h] === undefined || o[h] === null) ? '' : o[h]));
-  sh.getRange(start, 1, vals.length, headers.length).setValues(vals);
+// ─── Petty cash + reimbursements ───────────────────────────────────────────
+// Balance = fondeos + ajustes − gastos activos pagados con "Caja chica" por
+// esa persona. Expenses are never copied into the Caja Chica tab, so the
+// balance can never drift out of sync with Gastos.
+
+function finPettyBalances_() {
+  const moves = finRead_('Caja Chica').rows;
+  const spent = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Método Pago'] === 'Caja chica' && !finIsDraft_(r));
+  const people = {};
+  const ensure = n => (people[n] = people[n] || { responsable: n, fondeos: 0, ajustes: 0, gastos: 0, saldo: 0 });
+  moves.forEach(m => { const o = ensure(String(m['Responsable']).toUpperCase()); if (m['Tipo'] === 'Fondeo') o.fondeos += finNum_(m['Monto']); else o.ajustes += finNum_(m['Monto']); });
+  spent.forEach(r => { ensure(String(r['Pagado Por']).toUpperCase()).gastos += finNum_(r['Total MXN']); });
+  Object.keys(people).forEach(k => {
+    const o = people[k];
+    o.fondeos = finR2_(o.fondeos); o.ajustes = finR2_(o.ajustes); o.gastos = finR2_(o.gastos);
+    o.saldo = finR2_(o.fondeos + o.ajustes - o.gastos);
+  });
+  return { people: people, moves: moves, spent: spent };
 }
 
-function finUpdate_(name, rowNum, patch) {
-  const sh = finSheet_(name);
-  const headers = finHeaders_(sh);
-  const cur = sh.getRange(rowNum, 1, 1, headers.length).getValues()[0];
-  headers.forEach((h, j) => { if (h in patch) cur[j] = (patch[h] === null || patch[h] === undefined) ? '' : patch[h]; });
-  sh.getRange(rowNum, 1, 1, headers.length).setValues([cur]);
+function finPettyCashGet_(p, identity) {
+  const caps = resolveCaps(identity);
+  const all = !!caps['finance.reimburse'];
+  if (!all && !caps['finance.petty_cash']) return finDenied_();
+  const me = personKey_(identity);
+  const b = finPettyBalances_();
+  const mine = n => String(n).toUpperCase() === me;
+  const balances = Object.keys(b.people).map(k => b.people[k]).filter(o => all || mine(o.responsable));
+  if (!all && !balances.length) balances.push({ responsable: me, fondeos: 0, ajustes: 0, gastos: 0, saldo: 0 });
+  const moves = b.moves.filter(m => all || mine(m['Responsable'])).map(m => { const o = Object.assign({}, m); delete o._row; return o; })
+    .sort((x, y) => String(y['Fecha']).localeCompare(String(x['Fecha']))).slice(0, 100);
+  const spent = b.spent.filter(r => all || mine(r['Pagado Por'])).filter(r => finCanSeeExpense_(r, identity, caps) || all)
+    .map(r => ({ id: r['Expense ID'], fecha: r['Fecha Compra'], total: r['Total MXN'], descripcion: r['Descripción'], responsable: r['Pagado Por'] }))
+    .sort((x, y) => String(y.fecha).localeCompare(String(x.fecha))).slice(0, 100);
+  return jsonResponse({ balances: balances, moves: moves, spent: spent, can_fund: all });
 }
 
-function finNextId_(prefix, width) {
-  const props = PropertiesService.getScriptProperties();
-  const key = 'FIN_SEQ_' + prefix;
-  const n = Number(props.getProperty(key) || 0) + 1;
-  props.setProperty(key, String(n));
-  return prefix + '-' + String(n).padStart(width, '0');
+function finPettyCashMoveAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.reimburse']) return finDenied_();
+  const who = finStr_(body.responsable).toUpperCase();
+  if (!who) return finErr_('Elige quién recibe el dinero.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const tipo = body.tipo === 'Ajuste' ? 'Ajuste' : 'Fondeo';
+  const monto = finR2_(finNum_(body.monto));
+  if (!monto || (tipo === 'Fondeo' && monto < 0)) return finErr_('Escribe un monto válido.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const fecha = finIsDate_(body.fecha) ? body.fecha : finToday_();
+  const id = finNextId_('CCH', 5);
+  finAppend_('Caja Chica', [{ 'Movimiento ID': id, 'Fecha': fecha, 'Responsable': who, 'Tipo': tipo, 'Monto': monto, 'Notas': finStr_(body.notas), 'Creado Por': personKey_(identity), 'Creado En': finNow_() }]);
+  logAuditEvent('fin_petty_cash_move', 'CajaChica', id, { who: who, tipo: tipo, monto: monto });
+  return jsonResponse({ result: 'ok', movement_id: id });
 }
 
-// A brand-new Google sheet only has 26 columns; writing past that throws.
-function finEnsureCols_(sh, n) {
-  const have = sh.getMaxColumns();
-  if (have < n) sh.insertColumnsAfter(have, n - have);
+function finReimbursementsGet_(p, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.view']) return finDenied_();
+  const all = !!caps['finance.reimburse'];
+  const me = personKey_(identity);
+  const rows = finRead_('Gastos').rows
+    .filter(r => r['Status'] === 'Activo' && r['Reembolso Status'] === 'Pendiente' && finCanSeeExpense_(r, identity, caps) && (all || String(r['Pagado Por']).toUpperCase() === me))
+    .map(r => ({ id: r['Expense ID'], fecha: r['Fecha Compra'], total: r['Total MXN'], descripcion: r['Descripción'], pagado_por: r['Pagado Por'], vendor_id: r['Vendor ID'] }))
+    .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+  return jsonResponse({ rows: rows, can_pay: all });
 }
 
-// Writes the tabs/headers, forces text format on every non-numeric column.
-function finEnsureTabs_(ss) {
-  Object.keys(FIN_TABS).forEach(name => {
-    const def = FIN_TABS[name];
-    let sh = ss.getSheetByName(name);
-    if (!sh) {
-      sh = ss.insertSheet(name);
-      finEnsureCols_(sh, def.headers.length);
-      sh.getRange(1, 1, 1, def.headers.length).setValues([def.headers]);
-      sh.setFrozenRows(1);
-    } else {
-      let have = sh.getLastColumn() ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String) : [];
-      def.headers.forEach(h => {
-        if (have.indexOf(h) < 0) { finEnsureCols_(sh, have.length + 1); sh.getRange(1, have.length + 1).setValue(h); have.push(h); }
-      });
-    }
-    const hdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
-    let j = 0;
-    while (j < hdr.length) {   // one formatting call per run of consecutive text columns (a call per column made setup take minutes)
-      if (def.num.indexOf(hdr[j]) >= 0) { j++; continue; }
-      let k = j;
-      while (k + 1 < hdr.length && def.num.indexOf(hdr[k + 1]) < 0) k++;
-      sh.getRange(1, j + 1, sh.getMaxRows(), k - j + 1).setNumberFormat('@');
-      j = k + 1;
+function finMarkReimbursedAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.reimburse']) return finDenied_();
+  const ids = (Array.isArray(body.expense_ids) ? body.expense_ids : []).map(String);
+  if (!ids.length) return finErr_('Elige al menos un gasto.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  let done = 0;
+  ids.forEach(id => {
+    const r = finFindExpenseRow_(id);
+    if (r && r['Status'] === 'Activo' && r['Reembolso Status'] === 'Pendiente') {
+      finUpdate_('Gastos', r._row, { 'Reembolso Status': 'Pagado', 'Reembolso Fecha': finToday_(), 'Editado Por': personKey_(identity), 'Editado En': finNow_() });
+      done++;
     }
   });
-  // The brand-new spreadsheet starts with an empty default tab; remove it.
-  ss.getSheets().forEach(sh => {
-    if (!FIN_TABS[sh.getName()] && sh.getLastRow() <= 1 && ss.getSheets().length > 1) { try { ss.deleteSheet(sh); } catch (e) { /* last sheet cannot be deleted */ } }
-  });
+  logAuditEvent('fin_mark_reimbursed', 'Gasto', ids.join(','), { done: done });
+  return jsonResponse({ result: 'ok', done: done });
 }
 
-function finRootFolder_() {
-  const props = PropertiesService.getScriptProperties();
-  const id = props.getProperty('FINANZAS_DRIVE_FOLDER_ID');
-  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* deleted: make a new one */ } }
-  const f = DriveApp.createFolder('Vel Papier — Finanzas (archivos privados)');
-  props.setProperty('FINANZAS_DRIVE_FOLDER_ID', f.getId());
-  return f;
-}
+// ─── Recurring costs (Gastos fijos) ────────────────────────────────────────
 
-function finMonthFolder_(periodo) {
-  const root = finRootFolder_();
-  const it = root.getFoldersByName(periodo);
-  if (it.hasNext()) return it.next();
-  return root.createFolder(periodo);
-}
-
-// ─── Setup ─────────────────────────────────────────────────────────────────
-
-function finSetupAction(body, identity) {
-  if (!identity || identity.role !== 'admin' || identity.service) return finDenied_();
-  const props = PropertiesService.getScriptProperties();
-  let ss = null, created = false;
-  const existing = props.getProperty('FINANZAS_SHEET_ID');
-  if (existing) { try { ss = SpreadsheetApp.openById(existing); } catch (e) { ss = null; } }   // TROUBLESHOOT: if this keeps failing the spreadsheet was deleted or access was lost; remove FINANZAS_SHEET_ID in Script Properties and press setup again (a new empty sheet is created)
-  if (!ss) {
-    ss = SpreadsheetApp.create('Vel Papier - Finanzas');
-    props.setProperty('FINANZAS_SHEET_ID', ss.getId());
-    created = true;
-  }
-  _ssCache[ss.getId()] = ss;
-  finEnsureTabs_(ss);
-  const cats = finRead_('Categorías');
-  if (!cats.rows.length) {
-    finAppend_('Categorías', FIN_SEED_CATEGORIES.map((c, i) => ({
-      'Category ID': finNextId_('CAT', 3), 'Nombre': c[0], 'Parent ID': '', 'Scope': c[1], 'Tipo Contable': c[2],
-      'Deducible Default': c[3], 'Activa': 'Sí', 'Orden': i + 1,
-    })));
-  }
-  const cfg = finRead_('Config');
-  const haveKeys = cfg.rows.map(r => String(r['Clave']));
-  finAppend_('Config', Object.keys(FIN_CONFIG_DEFAULTS).filter(k => haveKeys.indexOf(k) < 0).map(k => ({ 'Clave': k, 'Valor': FIN_CONFIG_DEFAULTS[k] })));
-  const folder = finRootFolder_();
-  const trig = finInstallTriggers_();
-  logAuditEvent('fin_setup', 'Finanzas', ss.getId(), { created: created, trigger: trig });
-  return jsonResponse({ result: 'ok', created: created, sheet_url: ss.getUrl(), folder_url: folder.getUrl(), trigger: trig });
-}
-
-// Editor shortcut: run once from the Apps Script function dropdown if the
-// button in the dashboard is not available yet.
-function finSetupFromEditor() {
-  const r = finSetupAction({}, { name: 'EDITOR', role: 'admin' });
-  Logger.log(r.getContent());
-}
-
-// ─── Config (our fiscal data etc.) ─────────────────────────────────────────
-
-function finConfig_() {
-  const out = Object.assign({}, FIN_CONFIG_DEFAULTS);
-  if (!finIsSetup_()) return out;
-  finRead_('Config').rows.forEach(r => { const k = String(r['Clave']); if (k) out[k] = String(r['Valor'] === undefined ? '' : r['Valor']); });
-  return out;
-}
-
-function finConfigSaveAction(body, identity) {
-  if (!identity || identity.role !== 'admin') return finDenied_();
-  const incoming = body.config || {};
-  const tab = finRead_('Config');
-  const byKey = {};
-  tab.rows.forEach(r => { byKey[String(r['Clave'])] = r; });
-  const add = [];
-  Object.keys(FIN_CONFIG_DEFAULTS).forEach(k => {
-    if (!(k in incoming)) return;
-    const val = finStr_(incoming[k]);
-    if (byKey[k]) finUpdate_('Config', byKey[k]._row, { 'Valor': val });
-    else add.push({ 'Clave': k, 'Valor': val });
-  });
-  finAppend_('Config', add);
-  logAuditEvent('fin_config_save', 'Finanzas', 'Config', { keys: Object.keys(incoming) });
-  return jsonResponse({ result: 'ok', config: finConfig_() });
-}
-
-// ─── Visibility (the heart of "the server filters") ────────────────────────
-
-function finScopeOfRow_(r) { return String(r['Scope'] || 'operativo'); }
-
-function finScopesAllowed_(caps) { return caps['finance.scopes'] || []; }
-
-function finCanSeeExpense_(r, identity, caps) {
-  if (caps._admin) return true;
-  if (finScopesAllowed_(caps).indexOf(finScopeOfRow_(r)) < 0) return false;
-  if (!caps['finance.view_all_entries'] && String(r['Creado Por']).toUpperCase() !== personKey_(identity)) return false;
-  const days = Number(caps['finance.history_days'] || 0);
-  if (days > 0) {
-    const cutoff = finAddDays_(finToday_(), -days);
-    const d = String(r['Fecha Compra'] || String(r['Creado En'] || '').slice(0, 10)).slice(0, 10);
-    if (d && d < cutoff) return false;
-  }
-  return true;
-}
-
-function finCanSeeScope_(scope, caps) {
-  return !!caps._admin || finScopesAllowed_(caps).indexOf(scope || 'operativo') >= 0;
-}
-
-// Public shape of an expense row: no sheet row number, plus computed fields.
-function finExpenseOut_(r, cfg) {
+function finRecurringOut_(r) {
   const o = {};
   Object.keys(r).forEach(k => { if (k !== '_row') o[k] = r[k]; });
-  o['Archivos'] = finStr_(r['Archivos']);
-  o.files = o['Archivos'] ? o['Archivos'].split('|').filter(Boolean) : [];
-  // Invoice deadline status is computed live so it is always right.
-  o.invoice_days_left = null;
-  const needs = r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0 && r['Status'] === 'Activo';
-  if (needs && finIsDate_(r['Fecha Límite Factura'])) {
-    o.invoice_days_left = finDaysBetween_(finToday_(), r['Fecha Límite Factura']);
-  }
-  o.invoice_overdue = needs && o.invoice_days_left !== null && o.invoice_days_left < 0;
   return o;
 }
 
-// ─── Catalog of vendors / categories (what the browser needs to start) ─────
-
-function finVendorOut_(v) {
-  const o = {};
-  Object.keys(v).forEach(k => { if (k !== '_row') o[k] = v[k]; });
-  return o;
-}
-
-function finVendorsFor_(identity, caps) {
-  const all = finRead_('Proveedores').rows;
-  const me = personKey_(identity);
-  return all.filter(v => {
-    if (caps._admin || caps['finance.vendors_edit']) return true;
-    if (v['Status'] === 'Activo') return true;
-    return v['Status'] === 'Pendiente revisión' && String(v['Creado Por']).toUpperCase() === me;
-  }).map(finVendorOut_);
-}
-
-function finCategoriesFor_(caps) {
-  return finRead_('Categorías').rows.filter(c => {
-    if (caps._admin || caps['finance.categories_edit']) return true;
-    return c['Activa'] === 'Sí' && finCanSeeScope_(c['Scope'], caps);
-  }).map(c => { const o = Object.assign({}, c); delete o._row; return o; })
-    .sort((a, b) => Number(a['Orden'] || 0) - Number(b['Orden'] || 0));
-}
-
-function finClosedPeriods_() {
-  const state = {};
-  finRead_('Cierres').rows.forEach(r => { state[String(r['Periodo'])] = r['Estado']; });   // later rows win: the tab is an append-only log
-  return Object.keys(state).filter(p => state[p] === 'Cerrado').sort();
-}
-
-function finIsClosed_(periodo) { return finClosedPeriods_().indexOf(periodo) >= 0; }
-
-function finBootstrapGet_(params, identity) {
+function finRecurringListGet_(p, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.view']) return finDenied_();
-  if (!finIsSetup_()) {
-    return jsonResponse({ ok: true, setup: false, can_setup: !!caps._admin, caps: capsForClient(identity), version: FIN_VERSION });
-  }
+  if (!caps['finance.recurring']) return finDenied_();
+  const periodo = finStr_(p.periodo) || finToday_().slice(0, 7);
+  const templates = finRead_('Gastos Fijos').rows.map(finRecurringOut_);
   const cfg = finConfig_();
-  const publicCfg = { cash_limit: cfg.cash_limit, invoice_alert_days: cfg.invoice_alert_days };
-  if (caps._admin || caps['finance.invoices']) {
-    ['razon_social', 'rfc', 'regimen_fiscal', 'codigo_postal', 'uso_cfdi', 'email_factura'].forEach(k => { publicCfg[k] = cfg[k]; });
+  const due = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Recurring ID'] && r['Periodo'] === periodo).map(r => finExpenseOut_(r, cfg));
+  return jsonResponse({ templates: templates, expenses: due, periodo: periodo });
+}
+
+function finSaveRecurringAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.recurring']) return finDenied_();
+  const r = body.recurring || {};
+  const nombre = finStr_(r.nombre);
+  if (!nombre) return finErr_('Escribe el nombre del gasto fijo.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const cat = finCategoryById_(finStr_(r.category_id));
+  if (!cat) return finErr_('Elige una categoría.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const freq = ['Mensual', 'Quincenal', 'Anual'].indexOf(r.frecuencia) >= 0 ? r.frecuencia : 'Mensual';
+  const dia = Math.min(Math.max(Math.floor(finNum_(r.dia)) || 1, 1), 31);
+  if (freq === 'Anual' && !finIsDate_(r.desde)) return finErr_('Un gasto anual necesita la fecha "Desde" (el mes se toma de ahí).');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const patch = {
+    'Nombre': nombre, 'Vendor ID': finStr_(r.vendor_id), 'Category ID': cat['Category ID'], 'Monto Estimado': finR2_(finNum_(r.monto_estimado)),
+    'Moneda': finStr_(r.moneda).toUpperCase() || 'MXN', 'Frecuencia': freq, 'Día': dia,
+    'Método Pago': FIN_METODOS.indexOf(r.metodo_pago) >= 0 ? r.metodo_pago : 'Transferencia', 'Cuenta Pago': finStr_(r.cuenta_pago),
+    'Requiere Factura': r.requiere_factura === 'No' ? 'No' : 'Sí', 'Activo': r.activo === 'No' ? 'No' : 'Sí',
+    'Desde': finIsDate_(r.desde) ? r.desde : '', 'Hasta': finIsDate_(r.hasta) ? r.hasta : '', 'Notas': finStr_(r.notas),
+  };
+  if (r.recurring_id) {
+    const cur = finRead_('Gastos Fijos').rows.find(x => x['Recurring ID'] === r.recurring_id);
+    if (!cur) return finErr_('No se encontró ese gasto fijo.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
+    finUpdate_('Gastos Fijos', cur._row, patch);
+    logAuditEvent('fin_save_recurring', 'GastoFijo', r.recurring_id, { nombre: nombre });
+    return jsonResponse({ result: 'ok', recurring_id: r.recurring_id });
   }
-  if (caps._admin) publicCfg.ai_monthly_cap_usd = cfg.ai_monthly_cap_usd;
-  const props = PropertiesService.getScriptProperties();
-  return jsonResponse({
-    ok: true, setup: true, version: FIN_VERSION,
-    me: { name: personKey_(identity), role: identity.role },
-    caps: capsForClient(identity),
-    today: finToday_(),
-    config: publicCfg,
-    categories: finCategoriesFor_(caps),
-    vendors: finVendorsFor_(identity, caps),
-    closed_periods: finClosedPeriods_(),
-    enums: { metodos: FIN_METODOS, estados_factura: FIN_ESTADOS_FACTURA, captura: FIN_CAPTURA, tipos_linea: FIN_TIPOS_LINEA, unidades: FIN_UNIDADES, scopes: FIN_SCOPES },
-    ai_ready: !!(caps['finance.ai_prefill'] && finAiProvider_()),
-  });
+  const id = finNextId_('FIJ', 3);
+  finAppend_('Gastos Fijos', [Object.assign({ 'Recurring ID': id, 'Último Generado': '' }, patch)]);
+  logAuditEvent('fin_save_recurring', 'GastoFijo', id, { nombre: nombre, created: true });
+  return jsonResponse({ result: 'ok', recurring_id: id });
 }
 
-// ─── Expenses: validation + building ───────────────────────────────────────
+function finMonthLength_(ym) { return Number(finEndOfMonth_(ym + '-01').slice(8, 10)); }
 
-function finVendorById_(id) {
-  if (!id) return null;
-  const v = finRead_('Proveedores').rows.find(r => r['Vendor ID'] === id);
-  return v || null;
-}
-
-function finCategoryById_(id) {
-  if (!id) return null;
-  return finRead_('Categorías').rows.find(r => r['Category ID'] === id) || null;
-}
-
-// Last day to request the factura, from the vendor's rule.
-function finInvoiceDeadline_(fechaCompra, vendor) {
-  const rule = vendor ? String(vendor['Regla Plazo Factura'] || 'Mismo mes') : 'Mismo mes';
-  if (rule === 'Sin límite') return '';
-  if (rule === 'N días') {
-    const n = Math.max(0, Math.floor(Number(vendor['Días Plazo']) || 0));
-    return n > 0 ? finAddDays_(fechaCompra, n) : finEndOfMonth_(fechaCompra);
-  }
-  return finEndOfMonth_(fechaCompra);
-}
-
-function finNormLines_(lines, vendorId, identity) {
+// Which keys/dates of this template are due as of `today`. Pure function.
+function finRecurringDue_(t, today) {
+  if (t['Activo'] === 'No') return [];
+  if (finIsDate_(t['Desde']) && today < t['Desde']) return [];
+  if (finIsDate_(t['Hasta']) && today > t['Hasta']) return [];
+  const ym = today.slice(0, 7), d = Number(today.slice(8, 10)), len = finMonthLength_(ym);
+  const dia = Math.min(Math.max(Number(t['Día']) || 1, 1), 31);
+  const at = n => ym + '-' + String(Math.min(n, len)).padStart(2, '0');
   const out = [];
-  (Array.isArray(lines) ? lines : []).forEach((l, i) => {
-    const desc = finStr_(l.descripcion), code = finStr_(l.codigo);
-    if (!desc && !code) return;
-    const qty = Math.max(0, finNum_(l.cantidad)) || 1;
-    const cost = Math.max(0, finNum_(l.costo_unitario));
-    const disc = Math.max(0, finNum_(l.descuento));
-    const tipo = FIN_TIPOS_LINEA.indexOf(l.tipo) >= 0 ? l.tipo : 'Inventario';
-    const catalogId = finStr_(l.catalog_id);
-    let vinculo = ['Sin vincular', 'Sugerido', 'Confirmado'].indexOf(l.vinculo) >= 0 ? l.vinculo : 'Sin vincular';
-    if (!catalogId) vinculo = 'Sin vincular';
-    out.push({
-      'Línea #': out.length + 1, 'Vendor ID': vendorId || '', 'Código Proveedor': code, 'Descripción': desc,
-      'Catalog ID': catalogId, 'Vínculo': vinculo, 'Tipo Línea': tipo, 'Cantidad': qty,
-      'Unidad': FIN_UNIDADES.indexOf(l.unidad) >= 0 ? l.unidad : 'pz',
-      'Piezas por Unidad': Math.max(0, finNum_(l.piezas_por_unidad)) || 1,
-      'Costo Unitario': finR2_(cost), 'Descuento Línea': finR2_(disc), 'Total Línea': finR2_(qty * cost - disc),
-      'Condición': l.condicion === 'Dañado' ? 'Dañado' : '',
+  if (t['Frecuencia'] === 'Quincenal') {
+    const a = Math.min(dia, dia > 15 ? dia - 15 : dia), b = a + 15;
+    if (d >= Math.min(a, len)) out.push({ key: ym + '-q1', fecha: at(a) });
+    if (d >= Math.min(b, len)) out.push({ key: ym + '-q2', fecha: at(b) });
+  } else if (t['Frecuencia'] === 'Anual') {
+    if (finIsDate_(t['Desde']) && Number(ym.slice(5, 7)) === Number(String(t['Desde']).slice(5, 7)) && d >= Math.min(dia, len)) out.push({ key: ym.slice(0, 4), fecha: at(dia) });
+  } else if (d >= Math.min(dia, len)) {
+    out.push({ key: ym, fecha: at(dia) });
+  }
+  return out;
+}
+
+function finGenerateRecurring_(today) {
+  const created = [], skipped = [];
+  const exps = finRead_('Gastos').rows;
+  const cfg = finConfig_();
+  finRead_('Gastos Fijos').rows.forEach(t => {
+    const due = finRecurringDue_(t, today);
+    let last = String(t['Último Generado'] || '');
+    due.forEach(item => {
+      if (item.key <= last && last) return;
+      if (exps.some(e => e['Recurring ID'] === t['Recurring ID'] && e['Fecha Compra'] === item.fecha && e['Status'] === 'Activo')) { last = item.key; return; }
+      if (finIsClosed_(item.fecha.slice(0, 7))) { skipped.push(t['Recurring ID'] + ' ' + item.fecha + ' (mes cerrado)'); return; }
+      const cat = finCategoryById_(t['Category ID']);
+      if (!cat) { skipped.push(t['Recurring ID'] + ' (categoría borrada)'); return; }   // TROUBLESHOOT: the template points at a deleted category; edit the Gasto fijo and pick another
+      const vendor = t['Vendor ID'] ? finVendorById_(t['Vendor ID']) : null;
+      const moneda = String(t['Moneda'] || 'MXN').toUpperCase();
+      const e = {
+        'Expense ID': finNextId_('GST', 6), 'Captura Status': 'Por pagar', 'Status': 'Activo', 'Fecha Compra': item.fecha, 'Fecha Pago': '',
+        'Periodo': item.fecha.slice(0, 7), 'Vendor ID': t['Vendor ID'] || '', 'Category ID': cat['Category ID'], 'Scope': cat['Scope'],
+        'Descripción': t['Nombre'], 'Método Pago': t['Método Pago'] || 'Transferencia', 'Cuenta Pago': t['Cuenta Pago'] || '', 'Pagado Por': 'SISTEMA',
+        'Reembolso Status': 'No aplica', 'Moneda': moneda, 'Tipo Cambio': moneda === 'MXN' ? 1 : '', 'Total': finR2_(finNum_(t['Monto Estimado'])),
+        'Total MXN': moneda === 'MXN' ? finR2_(finNum_(t['Monto Estimado'])) : 0, 'Requiere Factura': t['Requiere Factura'] === 'No' ? 'No' : 'Sí',
+        'Recurring ID': t['Recurring ID'], 'Deducible': cat['Deducible Default'] || 'Sí', 'Archivos': '', 'Creado Por': 'SISTEMA', 'Creado En': finNow_(),
+      };
+      e['Estado Factura'] = e['Requiere Factura'] === 'No' ? 'No requiere' : 'Pendiente';
+      e['Fecha Límite Factura'] = e['Requiere Factura'] === 'Sí' ? finInvoiceDeadline_(item.fecha, vendor) : '';
+      e['Flags'] = finComputeFlags_(e, [], cfg);
+      finAppend_('Gastos', [e]);
+      exps.push(e);
+      created.push(e['Expense ID']);
+      last = item.key;
     });
+    if (last !== String(t['Último Generado'] || '')) finUpdate_('Gastos Fijos', t._row, { 'Último Generado': last });
   });
-  return out;
+  return { created: created, skipped: skipped };
 }
 
-function finComputeFlags_(exp, lines, cfg) {
-  const flags = [];
-  const limit = Number(cfg.cash_limit) || 2000;
-  if (exp['Método Pago'] === 'Efectivo' && finNum_(exp['Total MXN']) > limit) flags.push('CASH_OVER_LIMIT');
-  if (lines.length) {
-    const sum = lines.reduce((s, l) => s + finNum_(l['Total Línea']), 0);
-    if (Math.abs(sum - finNum_(exp['Total'])) > 1) flags.push('TOTAL_MISMATCH');
-  }
-  if (!exp['Vendor ID']) flags.push('SIN_PROVEEDOR');
-  if (exp['Moneda'] !== 'MXN' && !(finNum_(exp['Tipo Cambio']) > 0)) flags.push('SIN_TIPO_CAMBIO');
-  if (exp['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(exp['Estado Factura']) >= 0
-      && finIsDate_(exp['Fecha Límite Factura']) && exp['Fecha Límite Factura'] < finToday_() && exp['Status'] === 'Activo') flags.push('INVOICE_OVERDUE');
-  return flags.join(',');
-}
-
-// Possible duplicates among expenses the caller is allowed to see.
-function finFindDuplicates_(exp, excludeId, identity, caps) {
-  const total = finNum_(exp['Total']);
-  const out = [];
+// Keeps the INVOICE_OVERDUE flag honest (the screens compute it live anyway;
+// the flag is for analytics and exports).
+function finRefreshFlags_() {
+  const cfg = finConfig_();
+  let changed = 0;
   finRead_('Gastos').rows.forEach(r => {
-    if (r['Status'] !== 'Activo' || r['Expense ID'] === excludeId) return;
-    if (!finCanSeeExpense_(r, identity, caps)) return;
-    let why = '';
-    const sameVendor = exp['Vendor ID'] && r['Vendor ID'] === exp['Vendor ID'];
-    if (sameVendor && finStr_(exp['Folio Ticket']) && finStr_(r['Folio Ticket']) === finStr_(exp['Folio Ticket'])) why = 'mismo folio de ticket';
-    else if (sameVendor && total > 0 && Math.abs(finNum_(r['Total']) - total) < 0.005
-             && finIsDate_(r['Fecha Compra']) && Math.abs(finDaysBetween_(r['Fecha Compra'], exp['Fecha Compra'])) <= 1) why = 'mismo proveedor, total y fecha';
-    if (why) out.push({ id: r['Expense ID'], fecha: r['Fecha Compra'], total: r['Total'], why: why });
+    if (r['Status'] !== 'Activo') return;
+    const f = String(r['Flags'] || '').split(',').filter(x => x && x !== 'INVOICE_OVERDUE');
+    const overdue = r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0 && finIsDate_(r['Fecha Límite Factura']) && r['Fecha Límite Factura'] < finToday_();
+    if (overdue) f.push('INVOICE_OVERDUE');
+    const next = f.join(',');
+    if (next !== String(r['Flags'] || '')) { finUpdate_('Gastos', r._row, { 'Flags': next }); changed++; }
   });
+  return changed;
+}
+
+function finRunDailyAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.recurring']) return finDenied_();
+  const g = finGenerateRecurring_(finToday_());
+  const flags = finRefreshFlags_();
+  logAuditEvent('fin_run_daily', 'Finanzas', 'daily', { created: g.created.length, flags: flags });
+  return jsonResponse({ result: 'ok', created: g.created.length, skipped: g.skipped, flags_updated: flags });
+}
+
+// Time-driven trigger entry point (installed by setup). Takes the same lock
+// the web app uses so a daily run can never overlap a save.
+function finDailyJob() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(60000)) { Logger.log('finDailyJob: busy, will retry tomorrow'); return; }   // TROUBLESHOOT: another request held the lock for a full minute; run "Generar gastos fijos" from Finanzas > Gastos fijos
+  try {
+    _ssCache = {};
+    _currentIdentity = { name: 'SISTEMA', role: 'admin' };
+    if (!finIsSetup_()) return;
+    const g = finGenerateRecurring_(finToday_());
+    const flags = finRefreshFlags_();
+    logAuditEvent('fin_daily_job', 'Finanzas', 'daily', { created: g.created.length, skipped: g.skipped.length, flags: flags });
+    try { flushAudit(); } catch (e) { Logger.log('finDailyJob: audit flush failed ' + e.message); }
+  } finally { lock.releaseLock(); }
+}
+
+function finInstallTriggers_() {
+  const have = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'finDailyJob');
+  if (have.length) return 'ya existía';
+  ScriptApp.newTrigger('finDailyJob').timeBased().atHour(6).everyDays(1).inTimezone(MX_TZ).create();
+  return 'creado';
+}
+
+// ─── Summary (Resumen) ─────────────────────────────────────────────────────
+
+function finPrevPeriodo_(ym) {
+  const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+  const d = new Date(Date.UTC(y, m - 2, 1, 12));
+  return d.toISOString().slice(0, 7);
+}
+
+// Revenue per month, from the same Orders sheet and statuses Análisis uses.
+function finIncomeByMonth_() {
+  const cache = CacheService.getScriptCache();
+  try { const hit = cache.get('fin_income_v1'); if (hit) return JSON.parse(hit); } catch (e) { /* recompute */ }
+  const sh = getOrdersSheet();
+  const out = {};
+  const last = sh.getLastRow();
+  if (last >= 2) {
+    const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+    const col = n => headers.indexOf(n) + 1;
+    const cStatus = col('Status'), cPrice = col('Price'), cOrder = col('Order Date'), cCreated = col('Created Date');
+    if (cStatus && cPrice && (cOrder || cCreated)) {
+      const read = c => c ? sh.getRange(2, c, last - 1, 1).getValues() : null;
+      const st = read(cStatus), pr = read(cPrice), od = read(cOrder), cr = read(cCreated);
+      const ym = v => {
+        if (v instanceof Date) return Utilities.formatDate(v, MX_TZ, 'yyyy-MM');
+        const s = String(v || '');
+        if (/^\d{4}-\d{2}/.test(s)) return s.slice(0, 7);
+        const d = s ? new Date(s) : null;
+        return d && !isNaN(d.getTime()) ? Utilities.formatDate(d, MX_TZ, 'yyyy-MM') : '';
+      };
+      for (let i = 0; i < st.length; i++) {
+        if (FIN_ORDER_PAID.indexOf(String(st[i][0])) < 0) continue;
+        const m = ym((od && od[i][0]) || (cr && cr[i][0]));
+        if (m) out[m] = finR2_((out[m] || 0) + finNum_(pr[i][0]));
+      }
+    }
+  }
+  try { cache.put('fin_income_v1', JSON.stringify(out), 600); } catch (e) { /* too big for cache: fine */ }
   return out;
 }
 
-// Turns the browser's expense object into a full Gastos row (not yet saved).
-function finBuildExpense_(inp, existing, identity, caps, cfg, vendor, category) {
-  const e = existing ? Object.assign({}, existing) : {};
-  const me = personKey_(identity);
-  const pick = (k, cur) => (inp[k] === undefined ? cur : inp[k]);
-
-  e['Fecha Compra'] = finStr_(pick('fecha_compra', e['Fecha Compra'] || finToday_()));
-  e['Fecha Pago'] = finStr_(pick('fecha_pago', e['Fecha Pago'] || e['Fecha Compra']));
-  e['Descripción'] = finStr_(pick('descripcion', e['Descripción']));
-  e['Método Pago'] = finStr_(pick('metodo_pago', e['Método Pago'] || 'Efectivo'));
-  e['Cuenta Pago'] = finStr_(pick('cuenta_pago', e['Cuenta Pago']));
-  e['Moneda'] = finStr_(pick('moneda', e['Moneda'] || 'MXN')).toUpperCase() || 'MXN';
-  e['Tipo Cambio'] = e['Moneda'] === 'MXN' ? 1 : finNum_(pick('tipo_cambio', e['Tipo Cambio']));
-  e['Total'] = finR2_(finNum_(pick('total', e['Total'])));
-  e['Subtotal'] = inp.subtotal === undefined ? (e['Subtotal'] === undefined ? '' : e['Subtotal']) : finR2_(finNum_(inp.subtotal));
-  e['IVA'] = inp.iva === undefined ? (e['IVA'] === undefined ? '' : e['IVA']) : finR2_(finNum_(inp.iva));
-  e['Otros Impuestos'] = inp.otros_impuestos === undefined ? (e['Otros Impuestos'] === undefined ? '' : e['Otros Impuestos']) : finR2_(finNum_(inp.otros_impuestos));
-  e['Total MXN'] = finR2_(e['Total'] * (e['Moneda'] === 'MXN' ? 1 : (e['Tipo Cambio'] > 0 ? e['Tipo Cambio'] : 0)));
-  e['Folio Ticket'] = finStr_(pick('folio_ticket', e['Folio Ticket']));
-  e['Datos Facturación'] = finStr_(pick('datos_facturacion', e['Datos Facturación']));
-  const dedIn = pick('deducible', e['Deducible']);
-  e['Deducible'] = ['Sí', 'No', 'Revisar'].indexOf(dedIn) >= 0 ? dedIn : ((category && category['Deducible Default']) || 'Revisar');
-  e['Notas'] = finStr_(pick('notas', e['Notas']));
-  e['Periodo'] = e['Fecha Compra'].slice(0, 7);
-
-  e['Vendor ID'] = vendor ? vendor['Vendor ID'] : '';
-  e['Category ID'] = category ? category['Category ID'] : '';
-  e['Scope'] = category ? category['Scope'] : (existing && existing['Scope']) || 'operativo';
-
-  // Factura requirements: vendor default, overridable per expense.
-  const reqIn = pick('requiere_factura', e['Requiere Factura']);
-  if (reqIn === 'Sí' || reqIn === 'No') e['Requiere Factura'] = reqIn;
-  else e['Requiere Factura'] = vendor && vendor['Requiere Factura Default'] === 'No' ? 'No' : 'Sí';
-  if (e['Estado Factura'] === 'Recibida') { /* a linked factura is never undone by an edit */ }
-  else if (e['Requiere Factura'] === 'No') e['Estado Factura'] = 'No requiere';
-  else if (!e['Estado Factura'] || e['Estado Factura'] === 'No requiere') e['Estado Factura'] = 'Pendiente';
-  e['Fecha Límite Factura'] = e['Requiere Factura'] === 'Sí' && e['Estado Factura'] !== 'Recibida'
-    ? finInvoiceDeadline_(e['Fecha Compra'], vendor) : (e['Estado Factura'] === 'Recibida' ? (e['Fecha Límite Factura'] || '') : '');
-
-  // Who paid / reimbursements.
-  const own = inp.own_money;
-  if (!existing) {
-    e['Pagado Por'] = finStr_(pick('pagado_por', me)).toUpperCase() || me;
-    e['Reembolso Status'] = own === true ? 'Pendiente' : 'No aplica';
-    if (own === true && !e['Cuenta Pago']) e['Cuenta Pago'] = 'Personal ' + me;
-  } else if (own === true && e['Reembolso Status'] === 'No aplica') {
-    e['Reembolso Status'] = 'Pendiente';
-  } else if (own === false && e['Reembolso Status'] === 'Pendiente') {
-    e['Reembolso Status'] = 'No aplica';
-  }
-  return e;
-}
-
-function finExpenseValidate_(e, files, status) {
-  if (!finIsDate_(e['Fecha Compra'])) return 'La fecha de compra no es válida (usa AAAA-MM-DD).';   // TROUBLESHOOT: the browser sent a malformed fecha_compra
-  if (FIN_METODOS.indexOf(e['Método Pago']) < 0) return 'Elige un método de pago válido.';   // TROUBLESHOOT: metodo_pago not in FIN_METODOS
-  if (status === 'Capturado' && !(e['Total'] > 0)) return 'Falta el total del ticket.';
-  if (status === 'Por capturar' && !files.length) return 'Sube al menos una foto del ticket.';
-  if (e['Moneda'] !== 'MXN' && !(e['Tipo Cambio'] > 0)) return 'Falta el tipo de cambio para ' + e['Moneda'] + '.';
-  return '';
-}
-
-function finLinesOut_(expenseId) {
-  return finRead_('Gasto Líneas').rows
-    .filter(l => l['Expense ID'] === expenseId && l['Status'] === 'Activo')
-    .sort((a, b) => Number(a['Línea #']) - Number(b['Línea #']))
-    .map(l => { const o = Object.assign({}, l); delete o._row; return o; });
-}
-
-function finWriteLines_(expenseId, vendorId, lines, identity) {
-  const now = finNow_(), me = personKey_(identity);
-  const rows = lines.map(l => Object.assign({}, l, {
-    'Line ID': finNextId_('GSL', 6), 'Expense ID': expenseId, 'Vendor ID': vendorId || '', 'Status': 'Activo', 'Creado Por': me, 'Creado En': now,
-  }));
-  finAppend_('Gasto Líneas', rows);
-  return rows;
-}
-
-function finRetireLines_(expenseId, newStatus) {
-  const tab = finRead_('Gasto Líneas');
-  tab.rows.forEach(l => {
-    if (l['Expense ID'] === expenseId && l['Status'] === 'Activo') finUpdate_('Gasto Líneas', l._row, { 'Status': newStatus });
-  });
-}
-
-// Confirmed vendor-code -> catalog links teach the map (never the other way).
-function finLearnFromLines_(vendorId, lines, fecha, identity) {
-  if (!vendorId) return;
-  lines.forEach(l => {
-    if (l['Vínculo'] === 'Confirmado' && l['Catalog ID'] && (l['Código Proveedor'] || l['Descripción'])) {
-      finMapUpsert_(vendorId, l['Código Proveedor'], l['Descripción'], l['Catalog ID'], l['Piezas por Unidad'], l['Costo Unitario'], fecha, personKey_(identity));
-    }
-  });
-}
-
-function finLinkFiles_(fileIds, expenseId, scope, vendorId, fecha) {
-  if (!fileIds.length) return;
-  const tab = finRead_('Archivos');
-  const vps = [];
-  tab.rows.forEach(r => {
-    if (fileIds.indexOf(String(r['File ID'])) >= 0) {
-      finUpdate_('Archivos', r._row, { 'Expense ID': expenseId, 'Scope': scope });
-      if (String(r['Storage']) === 'vps') vps.push(String(r['File ID']));
-    }
-  });
-  if (vps.length) finVpsPlace_(vps, fecha, vendorId);
-}
-
-// Which of these file ids may the caller attach? (their own uploads, or ones already on a visible expense)
-function finAttachableFiles_(ids, identity, caps) {
-  const me = personKey_(identity);
-  const reg = finRead_('Archivos').rows;
-  const ok = [];
-  ids.forEach(id => {
-    const r = reg.find(x => String(x['File ID']) === id);
-    if (!r) return;
-    if (caps._admin || String(r['Subido Por']).toUpperCase() === me || (!r['Expense ID'] && finCanSeeScope_(r['Scope'], caps))) ok.push(id);
-  });
-  return ok;
-}
-
-// ─── Expense actions ───────────────────────────────────────────────────────
-
-function finCreateExpenseAction(body, identity) {
+function finSummaryGet_(p, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.create']) return finDenied_();
-  const inp = body.expense || {};
-  const cfg = finConfig_();
-  const fileIds = finAttachableFiles_((Array.isArray(inp.archivos) ? inp.archivos : []).map(String), identity, caps);
+  if (!caps['finance.view_summary']) return finDenied_();
+  const periodo = /^\d{4}-\d{2}$/.test(finStr_(p.periodo)) ? p.periodo : finToday_().slice(0, 7);
+  const prev = finPrevPeriodo_(periodo);
+  const rows = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && finCanSeeExpense_(r, identity, caps));
+  const paid = r => FIN_PAID_STATES.indexOf(r['Captura Status']) >= 0;
+  const cats = {}, vendors = {};
+  finRead_('Categorías').rows.forEach(c => { cats[c['Category ID']] = c; });
+  finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = v; });
+  const inP = rows.filter(r => r['Periodo'] === periodo);
+  const paidP = inP.filter(paid);
+  const sum = list => finR2_(list.reduce((s, r) => s + finNum_(r['Total MXN']), 0));
+  const total = sum(paidP), prevTotal = sum(rows.filter(r => r['Periodo'] === prev && paid(r)));
 
-  let vendor = null;
-  if (inp.vendor_id) {
-    vendor = finVendorById_(finStr_(inp.vendor_id));
-    if (!vendor) return finErr_('Ese proveedor ya no existe. Elige otro.');   // TROUBLESHOOT: vendor_id not found in Proveedores
-  }
-  let category = null;
-  if (inp.category_id) {
-    category = finCategoryById_(finStr_(inp.category_id));
-    if (!category || category['Activa'] !== 'Sí') return finErr_('Esa categoría no está disponible.');   // TROUBLESHOOT: category missing or inactive
-    if (!finCanSeeScope_(category['Scope'], caps)) return finDenied_();
-  }
+  const group = (list, keyFn, labelFn, extra) => {
+    const g = {};
+    list.forEach(r => { const k = keyFn(r) || '—'; (g[k] = g[k] || { id: k, name: labelFn(k), total: 0, count: 0 }); g[k].total += finNum_(r['Total MXN']); g[k].count++; if (extra) extra(g[k], r); });
+    return Object.keys(g).map(k => { const o = g[k]; o.total = finR2_(o.total); o.pct = total > 0 ? Math.round(o.total / total * 1000) / 10 : 0; return o; }).sort((a, b) => b.total - a.total);
+  };
+  const byCategory = group(paidP, r => r['Category ID'], k => (cats[k] ? cats[k]['Nombre'] : 'Sin categoría'), (o, r) => { o.scope = r['Scope']; o.tipo = cats[r['Category ID']] ? cats[r['Category ID']]['Tipo Contable'] : ''; });
+  const byVendor = group(paidP, r => r['Vendor ID'], k => (vendors[k] ? vendors[k]['Nombre'] : 'Sin proveedor')).slice(0, 10);
+  const byScope = group(paidP, r => r['Scope'], k => k);
 
-  const e = finBuildExpense_(inp, null, identity, caps, cfg, vendor, category);
-  const status = inp.captura_status === 'Por capturar' || !(e['Total'] > 0) ? 'Por capturar' : 'Capturado';
-  const bad = finExpenseValidate_(e, fileIds, status);
-  if (bad) return finErr_(bad);   // TROUBLESHOOT: bad is the text from finExpenseValidate_; fix the field it names
-  if (finIsClosed_(e['Periodo'])) return finErr_('El mes ' + e['Periodo'] + ' está cerrado. Un admin debe reabrirlo.');   // TROUBLESHOOT: period closed in Cierres; admin reopens it in Finanzas > Cierre
+  const needInv = paidP.filter(r => r['Requiere Factura'] === 'Sí');
+  const withInv = needInv.filter(r => r['Estado Factura'] === 'Recibida');
+  const pending = needInv.filter(r => ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0);
 
-  const lines = finNormLines_(inp.lines || body.lines, e['Vendor ID'], identity);
-  if (lines.length && !caps._admin && !finCanSeeScope_(e['Scope'], caps)) return finDenied_();
+  const income = caps._admin ? finIncomeByMonth_() : null;
+  const months = [];
+  let m = periodo;
+  for (let i = 0; i < 6; i++) { months.unshift(m); m = finPrevPeriodo_(m); }
+  const series = months.map(mm => ({ periodo: mm, gasto: sum(rows.filter(r => r['Periodo'] === mm && paid(r))), ingresos: income ? (income[mm] || 0) : null }));
 
-  if (!body.confirm_duplicate && status === 'Capturado') {
-    const dups = finFindDuplicates_(e, '', identity, caps);
-    if (dups.length) return jsonResponse({ result: 'duplicate_warning', duplicates: dups });
-  }
-
-  const me = personKey_(identity), now = finNow_();
-  e['Expense ID'] = finNextId_('GST', 6);
-  e['Captura Status'] = status;
-  e['Status'] = 'Activo';
-  e['Archivos'] = fileIds.join('|');
-  e['Recurring ID'] = '';
-  e['Creado Por'] = me; e['Creado En'] = now;
-  e['Flags'] = finComputeFlags_(e, lines, cfg);
-  finAppend_('Gastos', [e]);
-  const written = lines.length ? finWriteLines_(e['Expense ID'], e['Vendor ID'], lines, identity) : [];
-  finLinkFiles_(fileIds, e['Expense ID'], e['Scope'], e['Vendor ID'], e['Fecha Compra']);
-  finLearnFromLines_(e['Vendor ID'], written, e['Fecha Compra'], identity);
-  logAuditEvent('fin_create_expense', 'Gasto', e['Expense ID'], { total: e['Total MXN'], vendor: e['Vendor ID'], lines: written.length });
-  return jsonResponse({ result: 'ok', expense: finExpenseOut_(e, cfg), lines: finLinesOut_(e['Expense ID']) });
-}
-
-function finFindExpenseRow_(id) {
-  return finRead_('Gastos').rows.find(r => r['Expense ID'] === id) || null;
-}
-
-function finUpdateExpenseAction(body, identity) {
-  const caps = resolveCaps(identity);
-  const cur = finFindExpenseRow_(finStr_(body.expense_id));
-  if (!cur) return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: expense_id not in Gastos (voided rows stay in the tab, so it was never created)
-  if (!finCanSeeExpense_(cur, identity, caps)) return finDenied_();
-  const isOwn = String(cur['Creado Por']).toUpperCase() === personKey_(identity);
-  const mayEdit = caps['finance.edit_any'] || (caps['finance.edit_own'] && isOwn && cur['Captura Status'] !== 'Revisado');
-  if (!mayEdit) return finDenied_();
-  if (cur['Status'] !== 'Activo') return finErr_('Este gasto está anulado y ya no se puede editar.');   // TROUBLESHOOT: voided rows are final; create a new expense instead
-  if (finIsClosed_(cur['Periodo'])) return finErr_('El mes ' + cur['Periodo'] + ' está cerrado. Un admin debe reabrirlo.');   // TROUBLESHOOT: see Cierres tab
-
-  const inp = body.expense || {};
-  const cfg = finConfig_();
-  let vendor = null;
-  const vId = inp.vendor_id === undefined ? cur['Vendor ID'] : finStr_(inp.vendor_id);
-  if (vId) { vendor = finVendorById_(vId); if (!vendor) return finErr_('Ese proveedor ya no existe. Elige otro.'); }   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  let category = null;
-  const cId = inp.category_id === undefined ? cur['Category ID'] : finStr_(inp.category_id);
-  if (cId) {
-    category = finCategoryById_(cId);
-    if (!category) return finErr_('Esa categoría no está disponible.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-    if (!finCanSeeScope_(category['Scope'], caps)) return finDenied_();
-  }
-
-  const e = finBuildExpense_(inp, cur, identity, caps, cfg, vendor, category);
-  if (finIsClosed_(e['Periodo'])) return finErr_('El mes ' + e['Periodo'] + ' está cerrado. Un admin debe reabrirlo.');   // TROUBLESHOOT: the period is closed in the Cierres tab; an admin reopens it in Finanzas > Cierre
-  let fileIds = finStr_(cur['Archivos']).split('|').filter(Boolean);
-  if (Array.isArray(inp.archivos)) {
-    const want = inp.archivos.map(String);
-    const attachable = finAttachableFiles_(want, identity, caps);
-    fileIds = want.filter((f, i) => want.indexOf(f) === i && (fileIds.indexOf(f) >= 0 || attachable.indexOf(f) >= 0));   // keep files already on the expense, add only ones the caller may attach
-  }
-
-  let status = cur['Captura Status'];
-  if (inp.captura_status === 'Revisado' && caps['finance.edit_any']) status = 'Revisado';
-  else if (status === 'Por capturar' && e['Total'] > 0) status = 'Capturado';
-  else if (status === 'Por pagar' && inp.captura_status === 'Capturado' && caps['finance.edit_any']) status = 'Capturado';
-  const bad = finExpenseValidate_(e, fileIds, status);
-  if (bad) return finErr_(bad);   // TROUBLESHOOT: bad is the text from finExpenseValidate_; fix the field it names
-
-  const wantsLines = body.lines !== undefined || (inp.lines !== undefined);
-  const lines = wantsLines ? finNormLines_(inp.lines || body.lines, e['Vendor ID'], identity) : finLinesOut_(cur['Expense ID']);
-  if (!body.confirm_duplicate && status === 'Capturado') {
-    const dups = finFindDuplicates_(e, cur['Expense ID'], identity, caps);
-    if (dups.length) return jsonResponse({ result: 'duplicate_warning', duplicates: dups });
-  }
-  e['Captura Status'] = status;
-  e['Archivos'] = fileIds.join('|');
-  e['Editado Por'] = personKey_(identity); e['Editado En'] = finNow_();
-  e['Flags'] = finComputeFlags_(e, lines, cfg);
-  finUpdate_('Gastos', cur._row, e);
-  let written = [];
-  if (wantsLines) {
-    finRetireLines_(cur['Expense ID'], 'Reemplazada');
-    written = lines.length ? finWriteLines_(cur['Expense ID'], e['Vendor ID'], lines, identity) : [];
-    finLearnFromLines_(e['Vendor ID'], written, e['Fecha Compra'], identity);
-  }
-  finLinkFiles_(fileIds, cur['Expense ID'], e['Scope'], e['Vendor ID'] || cur['Vendor ID'], e['Fecha Compra'] || cur['Fecha Compra']);
-  logAuditEvent('fin_update_expense', 'Gasto', cur['Expense ID'], { total: e['Total MXN'], before_total: cur['Total MXN'], lines_replaced: wantsLines });
-  return jsonResponse({ result: 'ok', expense: finExpenseOut_(Object.assign({}, e, { _row: cur._row }), cfg), lines: finLinesOut_(cur['Expense ID']) });
-}
-
-function finVoidExpenseAction(body, identity) {
-  const caps = resolveCaps(identity);
-  const cur = finFindExpenseRow_(finStr_(body.expense_id));
-  if (!cur) return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  if (!finCanSeeExpense_(cur, identity, caps)) return finDenied_();
-  const isOwnInbox = String(cur['Creado Por']).toUpperCase() === personKey_(identity) && cur['Captura Status'] === 'Por capturar';
-  if (!caps['finance.void'] && !isOwnInbox) return finDenied_();
-  if (cur['Status'] !== 'Activo') return finErr_('Este gasto ya estaba anulado.');   // TROUBLESHOOT: voided rows are final; create a new expense instead
-  if (finIsClosed_(cur['Periodo'])) return finErr_('El mes ' + cur['Periodo'] + ' está cerrado. Un admin debe reabrirlo.');   // TROUBLESHOOT: the period is closed in the Cierres tab; an admin reopens it in Finanzas > Cierre
-  const reason = finStr_(body.reason);
-  if (!reason) return finErr_('Escribe el motivo de la anulación.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  finUpdate_('Gastos', cur._row, { 'Status': 'Anulado', 'Anulado Por': personKey_(identity), 'Anulado En': finNow_(), 'Motivo Anulación': reason });
-  finRetireLines_(cur['Expense ID'], 'Anulado');
-  if (cur['Invoice ID']) finUnlinkExpenseFromInvoice_(cur['Invoice ID'], cur['Expense ID']);
-  logAuditEvent('fin_void_expense', 'Gasto', cur['Expense ID'], { reason: reason, total: cur['Total MXN'] });
-  return jsonResponse({ result: 'ok' });
-}
-
-// Recurring "Por pagar" rows (and any admin correction): confirm real payment.
-function finMarkPaidAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.edit_any']) return finDenied_();
-  const cur = finFindExpenseRow_(finStr_(body.expense_id));
-  if (!cur || cur['Status'] !== 'Activo') return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  if (finIsClosed_(cur['Periodo'])) return finErr_('El mes ' + cur['Periodo'] + ' está cerrado. Un admin debe reabrirlo.');   // TROUBLESHOOT: the period is closed in the Cierres tab; an admin reopens it in Finanzas > Cierre
-  const patch = { 'Captura Status': 'Capturado', 'Fecha Pago': finIsDate_(body.fecha_pago) ? body.fecha_pago : finToday_(), 'Editado Por': personKey_(identity), 'Editado En': finNow_() };
-  if (body.total !== undefined && finNum_(body.total) > 0) {
-    patch['Total'] = finR2_(finNum_(body.total));
-    patch['Total MXN'] = finR2_(patch['Total'] * (cur['Moneda'] === 'MXN' ? 1 : finNum_(cur['Tipo Cambio'])));
-  }
-  finUpdate_('Gastos', cur._row, patch);
-  logAuditEvent('fin_mark_paid', 'Gasto', cur['Expense ID'], { total: patch['Total'] || cur['Total'] });
-  return jsonResponse({ result: 'ok' });
-}
-
-// Karin-safe list: rows are filtered by scope/history/ownership; totals only
-// travel when the person has finance.view_totals.
-function finListExpensesGet_(p, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.view']) return finDenied_();
-  const cfg = finConfig_();
-  let rows = finRead_('Gastos').rows.filter(r => finCanSeeExpense_(r, identity, caps));
-  const status = p.status || 'activo';
-  if (status === 'activo') rows = rows.filter(r => r['Status'] === 'Activo');
-  else if (status === 'anulado') rows = rows.filter(r => r['Status'] === 'Anulado');
-  if (p.periodo && p.periodo !== 'all') rows = rows.filter(r => r['Periodo'] === p.periodo);
-  if (p.estado_factura) rows = rows.filter(r => r['Estado Factura'] === p.estado_factura);
-  if (p.captura) rows = rows.filter(r => r['Captura Status'] === p.captura);
-  if (p.vendor_id) rows = rows.filter(r => r['Vendor ID'] === p.vendor_id);
-  if (p.category_id) rows = rows.filter(r => r['Category ID'] === p.category_id);
-  if (p.mine === '1') rows = rows.filter(r => String(r['Creado Por']).toUpperCase() === personKey_(identity));
-  if (p.q) {
-    const q = finNorm_(p.q);
-    const vendors = {};
-    finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = finNorm_(v['Nombre'] + ' ' + v['Alias']); });
-    rows = rows.filter(r => finNorm_([r['Expense ID'], r['Descripción'], r['Folio Ticket'], r['Notas'], vendors[r['Vendor ID']] || ''].join(' ')).indexOf(q) >= 0);
-  }
-  rows.sort((a, b) => String(b['Fecha Compra']).localeCompare(String(a['Fecha Compra'])) || String(b['Expense ID']).localeCompare(String(a['Expense ID'])));
-  const limit = Math.min(Math.max(Number(p.limit) || 300, 1), 1000);
-  const total = rows.length;
-  const out = rows.slice(0, limit).map(r => finExpenseOut_(r, cfg));
-  const res = { rows: out, count: total, truncated: total > limit };
-  if (caps['finance.view_totals']) {
-    res.totals = { total_mxn: finR2_(rows.filter(r => ['Por capturar'].indexOf(r['Captura Status']) < 0).reduce((s, r) => s + finNum_(r['Total MXN']), 0)) };
-  }
+  const allLines = finRead_('Gasto Líneas').rows;
+  const idsP = {};
+  inP.forEach(r => { idsP[r['Expense ID']] = true; });
+  const res = {
+    periodo: periodo, prev_periodo: prev,
+    gasto: { total: total, count: paidP.length, prev_total: prevTotal, delta_pct: prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 1000) / 10 : null },
+    by_category: byCategory, by_vendor: byVendor, by_scope: byScope,
+    facturas: {
+      requeridas_total: sum(needInv), con_factura_total: sum(withInv), coverage_pct: needInv.length ? Math.round(sum(withInv) / Math.max(sum(needInv), 0.01) * 1000) / 10 : null,
+      pendientes_count: pending.length, pendientes_total: sum(pending),
+      vencidas_count: pending.filter(r => finIsDate_(r['Fecha Límite Factura']) && r['Fecha Límite Factura'] < finToday_()).length,
+    },
+    iva_acreditable: finR2_(withInv.reduce((s, r) => s + finNum_(r['IVA']), 0)),
+    por_pagar: { count: inP.filter(r => r['Captura Status'] === 'Por pagar').length, total: sum(inP.filter(r => r['Captura Status'] === 'Por pagar')) },
+    por_capturar: inP.filter(r => finIsDraft_(r)).length,
+    reembolsos_pendientes: { count: rows.filter(r => r['Reembolso Status'] === 'Pendiente').length, total: sum(rows.filter(r => r['Reembolso Status'] === 'Pendiente')) },
+    lineas_sin_vincular: allLines.filter(l => l['Status'] === 'Activo' && l['Tipo Línea'] === 'Inventario' && !l['Catalog ID'] && idsP[l['Expense ID']]).length,
+    months: series,
+  };
+  if (income) { res.ingresos = { total: income[periodo] || 0, prev_total: income[prev] || 0 }; res.neto = finR2_((income[periodo] || 0) - total); }
   return jsonResponse(res);
 }
 
-function finGetExpenseGet_(p, identity) {
+// Compact rows for the Análisis page (admin only).
+function finSlimGet_(p, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.view']) return finDenied_();
-  const r = finFindExpenseRow_(finStr_(p.id));
-  if (!r || !finCanSeeExpense_(r, identity, caps)) return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  const cfg = finConfig_();
-  const files = finRead_('Archivos').rows.filter(f => f['Expense ID'] === r['Expense ID']).map(f => ({ id: f['File ID'], name: f['Nombre'], mime: f['Mime'], kind: f['Kind'], url: f['Storage'] === 'vps' ? f['URL'] : '', thumb_url: f['Storage'] === 'vps' ? f['Thumb URL'] : '' }));
-  let invoice = null;
-  if (r['Invoice ID']) {
-    const inv = finRead_('Facturas').rows.find(i => i['Invoice ID'] === r['Invoice ID']);
-    if (inv) invoice = finInvoiceOut_(inv);
-  }
-  return jsonResponse({ expense: finExpenseOut_(r, cfg), lines: finLinesOut_(r['Expense ID']), files: files, invoice: invoice });
-}
-
-// Everything that still needs a factura, soonest deadline first.
-function finPendingInvoicesGet_(p, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.invoices']) return finDenied_();
-  const cfg = finConfig_();
+  if (!caps['finance.view_totals'] || !caps['finance.view_summary']) return finDenied_();
+  const cats = {};
+  finRead_('Categorías').rows.forEach(c => { cats[c['Category ID']] = c; });
   const rows = finRead_('Gastos').rows
-    .filter(r => r['Status'] === 'Activo' && r['Requiere Factura'] === 'Sí' && ['Pendiente', 'Solicitada'].indexOf(r['Estado Factura']) >= 0
-      && ['Por capturar'].indexOf(r['Captura Status']) < 0 && finCanSeeExpense_(r, identity, caps))
-    .map(r => finExpenseOut_(r, cfg));
-  rows.sort((a, b) => {
-    const da = a.invoice_days_left === null ? 9999 : a.invoice_days_left;
-    const db = b.invoice_days_left === null ? 9999 : b.invoice_days_left;
-    return da - db || String(a['Fecha Compra']).localeCompare(String(b['Fecha Compra']));
-  });
-  const vendors = {};
-  finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = { nombre: v['Nombre'], portal: v['Portal Facturación URL'] || '' }; });
-  rows.forEach(r => { const v = vendors[r['Vendor ID']]; r.vendor_name = v ? v.nombre : ''; r.vendor_portal = v ? v.portal : ''; });
+    .filter(r => r['Status'] === 'Activo' && !finIsDraft_(r) && finCanSeeExpense_(r, identity, caps))
+    .map(r => ({
+      periodo: r['Periodo'], fecha: r['Fecha Compra'], vendorId: r['Vendor ID'], categoryId: r['Category ID'],
+      tipoContable: cats[r['Category ID']] ? cats[r['Category ID']]['Tipo Contable'] : '', scope: r['Scope'],
+      subtotal: r['Subtotal'], iva: r['IVA'], totalMXN: r['Total MXN'], deducible: r['Deducible'], estadoFactura: r['Estado Factura'], captura: r['Captura Status'],
+    }));
   return jsonResponse({ rows: rows });
 }
 
-function finSetInvoiceStatusAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.invoices']) return finDenied_();
-  const cur = finFindExpenseRow_(finStr_(body.expense_id));
-  if (!cur || cur['Status'] !== 'Activo' || !finCanSeeExpense_(cur, identity, caps)) return finErr_('No se encontró ese gasto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  const st = finStr_(body.estado);
-  if (['Pendiente', 'Solicitada', 'Perdida', 'No requiere'].indexOf(st) < 0) return finErr_('Estado de factura no válido.');   // TROUBLESHOOT: 'Recibida' is only set by linking a real factura (fin_link_invoice)
-  if (cur['Estado Factura'] === 'Recibida') return finErr_('Este gasto ya tiene factura vinculada. Desvincúlala primero.');   // TROUBLESHOOT: unlink the other factura first (fin_unlink_invoice), then relink
-  const patch = { 'Estado Factura': st, 'Editado Por': personKey_(identity), 'Editado En': finNow_() };
-  if (st === 'No requiere') { patch['Requiere Factura'] = 'No'; patch['Fecha Límite Factura'] = ''; }
-  if (st === 'Pendiente') patch['Requiere Factura'] = 'Sí';
-  finUpdate_('Gastos', cur._row, patch);
-  const merged = Object.assign({}, cur, patch);
-  finUpdate_('Gastos', cur._row, { 'Flags': finComputeFlags_(merged, finLinesOut_(cur['Expense ID']), finConfig_()) });
-  logAuditEvent('fin_set_invoice_status', 'Gasto', cur['Expense ID'], { estado: st });
-  return jsonResponse({ result: 'ok' });
+// ─── Export for the contador ───────────────────────────────────────────────
+
+function finCsv_(headers, rows) {
+  const esc = v => { const s = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  return '\uFEFF' + [headers.map(esc).join(',')].concat(rows.map(r => r.map(esc).join(','))).join('\r\n');
 }
 
-// ─── Files ─────────────────────────────────────────────────────────────────
-
-function finUploadFileAction(body, identity) {
+function finExportMonthGet_(p, identity) {
   const caps = resolveCaps(identity);
-  const kind = ['ticket', 'xml', 'pdf'].indexOf(body.kind) >= 0 ? body.kind : 'ticket';
-  if (kind === 'ticket' ? !caps['finance.create'] : !caps['finance.invoices']) return finDenied_();
-  const mime = finStr_(body.mime).toLowerCase();
-  if (FIN_FILE_MIMES.indexOf(mime) < 0) return finErr_('Ese tipo de archivo no se puede subir (usa foto, PDF o XML).');   // TROUBLESHOOT: mime not in FIN_FILE_MIMES; HEIC photos must be converted by the browser first
-  let bytes;
-  try { bytes = Utilities.base64Decode(String(body.data || '')); } catch (e) { return finErr_('El archivo llegó dañado. Intenta de nuevo.'); }   // TROUBLESHOOT: data was not valid base64
-  if (!bytes.length) return finErr_('El archivo está vacío.');   // TROUBLESHOOT: the upload body was empty; retry from the browser
-  if (bytes.length > FIN_MAX_FILE_BYTES) return finErr_('El archivo es muy grande (máximo 12 MB).');   // TROUBLESHOOT: raise FIN_MAX_FILE_BYTES; Apps Script POST bodies cap around 50 MB
-  const periodo = finToday_().slice(0, 7);
-  const safe = finStr_(body.name).replace(/[^\w.\- áéíóúñÁÉÍÓÚÑ]/g, '_').slice(0, 80) || (kind + '-' + Date.now());
-  const file = finMonthFolder_(periodo).createFile(Utilities.newBlob(bytes, mime, safe));
-  const id = file.getId();
-  finAppend_('Archivos', [{
-    'File ID': id, 'Nombre': safe, 'Mime': mime, 'Kind': kind, 'Expense ID': '', 'Invoice ID': '', 'Scope': 'operativo',
-    'Subido Por': personKey_(identity), 'Subido En': finNow_(), 'Bytes': bytes.length,
-  }]);
-  logAuditEvent('fin_upload_file', 'Archivo', id, { kind: kind, bytes: bytes.length });
-  return jsonResponse({ result: 'ok', file_id: id, name: safe, mime: mime, kind: kind });
+  if (!caps['finance.export']) return finDenied_();
+  const periodo = finStr_(p.periodo);
+  if (!/^\d{4}-\d{2}$/.test(periodo)) return finErr_('Elige un mes válido.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const cats = {}, vendors = {}, invoices = {};
+  finRead_('Categorías').rows.forEach(c => { cats[c['Category ID']] = c; });
+  finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = v; });
+  finRead_('Facturas').rows.forEach(i => { invoices[i['Invoice ID']] = i; });
+  const exps = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Periodo'] === periodo && !finIsDraft_(r) && finCanSeeExpense_(r, identity, caps));
+  const h1 = ['ID', 'Fecha compra', 'Fecha pago', 'Proveedor', 'RFC proveedor', 'Categoría', 'Tipo contable', 'Alcance', 'Descripción', 'Método de pago', 'Cuenta', 'Moneda', 'Subtotal', 'IVA', 'Total', 'Total MXN', 'Estado factura', 'UUID factura', 'Folio ticket', 'Deducible', 'Banderas', 'Notas'];
+  const r1 = exps.sort((a, b) => String(a['Fecha Compra']).localeCompare(String(b['Fecha Compra']))).map(r => {
+    const v = vendors[r['Vendor ID']] || {}, c = cats[r['Category ID']] || {}, inv = invoices[r['Invoice ID']] || {};
+    return [r['Expense ID'], r['Fecha Compra'], r['Fecha Pago'], v['Nombre'] || '', v['RFC'] || inv['RFC Emisor'] || '', c['Nombre'] || '', c['Tipo Contable'] || '', r['Scope'], r['Descripción'],
+      r['Método Pago'], r['Cuenta Pago'], r['Moneda'], r['Subtotal'], r['IVA'], r['Total'], r['Total MXN'], r['Estado Factura'], inv['UUID'] || '', r['Folio Ticket'], r['Deducible'], r['Flags'], r['Notas']];
+  });
+  const idset = {};
+  exps.forEach(r => { idset[r['Expense ID']] = r; });
+  const h2 = ['Gasto', 'Línea', 'Código proveedor', 'Descripción', 'Producto (Catalog ID)', 'Tipo', 'Cantidad', 'Unidad', 'Piezas por unidad', 'Costo unitario', 'Descuento', 'Total línea'];
+  const r2 = finRead_('Gasto Líneas').rows.filter(l => l['Status'] === 'Activo' && idset[l['Expense ID']])
+    .map(l => [l['Expense ID'], l['Línea #'], l['Código Proveedor'], l['Descripción'], l['Catalog ID'], l['Tipo Línea'], l['Cantidad'], l['Unidad'], l['Piezas por Unidad'], l['Costo Unitario'], l['Descuento Línea'], l['Total Línea']]);
+  const enc = s => Utilities.base64Encode(Utilities.newBlob(s, 'text/csv', 'x.csv').getBytes());
+  logAuditEvent('fin_export_month', 'Finanzas', periodo, { expenses: exps.length });
+  return jsonResponse({ files: [
+    { name: 'gastos-' + periodo + '.csv', mime: 'text/csv', data: enc(finCsv_(h1, r1)) },
+    { name: 'lineas-' + periodo + '.csv', mime: 'text/csv', data: enc(finCsv_(h2, r2)) },
+  ], expenses: exps.length });
 }
 
-function finMayReadFile_(reg, identity, caps) {
-  if (caps._admin) return true;
-  if (String(reg['Subido Por']).toUpperCase() === personKey_(identity)) return true;
-  if (reg['Expense ID']) {
-    const ex = finFindExpenseRow_(reg['Expense ID']);
-    return !!ex && finCanSeeExpense_(ex, identity, caps);
+function finExportZipGet_(p, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.export']) return finDenied_();
+  const periodo = finStr_(p.periodo);
+  if (!/^\d{4}-\d{2}$/.test(periodo)) return finErr_('Elige un mes válido.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
+  const withTickets = p.include_tickets === '1';
+  const exps = finRead_('Gastos').rows.filter(r => r['Status'] === 'Activo' && r['Periodo'] === periodo && finCanSeeExpense_(r, identity, caps));
+  const expIds = {}, invIds = {};
+  exps.forEach(r => { expIds[r['Expense ID']] = true; if (r['Invoice ID']) invIds[r['Invoice ID']] = true; });
+  const reg = finRead_('Archivos').rows.filter(f =>
+    (f['Invoice ID'] && invIds[f['Invoice ID']] && (f['Kind'] === 'xml' || f['Kind'] === 'pdf')) || (withTickets && f['Expense ID'] && expIds[f['Expense ID']] && f['Kind'] === 'ticket'));
+  const blobs = [];
+  let bytes = 0;
+  for (let i = 0; i < reg.length; i++) {
+    let file;
+    let blob;
+    try { blob = Utilities.newBlob(finFileBytes_(reg[i]), reg[i]['Mime'], String(reg[i]['Nombre'])); } catch (e) { continue; }   // TROUBLESHOOT: file deleted from Drive/VPS, or VPFILES_FIN_KEY wrong; it is skipped
+    bytes += blob.getBytes().length;
+    if (bytes > 25 * 1024 * 1024) return finErr_('Los archivos de ' + periodo + ' pesan más de 25 MB. Descarga sin fotos de tickets o por partes.');   // TROUBLESHOOT: Apps Script responses cap near 50 MB; lower or split
+    blob.setName((reg[i]['Kind'] === 'ticket' ? 'tickets/' : 'facturas/') + (reg[i]['Expense ID'] || reg[i]['Invoice ID']) + '-' + reg[i]['Nombre']);
+    blobs.push(blob);
   }
-  if (reg['Invoice ID']) {
-    const inv = finRead_('Facturas').rows.find(i => i['Invoice ID'] === reg['Invoice ID']);
-    return !!inv && !!caps['finance.invoices'] && finCanSeeScope_(inv['Scope'], caps);
+  if (!blobs.length) return finErr_('No hay archivos para ese mes.');   // TROUBLESHOOT: no XML/PDF files are linked to that month's expenses
+  const zip = Utilities.zip(blobs, 'archivos-' + periodo + '.zip');
+  logAuditEvent('fin_export_zip', 'Finanzas', periodo, { files: blobs.length });
+  return jsonResponse({ name: 'archivos-' + periodo + '.zip', mime: 'application/zip', data: Utilities.base64Encode(zip.getBytes()), files: blobs.length });
+}
+
+// ─── AI ticket reading (dormant until an AI key exists) ─────────────────────
+// Provider-agnostic: Gemini or Claude, picked by which key exists in Script Properties.
+// Keys live ONLY in Script Properties; the browser never sees them.
+//   FIN_GEMINI_KEY     -> Google Gemini (free tier available; aistudio.google.com)
+//   FIN_ANTHROPIC_KEY  -> Anthropic Claude (console.anthropic.com)
+//   FIN_AI_PROVIDER    -> optional: 'gemini' or 'anthropic' to force one when both keys exist
+//   FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL -> optional: override the model name without a code change
+
+const FIN_AI_PROVIDERS = {
+  gemini:    { keyProp: 'FIN_GEMINI_KEY',    modelProp: 'FIN_GEMINI_MODEL',    model: 'gemini-3.8-flash', priceIn: 0,    priceOut: 0 },      // free tier: cost logged as 0
+  anthropic: { keyProp: 'FIN_ANTHROPIC_KEY', modelProp: 'FIN_ANTHROPIC_MODEL', model: 'claude-haiku-5-5', priceIn: 0.10, priceOut: 0.50 },  // USD per million tokens
+};
+
+function finAiProvider_() {
+  const props = PropertiesService.getScriptProperties();
+  const forced = String(props.getProperty('FIN_AI_PROVIDER') || '').toLowerCase().trim();
+  const order = FIN_AI_PROVIDERS[forced] ? [forced] : ['anthropic', 'gemini'];
+  for (let i = 0; i < order.length; i++) {
+    const def = FIN_AI_PROVIDERS[order[i]];
+    const key = props.getProperty(def.keyProp);
+    if (key) return { name: order[i], key: key, model: props.getProperty(def.modelProp) || def.model, priceIn: def.priceIn, priceOut: def.priceOut };
   }
-  return false;
+  return null;
 }
 
-function finGetFileGet_(p, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.view']) return finDenied_();
-  const id = finStr_(p.id);
-  const reg = finRead_('Archivos').rows.find(r => String(r['File ID']) === id);
-  if (!reg || !finMayReadFile_(reg, identity, caps)) return finErr_('No se encontró ese archivo.');   // TROUBLESHOOT: file not in the Archivos registry, or the caller cannot see its expense/invoice
-  // Files on the VPS: hand out the links; the browser loads them straight from vp-files.
-  if (String(reg['Storage']) === 'vps') return jsonResponse({ id: id, name: reg['Nombre'], mime: reg['Mime'], url: reg['URL'], thumb_url: reg['Thumb URL'] });
-  let file;
-  try { file = DriveApp.getFileById(id); } catch (e) { return finErr_('El archivo ya no está en Drive.'); }   // TROUBLESHOOT: the Drive file was deleted by hand
-  let blob = null;
-  if (p.size === 'thumb' && String(reg['Mime']).indexOf('image/') === 0) { try { blob = file.getThumbnail(); } catch (e) { blob = null; } }
-  if (!blob) blob = file.getBlob();
-  return jsonResponse({ id: id, name: reg['Nombre'], mime: blob.getContentType() || reg['Mime'], data: Utilities.base64Encode(blob.getBytes()) });
+// AI reads run OUTSIDE the global write lock (they take a minute or more), so the log row takes
+// the lock only for the instant of the append. If it can't, the row is skipped rather than blocking.
+function finAiLog_(row) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return;   // TROUBLESHOOT: another save held the lock for 10 s; this one AI Log row is skipped, nothing else is affected
+  try { finAppend_('AI Log', [row]); } finally { lock.releaseLock(); }
 }
 
-// ─── Ticket files on the VPS (vp-files: Archivos/Finanzas/<yyyy-mm>/<proveedor>, admin-only) ──
-// Older files stay on Drive (Storage blank); new ticket uploads go to the VPS (Storage = 'vps').
-const FIN_VPS_URL_DEFAULT = 'https://files.srv2017849.hstgr.cloud';
-function finVpsBase_() { return String(PropertiesService.getScriptProperties().getProperty('VPFILES_URL') || FIN_VPS_URL_DEFAULT).replace(/\/+$/, ''); }
-function finVpsKey_() {
-  const k = PropertiesService.getScriptProperties().getProperty('VPFILES_FIN_KEY');
-  if (!k) throw new Error('Falta VPFILES_FIN_KEY en Script Properties.');   // TROUBLESHOOT: copy it from the VPS (/data/fin_key.txt in the vp-files container)
-  return k;
-}
-
-// Bytes of a registered file, wherever it lives.
-function finFileBytes_(reg) {
-  if (String(reg['Storage']) === 'vps') {
-    const res = UrlFetchApp.fetch(finVpsBase_() + '/api/fin/file/' + encodeURIComponent(reg['File ID']), { headers: { 'X-Fin-Key': finVpsKey_() }, muteHttpExceptions: true });
-    if (res.getResponseCode() !== 200) throw new Error('el servidor de archivos respondió HTTP ' + res.getResponseCode());   // TROUBLESHOOT: 401 = VPFILES_FIN_KEY wrong; 404 = file deleted on the VPS
-    return res.getBlob().getBytes();
-  }
-  return DriveApp.getFileById(String(reg['File ID'])).getBlob().getBytes();
-}
-
-// Files the expense owns move into Finanzas/<month of purchase>/<supplier>. Never blocks a save.
-function finVpsPlace_(ids, fecha, vendorId) {
-  try {
-    const v = vendorId ? finVendorById_(vendorId) : null;
-    const res = UrlFetchApp.fetch(finVpsBase_() + '/api/fin/place', {
-      method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { 'X-Fin-Key': finVpsKey_() },
-      payload: JSON.stringify({ ids: ids, periodo: String(fecha || '').slice(0, 7), vendor: v ? v['Nombre'] : '' }),
-    });
-    if (res.getResponseCode() !== 200) Logger.log('vp-files place HTTP ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));   // TROUBLESHOOT: files stay in "Sin proveedor"; check VPFILES_FIN_KEY
-  } catch (e) { Logger.log('vp-files place failed: ' + e.message); }
-}
-
-function finRegisterFileAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.create']) return finDenied_();
-  const id = finStr_(body.vps_id), url = finStr_(body.url), thumb = finStr_(body.thumb_url), base = finVpsBase_();
-  if (!/^F[0-9a-f]{10}$/.test(id) || url.indexOf(base + '/f/') !== 0 || (thumb && thumb.indexOf(base + '/t/') !== 0)) return finErr_('El archivo subido no es válido.');   // TROUBLESHOOT: the browser sent something that did not come from vp-files; check FIN_VPS in finanzas.js vs VPFILES_URL
-  const mime = finStr_(body.mime).toLowerCase();
-  if (FIN_FILE_MIMES.indexOf(mime) < 0) return finErr_('Ese tipo de archivo no se puede subir (usa foto o PDF).');   // TROUBLESHOOT: mime not in FIN_FILE_MIMES
-  const name = finStr_(body.name).slice(0, 80) || 'ticket';
-  finAppend_('Archivos', [{
-    'File ID': id, 'Nombre': name, 'Mime': mime, 'Kind': 'ticket', 'Expense ID': '', 'Invoice ID': '', 'Scope': 'operativo',
-    'Subido Por': personKey_(identity), 'Subido En': finNow_(), 'Bytes': Math.max(0, finNum_(body.size)), 'Storage': 'vps', 'URL': url, 'Thumb URL': thumb,
-  }]);
-  logAuditEvent('fin_upload_file', 'Archivo', id, { kind: 'ticket', storage: 'vps', bytes: finNum_(body.size) });
-  return jsonResponse({ result: 'ok', file_id: id, name: name, mime: mime, kind: 'ticket' });
-}
-
-// ─── Vendors & categories ──────────────────────────────────────────────────
-
-function finCreateVendorAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.vendors_create'] && !caps['finance.vendors_edit']) return finDenied_();
-  const v = body.vendor || {};
-  const name = finStr_(v.nombre);
-  if (!name) return finErr_('Escribe el nombre del proveedor.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  const key = finNorm_(name);
-  const all = finRead_('Proveedores').rows;
-  const dup = all.find(x => finNorm_(x['Nombre']) === key || finNorm_(x['Alias']).split(' | ').indexOf(key) >= 0);
-  if (dup) return jsonResponse({ result: 'exists', vendor: finVendorOut_(dup) });
-  const rule = ['Mismo mes', 'N días', 'Sin límite'].indexOf(v.regla_plazo) >= 0 ? v.regla_plazo : 'Mismo mes';
-  const row = {
-    'Vendor ID': finNextId_('PRV', 4), 'Nombre': name, 'Alias': finStr_(v.alias), 'RFC': finStr_(v.rfc).toUpperCase(),
-    'Status': caps['finance.vendors_edit'] ? 'Activo' : 'Pendiente revisión',
-    'Default Category ID': finStr_(v.default_category_id), 'Portal Facturación URL': finStr_(v.portal),
-    'Regla Plazo Factura': rule, 'Días Plazo': Math.max(0, Math.floor(finNum_(v.dias_plazo))),
-    'Requiere Factura Default': v.requiere_default === 'No' ? 'No' : 'Sí', 'Contacto': finStr_(v.contacto),
-    'Método Pago Default': FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '',
-    'Cuenta Pago Default': finStr_(v.cuenta_default),
-    'Porcentaje Factura': finStr_(v.porcentaje_factura) === '' ? '' : Math.min(100, Math.max(0, finNum_(v.porcentaje_factura))),
-    'Teléfono': finStr_(v.telefono), 'Notas': finStr_(v.notas), 'Creado Por': personKey_(identity), 'Creado En': finNow_(),
+// Ticket dates come in several shapes. Rules (Mexico): a 4-digit year first means Y-M-D (ISO);
+// year last means D-M-Y, unless the first number is over 12 and the second is not (then M-D-Y, US style).
+// A 2-digit year is taken as 20YY. Anything that is not a real calendar date returns ''.
+function finParseTicketDate_(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const pad = n => String(n).padStart(2, '0');
+  const ok = (y, m, d) => {
+    if (y < 100) y += 2000;
+    const iso = y + '-' + pad(m) + '-' + pad(d);
+    return m >= 1 && m <= 12 && d >= 1 && d <= 31 && finIsDate_(iso) ? iso : '';
   };
-  finAppend_('Proveedores', [row]);
-  logAuditEvent('fin_create_vendor', 'Proveedor', row['Vendor ID'], { nombre: name });
-  return jsonResponse({ result: 'ok', vendor: finVendorOut_(row) });
-}
-
-function finUpdateVendorAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.vendors_edit']) return finDenied_();
-  const cur = finVendorById_(finStr_(body.vendor_id));
-  if (!cur) return finErr_('No se encontró ese proveedor.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  const v = body.vendor || {};
-  const patch = {};
-  const map = { nombre: 'Nombre', alias: 'Alias', rfc: 'RFC', default_category_id: 'Default Category ID', portal: 'Portal Facturación URL',
-    contacto: 'Contacto', telefono: 'Teléfono', notas: 'Notas' };
-  Object.keys(map).forEach(k => { if (v[k] !== undefined) patch[map[k]] = k === 'rfc' ? finStr_(v[k]).toUpperCase() : finStr_(v[k]); });
-  if (v.status !== undefined && ['Activo', 'Pendiente revisión', 'Inactivo'].indexOf(v.status) >= 0) patch['Status'] = v.status;
-  if (v.regla_plazo !== undefined && ['Mismo mes', 'N días', 'Sin límite'].indexOf(v.regla_plazo) >= 0) patch['Regla Plazo Factura'] = v.regla_plazo;
-  if (v.dias_plazo !== undefined) patch['Días Plazo'] = Math.max(0, Math.floor(finNum_(v.dias_plazo)));
-  if (v.requiere_default !== undefined) patch['Requiere Factura Default'] = v.requiere_default === 'No' ? 'No' : 'Sí';
-  if (v.metodo_default !== undefined) patch['Método Pago Default'] = FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '';
-  if (v.cuenta_default !== undefined) patch['Cuenta Pago Default'] = finStr_(v.cuenta_default);
-  if (v.porcentaje_factura !== undefined) patch['Porcentaje Factura'] = finStr_(v.porcentaje_factura) === '' ? '' : Math.min(100, Math.max(0, finNum_(v.porcentaje_factura)));
-  if (patch['Nombre'] === '') return finErr_('El nombre no puede quedar vacío.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  finUpdate_('Proveedores', cur._row, patch);
-  logAuditEvent('fin_update_vendor', 'Proveedor', cur['Vendor ID'], { fields: Object.keys(patch) });
-  return jsonResponse({ result: 'ok', vendor: finVendorOut_(Object.assign({}, cur, patch)) });
-}
-
-function finSaveCategoryAction(body, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.categories_edit']) return finDenied_();
-  const c = body.category || {};
-  const name = finStr_(c.nombre);
-  if (!name) return finErr_('Escribe el nombre de la categoría.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  if (FIN_SCOPES.indexOf(c.scope) < 0) return finErr_('Elige el alcance de la categoría.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  const patch = { 'Nombre': name, 'Parent ID': finStr_(c.parent_id), 'Scope': c.scope, 'Tipo Contable': finStr_(c.tipo_contable) || 'Operativo',
-    'Deducible Default': ['Sí', 'No', 'Revisar'].indexOf(c.deducible_default) >= 0 ? c.deducible_default : 'Sí',
-    'Activa': c.activa === 'No' ? 'No' : 'Sí', 'Orden': Math.floor(finNum_(c.orden)) || 99 };
-  if (c.category_id) {
-    const cur = finCategoryById_(c.category_id);
-    if (!cur) return finErr_('No se encontró esa categoría.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-    finUpdate_('Categorías', cur._row, patch);   // existing expenses keep the scope they were saved with; only new ones follow the change
-    logAuditEvent('fin_save_category', 'Categoría', c.category_id, { scope: c.scope });
-    return jsonResponse({ result: 'ok', category_id: c.category_id });
+  let m = s.match(/(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
+  if (m) return ok(+m[1], +m[2], +m[3]);
+  m = s.match(/(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/);
+  if (m) {
+    const a = +m[1], b = +m[2], y = +m[3];
+    if (b > 12 && a <= 12) return ok(y, a, b);   // only possible as month-first
+    return ok(y, b, a);                          // default: day-first
   }
-  const id = finNextId_('CAT', 3);
-  finAppend_('Categorías', [Object.assign({ 'Category ID': id }, patch)]);
-  logAuditEvent('fin_save_category', 'Categoría', id, { scope: c.scope, created: true });
-  return jsonResponse({ result: 'ok', category_id: id });
+  return '';
 }
 
-// ─── Vendor-code → Catalog ID map ──────────────────────────────────────────
-
-function finMapKey_(vendorId, code, desc) {
-  const c = finNorm_(code).replace(/ /g, '');
-  return vendorId + '|' + (c ? 'c:' + c : 'd:' + finNorm_(desc));
+function finAiMonthSpend_() {
+  const prefix = finToday_().slice(0, 7);
+  return Math.round(finRead_('AI Log').rows.filter(r => String(r['Fecha']).indexOf(prefix) === 0).reduce((s, r) => s + finNum_(r['Costo USD']), 0) * 10000) / 10000;
 }
 
-function finMapUpsert_(vendorId, code, desc, catalogId, ppu, unitCost, fecha, who) {
-  if (!vendorId || !catalogId) return;
-  const key = finMapKey_(vendorId, code, desc);
-  const tab = finRead_('Mapa Proveedor-Producto');
-  const hit = tab.rows.find(r => finMapKey_(r['Vendor ID'], r['Código Proveedor'], r['Descripción Normalizada']) === key);
-  if (hit) {
-    finUpdate_('Mapa Proveedor-Producto', hit._row, {
-      'Catalog ID': catalogId, 'Piezas por Unidad': Math.max(0, finNum_(ppu)) || hit['Piezas por Unidad'] || 1,
-      'Último Costo Unitario': finNum_(unitCost), 'Última Fecha': fecha, 'Veces Usado': Number(hit['Veces Usado'] || 0) + 1, 'Confirmado Por': who, 'Status': 'Activo',
-    });
+function finAiStatusGet_(p, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.ai_prefill']) return finDenied_();
+  const cap = Number(finConfig_().ai_monthly_cap_usd) || 5;
+  const prov = finAiProvider_();
+  return jsonResponse({ ready: !!prov, provider: prov ? prov.name : '', month_spend_usd: finAiMonthSpend_(), cap_usd: cap, model: prov ? prov.model : '—' });
+}
+
+// One call, any provider. req = { system, parts: [{text} | {image: {mime, data(base64)}}], maxTokens, json }.
+// Returns { text, tokensIn, tokensOut } in the same shape for every provider.
+function finAiCall_(prov, req) {
+  let url, headers, payload;
+  if (prov.name === 'gemini') {
+    url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(prov.model) + ':generateContent';
+    headers = { 'x-goog-api-key': prov.key };
+    const gen = { maxOutputTokens: req.maxTokens || 2000, temperature: 0 };
+    if (req.json) gen.responseMimeType = 'application/json';
+    // Reading a ticket needs no reasoning: switch "thinking" off (the main cause of slow replies).
+    if (/^gemini-2\./.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };
+    else if (/^gemini-/.test(prov.model)) gen.thinkingConfig = { thinkingLevel: 'minimal' };
+    payload = {
+      contents: [{ role: 'user', parts: req.parts.map(p => p.image ? { inline_data: { mime_type: p.image.mime, data: p.image.data } } : { text: p.text }) }],
+      generationConfig: gen,
+    };
+    if (req.system) payload.systemInstruction = { parts: [{ text: req.system }] };
   } else {
-    finAppend_('Mapa Proveedor-Producto', [{
-      'Map ID': finNextId_('MAP', 5), 'Vendor ID': vendorId, 'Código Proveedor': finStr_(code), 'Descripción Normalizada': finNorm_(desc),
-      'Catalog ID': catalogId, 'Piezas por Unidad': Math.max(0, finNum_(ppu)) || 1, 'Último Costo Unitario': finNum_(unitCost),
-      'Última Fecha': fecha, 'Veces Usado': 1, 'Confirmado Por': who, 'Status': 'Activo',
-    }]);
+    url = 'https://api.anthropic.com/v1/messages';
+    headers = { 'x-api-key': prov.key, 'anthropic-version': '2023-06-01' };
+    payload = {
+      model: prov.model, max_tokens: req.maxTokens || 2000,
+      messages: [{ role: 'user', content: req.parts.map(p => p.image ? { type: 'image', source: { type: 'base64', media_type: p.image.mime, data: p.image.data } } : { type: 'text', text: p.text }) }],
+    };
+    if (req.system) payload.system = req.system;
   }
+  const send = () => UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
+  let res = send();
+  const tc = payload.generationConfig && payload.generationConfig.thinkingConfig;
+  let thinking = tc ? (tc.thinkingLevel || 'off') : '';
+  if (res.getResponseCode() === 400 && thinking) {
+    // Not every model accepts every level: step down minimal -> low before dropping the setting entirely.
+    if (tc.thinkingLevel === 'minimal') { payload.generationConfig.thinkingConfig = { thinkingLevel: 'low' }; thinking = 'low'; res = send(); }
+    if (res.getResponseCode() === 400) { delete payload.generationConfig.thinkingConfig; thinking = 'rechazado'; res = send(); }
+  }
+  const code = res.getResponseCode();
+  const body = res.getContentText();
+  if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
+  if (code !== 200) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 1000)); throw new Error('La IA no respondió (HTTP ' + code + ').'); }   // TROUBLESHOOT: 400/403 = wrong key or model; 404 = model name no longer exists (set FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL); body is in the Executions log
+  const out = JSON.parse(body);
+  if (prov.name === 'gemini') {
+    const cand = (out.candidates || [])[0] || {};
+    const text = ((cand.content || {}).parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+    if (!text) throw new Error('La IA no devolvió texto (' + (cand.finishReason || 'sin motivo') + ').');   // TROUBLESHOOT: finishReason SAFETY/RECITATION = blocked by Google; MAX_TOKENS = ticket too long for maxTokens
+    const u = out.usageMetadata || {};
+    return { text: text, tokensIn: Number(u.promptTokenCount) || 0, tokensOut: (Number(u.candidatesTokenCount) || 0) + (Number(u.thoughtsTokenCount) || 0), thoughts: Number(u.thoughtsTokenCount) || 0, thinking: thinking };
+  }
+  return {
+    text: (out.content || []).filter(b => b.type === 'text').map(b => b.text).join(''),
+    tokensIn: Number(out.usage && out.usage.input_tokens) || 0, tokensOut: Number(out.usage && out.usage.output_tokens) || 0,
+  };
 }
 
-// Suggest-only: returns candidates, never writes.
-function finMapSuggestGet_(p, identity) {
+function finAiExtractAction(body, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.create']) return finDenied_();
-  const vendorId = finStr_(p.vendor_id);
-  const code = finStr_(p.code), desc = finStr_(p.desc);
-  const rows = finRead_('Mapa Proveedor-Producto').rows.filter(r => r['Status'] !== 'Descartado' && r['Vendor ID'] === vendorId);
-  const out = [];
-  if (code) {
-    const c = finNorm_(code).replace(/ /g, '');
-    rows.forEach(r => { if (finNorm_(r['Código Proveedor']).replace(/ /g, '') === c) out.push({ catalog_id: r['Catalog ID'], via: 'código', ppu: r['Piezas por Unidad'], last_cost: r['Último Costo Unitario'], score: 1 }); });
+  if (!caps['finance.ai_prefill'] || !caps['finance.create']) return finDenied_();
+  const prov = finAiProvider_();
+  if (!prov) return finErr_('La lectura con IA todavía no está activada. Un admin debe agregar una llave (FIN_GEMINI_KEY o FIN_ANTHROPIC_KEY).');   // TROUBLESHOOT: add Script Property FIN_GEMINI_KEY (aistudio.google.com) or FIN_ANTHROPIC_KEY (console.anthropic.com)
+  const cfg = finConfig_();
+  const cap = Number(cfg.ai_monthly_cap_usd) || 5;
+  if (finAiMonthSpend_() >= cap) return finErr_('Se alcanzó el tope mensual de IA (' + cap + ' USD). Un admin puede subirlo en Configuración.');   // TROUBLESHOOT: monthly AI spend reached ai_monthly_cap_usd (Configuración); raise it or wait for next month
+
+  // One ticket can come as several overlapping photos (long tickets), sent in top-to-bottom order.
+  const idsIn = Array.isArray(body.file_ids) ? body.file_ids : [body.file_id];
+  const ids = [];
+  idsIn.forEach(x => { const s = finStr_(x); if (s && ids.indexOf(s) < 0) ids.push(s); });
+  if (!ids.length) return finErr_('Agrega primero la foto del ticket.');
+  if (ids.length > 10) return finErr_('Máximo 10 fotos por ticket. Si el ticket es más largo, divídelo en dos gastos.');   // TROUBLESHOOT: raise the 10 here only if the AI keeps up; more photos = slower and pricier
+  const archivos = finRead_('Archivos').rows;
+  const images = [];
+  let totalBytes = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const reg = archivos.find(r => String(r['File ID']) === ids[i]);
+    if (!reg || !finMayReadFile_(reg, identity, caps) || String(reg['Mime']).indexOf('image/') !== 0) return finErr_('No se encontró la foto ' + (i + 1) + '.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
+    let bytes;
+    try { bytes = finFileBytes_(reg); } catch (e) { return finErr_('No se pudo leer la foto ' + (i + 1) + ': ' + e.message); }   // TROUBLESHOOT: Drive file deleted, or VPS file missing / VPFILES_FIN_KEY wrong
+    if (bytes.length > 4.5 * 1024 * 1024) return finErr_('La foto ' + (i + 1) + ' es muy pesada para la IA. Tómala de nuevo.');   // TROUBLESHOOT: photo over 4.5 MB; the browser normally shrinks photos to ~300 KB before upload
+    totalBytes += bytes.length;
+    images.push({ mime: reg['Mime'], data: Utilities.base64Encode(bytes) });
   }
-  if (!out.length && desc) {
-    const d = finNorm_(desc);
-    rows.forEach(r => {
-      const s = finSimilar_(d, r['Descripción Normalizada']);
-      if (s >= 0.8) out.push({ catalog_id: r['Catalog ID'], via: 'descripción', ppu: r['Piezas por Unidad'], last_cost: r['Último Costo Unitario'], score: s });
+  if (totalBytes > 20 * 1024 * 1024) return finErr_('Las fotos juntas pesan demasiado. Usa menos fotos.');   // TROUBLESHOOT: API request limit; normally ~300 KB per photo
+
+  const vendors = finRead_('Proveedores').rows.filter(v => v['Status'] !== 'Inactivo');
+  const names = vendors.slice(0, 80).map(v => v['Nombre']).join('; ');
+  const system = 'You read photos of Mexican purchase receipts (tickets) for a small stationery business. Reply with ONLY one JSON object, no prose, no markdown.\n'
+    + 'PHOTOS: you may get several photos of ONE long ticket, in order from top to bottom. Consecutive photos overlap by one or more items. '
+    + 'List every purchased item exactly once, in ticket order. An item at the bottom of one photo that reappears at the top of the next is the SAME item: list it once. '
+    + 'Only when you truly cannot tell whether two identical consecutive items are an overlap or two separate purchases, list both and set posible_duplicado true on the second.\n'
+    + 'HANDWRITING: ignore all pen marks (circles, ticks, numbers inside circles, names, notes, strike-throughs). Read only the printed text.\n'
+    + 'COMMON LAYOUT: each item uses two printed rows. Row 1 = CODE then DESCRIPTION. Row 2 = quantity, unit price, line amount. '
+    + 'Footer: "Cantidades" = total pieces, "Importe" = total. Header: "Numero" = folio.\n'
+    + 'codigo = only the first token of row 1, exactly as printed (examples: A2809, YMHM-4, QYSHL-4). '
+    + 'descripcion = the rest of row 1, but drop any "COD-<digits>" token and drop a trailing "X <n> PZS" box-size note.\n'
+    + 'Fields: vendor_name (string|null), fecha (YYYY-MM-DD|null), fecha_texto (string|null, the purchase date exactly as printed, e.g. "2026-10-16" or "16/10/26"), folio (string|null), metodo_pago (one of "Efectivo","Tarjeta débito","Tarjeta crédito","Transferencia"|null), '
+    + 'total (number|null), subtotal (number|null), iva (number|null), total_piezas (number|null, the printed total pieces), '
+    + 'lineas (array of {codigo (string|null), descripcion (string), cantidad (number), costo_unitario (number), total_linea (number), foto (number, 1-based photo where the item was read), posible_duplicado (boolean)}), notas (string|null). '
+    + 'Use plain numbers (no currency symbols). Never invent values you cannot read; use null. Known vendors (prefer these exact spellings if one matches): ' + names;
+  const parts = [];
+  images.forEach((im, i) => {
+    parts.push({ text: 'Foto ' + (i + 1) + ' de ' + images.length + ':' });
+    parts.push({ image: im });
+  });
+  parts.push({ text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
+  const logId = ids.join(',');
+  // Same photos asked again within 10 min (a double click, or Google re-sending a slow request):
+  // hand back the answer already read, or wait for the read that is still running, instead of paying twice.
+  const cache = CacheService.getScriptCache();
+  const ckey = 'finai_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, logId)).slice(0, 22);
+  const done = cache.get(ckey + '_done');
+  if (done) return jsonResponse(JSON.parse(done));
+  if (cache.get(ckey + '_run')) {
+    for (let w = 0; w < 60; w++) {
+      Utilities.sleep(3000);
+      const d = cache.get(ckey + '_done');
+      if (d) return jsonResponse(JSON.parse(d));
+      if (!cache.get(ckey + '_run')) break;
+    }
+  }
+  cache.put(ckey + '_run', '1', 360);
+  const t0 = Date.now();
+  const secs = () => Math.round((Date.now() - t0) / 1000);
+  let out, parsed, tries = 0;
+  try {
+    // The model sometimes returns broken JSON; one more attempt usually comes back clean.
+    while (!parsed) {
+      tries++;
+      out = finAiCall_(prov, { system: system, parts: parts, maxTokens: 8000, json: true });
+      const text = out.text, a = text.indexOf('{'), z = text.lastIndexOf('}');
+      try { parsed = JSON.parse(text.slice(a, z + 1)); }
+      catch (pe) {
+        try { parsed = JSON.parse(text.slice(a, z + 1).replace(/,\s*([\]}])/g, '$1')); }   // trailing commas are the usual culprit
+        catch (pe2) { if (tries >= 2) throw new Error('JSON inválido dos veces: ' + pe.message); }
+      }
+    }
+  } catch (e) {
+    cache.remove(ckey + '_run');
+    finAiLog_({ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': out ? out.tokensIn : 0, 'Tokens Out': out ? out.tokensOut : 0, 'Costo USD': 0, 'Resultado': 'error · ' + secs() + ' s · ' + String(e.message).slice(0, 120) });
+    return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Intenta de nuevo o captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; broken JSON twice in a row, or max_tokens hit on a very long ticket (Tokens Out near 8000)
+  }
+  const tin = out.tokensIn, tout = out.tokensOut;
+  const cost = Math.round((tin * prov.priceIn + tout * prov.priceOut) / 1e6 * 1e6) / 1e6;
+  finAiLog_({ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost,
+    'Resultado': 'ok · ' + images.length + ' foto(s) · ' + secs() + ' s' + (tries > 1 ? ' · 2 intentos' : '') + (out.thinking ? ' · thinking ' + out.thinking : '') + (out.thoughts ? ' · ' + out.thoughts + ' tok pensando' : '') });
+
+  // Normalise + match vendor (suggest-only: the person confirms in the form).
+  let vendorId = '';
+  const vn = finNorm_(parsed.vendor_name);
+  if (vn) {
+    let best = 0;
+    vendors.forEach(v => {
+      const cands = [v['Nombre']].concat(String(v['Alias'] || '').split('|'));
+      cands.forEach(c => { const s = finNorm_(c) === vn ? 1 : finSimilar_(vn, finNorm_(c)); if (s > best && s >= 0.8) { best = s; vendorId = v['Vendor ID']; } });
     });
   }
-  out.sort((a, b) => b.score - a.score);
-  return jsonResponse({ suggestions: out.slice(0, 3) });
+  // Lines: clean the code/description again (in case the model missed a rule), then flag
+  // identical items sitting on a photo boundary -- flagged, never deleted.
+  const lines = (Array.isArray(parsed.lineas) ? parsed.lineas : []).slice(0, 300).map(l => ({
+    codigo: finStr_(l.codigo).replace(/\s+/g, '').toUpperCase(),
+    descripcion: finStr_(l.descripcion).replace(/\bCOD-\d+\b/gi, '').replace(/\s+X\s*\d+\s*PZS\.?\s*$/i, '').replace(/\s{2,}/g, ' ').trim(),
+    cantidad: finNum_(l.cantidad) || 1, costo_unitario: finR2_(finNum_(l.costo_unitario)), total_linea: finR2_(finNum_(l.total_linea)),
+    foto: Number(l.foto) || 0, posible_duplicado: l.posible_duplicado === true,
+  }));
+  for (let i = 1; i < lines.length; i++) {
+    const a = lines[i - 1], b = lines[i];
+    if (a.foto && b.foto && b.foto === a.foto + 1 && a.codigo === b.codigo && a.descripcion === b.descripcion && a.cantidad === b.cantidad && a.costo_unitario === b.costo_unitario) b.posible_duplicado = true;
+  }
+  const metodos = ['Efectivo', 'Tarjeta débito', 'Tarjeta crédito', 'Transferencia'];
+  const suggestion = {
+    vendor_name: finStr_(parsed.vendor_name), vendor_id: vendorId, fecha_compra: finParseTicketDate_(parsed.fecha) || finParseTicketDate_(parsed.fecha_texto), folio_ticket: finStr_(parsed.folio),
+    metodo_pago: metodos.indexOf(parsed.metodo_pago) >= 0 ? parsed.metodo_pago : '', total: finR2_(finNum_(parsed.total)), subtotal: parsed.subtotal == null ? '' : finR2_(finNum_(parsed.subtotal)),
+    iva: parsed.iva == null ? '' : finR2_(finNum_(parsed.iva)), notas: finStr_(parsed.notas),
+    total_piezas: parsed.total_piezas == null ? '' : finNum_(parsed.total_piezas),
+    photos: images.length, lines: lines,
+  };
+  logAuditEvent('fin_ai_extract', 'Archivo', logId, { cost_usd: cost, tokens_in: tin, tokens_out: tout, photos: images.length, lines: lines.length });
+  const answer = { result: 'ok', suggestion: suggestion, cost_usd: cost, model: prov.model };
+  try { cache.put(ckey + '_done', JSON.stringify(answer), 600); } catch (e) { /* over 100 KB: just not cached */ }
+  cache.remove(ckey + '_run');
+  return jsonResponse(answer);
 }
 
-function finSimilar_(a, b) {
-  if (!a || !b) return 0;
-  try { return Number(stringSimilarity(a, b)) || 0; } catch (e) { return a === b ? 1 : 0; }   // stringSimilarity lives in apps-script.gs; TROUBLESHOOT: if renamed, update this call
+
+// Editor helper: run once after adding a key to check the key + model name.
+function finAiSelfTest() {
+  const prov = finAiProvider_();
+  if (!prov) { Logger.log('Falta FIN_GEMINI_KEY o FIN_ANTHROPIC_KEY en Script Properties.'); return; }
+  const out = finAiCall_(prov, { parts: [{ text: 'Reply with the single word OK.' }], maxTokens: 20 });
+  Logger.log('Proveedor: ' + prov.name + ' · modelo: ' + prov.model + ' · respuesta: ' + out.text + ' · tokens: ' + out.tokensIn + '/' + out.tokensOut);
 }
 
-// Product names for the picker (same source as Mayoristas).
-function finCatalogGet_(p, identity) {
+// ─── AI reading queue: Bandeja tickets are read on the server, one at a time ───
+// The browser only queues tickets and starts the worker; the reading itself runs on Google's side,
+// so closing the tab or changing page never loses a result. Results are saved on the ticket as a
+// draft (Captura Status = 'Borrador IA', AI Borrador = JSON) until a person opens and saves it.
+//   AI Estado: '' | 'En cola' | 'Leyendo' | 'Error'      AI Borrador: the draft (or the error text)
+const FIN_AI_WORKER_BUDGET_MS = 200000;   // stop picking new tickets after ~3.3 min (Apps Script stops at 6)
+const FIN_AI_STALE_MS = 10 * 60 * 1000;   // a 'Leyendo' older than this was cut off: read it again
+
+// Short write under the global lock; re-finds the row each time (rows can move when others are deleted).
+function finAiPatch_(expenseId, patch) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('Servidor ocupado');   // TROUBLESHOOT: another save held the lock 20 s; the worker retries on its next run
+  try {
+    const cur = finFindExpenseRow_(expenseId);
+    if (cur) finUpdate_('Gastos', cur._row, patch);
+    return cur;
+  } finally { lock.releaseLock(); }
+}
+
+function finAiEnqueueAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.ai_prefill'] || !caps['finance.create']) return finDenied_();
+  if (!finAiProvider_()) return finErr_('La lectura con IA todavía no está activada.');   // TROUBLESHOOT: add FIN_GEMINI_KEY or FIN_ANTHROPIC_KEY in Script Properties
+  const ids = (Array.isArray(body.expense_ids) ? body.expense_ids : []).map(finStr_).filter(Boolean).slice(0, 200);
+  const imgs = {};
+  finRead_('Archivos').rows.forEach(f => { if (String(f['Mime']).indexOf('image/') === 0) imgs[String(f['File ID'])] = true; });
+  const queued = [], skipped = [];
+  finRead_('Gastos').rows.forEach(r => {
+    if (ids.indexOf(String(r['Expense ID'])) < 0) return;
+    const hasImg = finStr_(r['Archivos']).split('|').some(f => imgs[f]);
+    if (r['Status'] !== 'Activo' || !finIsDraft_(r) || !hasImg || r['AI Estado'] === 'Leyendo' || !finCanSeeExpense_(r, identity, caps)) { skipped.push(r['Expense ID']); return; }
+    // A re-read replaces any earlier draft, so the old one never shows up as if it were the new result.
+    finUpdate_('Gastos', r._row, { 'AI Estado': 'En cola', 'AI Fecha': finNow_(), 'AI Pedido Por': personKey_(identity), 'Captura Status': 'Por capturar', 'AI Borrador': '' });
+    queued.push(r['Expense ID']);
+  });
+  if (queued.length) PropertiesService.getScriptProperties().setProperty('FIN_AI_QUEUE', '1');
+  logAuditEvent('fin_ai_enqueue', 'Gasto', queued.slice(0, 20).join(','), { queued: queued.length, skipped: skipped.length });
+  return jsonResponse({ result: 'ok', queued: queued, skipped: skipped });
+}
+
+// Browser "start now": runs the worker inside this request (outside the write lock, see doPost).
+function finAiWorkAction(body, identity) {
+  const caps = resolveCaps(identity);
+  if (!caps['finance.ai_prefill']) return finDenied_();
+  return jsonResponse({ result: 'ok', done: finAiWorker() });
+}
+
+// Also the time-driven trigger entry point (install once with finAiInstallTrigger).
+function finAiWorker() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('FIN_AI_QUEUE') !== '1') return 0;   // nothing queued: costs a few ms
+  const lock = LockService.getUserLock();                     // one worker at a time (separate from the write lock)
+  if (!lock.tryLock(500)) return 0;                           // another worker is already busy
+  const t0 = Date.now();
+  let done = 0;
+  try {
+    while (Date.now() - t0 < FIN_AI_WORKER_BUDGET_MS) {
+      const now = Date.now();
+      const next = finRead_('Gastos').rows
+        .filter(r => r['Status'] === 'Activo' && finIsDraft_(r) && (r['AI Estado'] === 'En cola'
+          || (r['AI Estado'] === 'Leyendo' && now - finParseNow_(r['AI Fecha']) > FIN_AI_STALE_MS)))
+        .sort((a, b) => String(a['AI Fecha']).localeCompare(String(b['AI Fecha'])))[0];
+      if (!next) { props.deleteProperty('FIN_AI_QUEUE'); break; }
+      const id = next['Expense ID'];
+      finAiPatch_(id, { 'AI Estado': 'Leyendo', 'AI Fecha': finNow_() });
+      const who = { name: finStr_(next['AI Pedido Por']) || 'IA', role: 'admin' };   // permission was checked when it was queued
+      let out;
+      try {
+        const files = finStr_(next['Archivos']).split('|').filter(Boolean);   // stored in ticket order (photo 1 = top)
+        out = JSON.parse(finAiExtractAction({ file_ids: files }, who).getContent());
+      } catch (e) { out = { error: e.message }; }
+      if (out && out.result === 'ok') {
+        const draft = JSON.stringify(out.suggestion);
+        if (draft.length > 45000) finAiPatch_(id, { 'AI Estado': 'Error', 'AI Borrador': 'El ticket es demasiado largo para guardarse como borrador. Divídelo en dos.' });   // TROUBLESHOOT: Sheets cells hold 50,000 characters
+        else finAiPatch_(id, { 'AI Estado': '', 'AI Borrador': draft, 'Captura Status': 'Borrador IA', 'AI Fecha': finNow_() });
+      } else {
+        finAiPatch_(id, { 'AI Estado': 'Error', 'AI Borrador': String((out && out.error) || 'Error desconocido').slice(0, 500), 'AI Fecha': finNow_() });
+      }
+      done++;
+    }
+  } finally { lock.releaseLock(); }
+  return done;
+}
+
+// 'yyyy-MM-dd HH:mm' (Mexico City) -> ms. Unreadable -> 0 (treated as old).
+function finParseNow_(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] + 6, +m[5]) : 0;   // Mexico City is UTC-6
+}
+
+// Editor helper: run ONCE. A 5-minute safety net that finishes the queue even when nobody has the page open.
+function finAiInstallTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => { if (t.getHandlerFunction() === 'finAiWorker') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('finAiWorker').timeBased().everyMinutes(5).create();
+  Logger.log('finAiWorker trigger installed (every 5 minutes).');
+}
+
+// ─── Bandeja: join several photos into one ticket, split them again, reorder ───
+function finInboxGuard_(r, identity, caps) {
+  return r && r['Status'] === 'Activo' && finIsDraft_(r) && finCanSeeExpense_(r, identity, caps)
+    && (caps['finance.edit_any'] || String(r['Creado Por']).toUpperCase() === personKey_(identity));
+}
+function finSetFilesExpense_(fileIds, expenseId) {
+  finRead_('Archivos').rows.forEach(f => { if (fileIds.indexOf(String(f['File ID'])) >= 0) finUpdate_('Archivos', f._row, { 'Expense ID': expenseId }); });
+}
+
+// ids in tap order: the first ticket keeps its row; the others' photos are appended and their rows voided.
+function finInboxMergeAction(body, identity) {
   const caps = resolveCaps(identity);
   if (!caps['finance.create']) return finDenied_();
-  const parents = sheetToObjects(getProductParentsSheet());
-  const pName = {};
-  parents.forEach(pr => {
-    const n = String(pr['Parent Name'] || '');
-    if (n && n.indexOf('(merged→') < 0) pName[String(pr['Parent ID'])] = n;
+  const ids = (Array.isArray(body.expense_ids) ? body.expense_ids : []).map(finStr_).filter(Boolean);
+  if (ids.length < 2) return finErr_('Elige al menos dos fotos para unir.');
+  const rows = ids.map(id => finFindExpenseRow_(id));
+  if (rows.some(r => !finInboxGuard_(r, identity, caps))) return finErr_('Solo se pueden unir tickets de la bandeja que puedes editar.');   // TROUBLESHOOT: one of them was already captured, voided, or belongs to someone else
+  if (rows.some(r => r['AI Estado'] === 'Leyendo')) return finErr_('Espera a que la IA termine de leer antes de unir.');
+  const target = rows[0], files = [];
+  rows.forEach(r => finStr_(r['Archivos']).split('|').filter(Boolean).forEach(f => { if (files.indexOf(f) < 0) files.push(f); }));
+  finUpdate_('Gastos', target._row, { 'Archivos': files.join('|'), 'Captura Status': 'Por capturar', 'AI Estado': '', 'AI Borrador': '', 'Editado Por': personKey_(identity), 'Editado En': finNow_() });
+  rows.slice(1).forEach(r => {
+    const cur = finFindExpenseRow_(r['Expense ID']);
+    finUpdate_('Gastos', cur._row, { 'Archivos': '', 'Status': 'Anulado', 'Anulado Por': personKey_(identity), 'Anulado En': finNow_(), 'Motivo Anulación': 'Unida en ' + target['Expense ID'] });
   });
-  const out = [];
-  sheetToObjects(getProductVariantsSheet()).forEach(v => {
-    const parent = pName[String(v['Parent ID'])];
-    if (!parent) return;
-    const vn = String(v['Variant Name'] || '');
-    if (vn.indexOf('(merged→') >= 0) return;
-    out.push({ id: String(v['Catalog ID']), name: vn && vn !== parent ? parent + ' (' + vn + ')' : parent });
-  });
-  return jsonResponse({ products: out });
+  finSetFilesExpense_(files, target['Expense ID']);
+  logAuditEvent('fin_inbox_merge', 'Gasto', target['Expense ID'], { merged: ids.slice(1), photos: files.length });
+  return jsonResponse({ result: 'ok', expense_id: target['Expense ID'], photos: files.length });
 }
 
-// Admin queue: purchase lines nobody linked to a product yet.
-function finUnlinkedLinesGet_(p, identity) {
+// One Bandeja ticket per photo again (the first photo stays on the original ticket).
+function finInboxSplitAction(body, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.edit_any']) return finDenied_();
-  const exps = {};
-  finRead_('Gastos').rows.forEach(r => { if (r['Status'] === 'Activo') exps[r['Expense ID']] = r; });
-  const rows = finRead_('Gasto Líneas').rows
-    .filter(l => l['Status'] === 'Activo' && l['Tipo Línea'] === 'Inventario' && !l['Catalog ID'] && exps[l['Expense ID']])
-    .map(l => { const o = Object.assign({}, l); delete o._row; o.fecha = exps[l['Expense ID']]['Fecha Compra']; return o; })
-    .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
-  return jsonResponse({ rows: rows.slice(0, 300), count: rows.length });
+  const cur = finFindExpenseRow_(finStr_(body.expense_id));
+  if (!finInboxGuard_(cur, identity, caps)) return finErr_('Solo se pueden separar tickets de la bandeja que puedes editar.');
+  const files = finStr_(cur['Archivos']).split('|').filter(Boolean);
+  if (files.length < 2) return finErr_('Este ticket tiene una sola foto.');
+  finUpdate_('Gastos', cur._row, { 'Archivos': files[0], 'Captura Status': 'Por capturar', 'AI Estado': '', 'AI Borrador': '', 'Editado Por': personKey_(identity), 'Editado En': finNow_() });
+  const created = [];
+  files.slice(1).forEach(f => {
+    const id = finNextId_('GST', 6);
+    finAppend_('Gastos', [{ 'Expense ID': id, 'Captura Status': 'Por capturar', 'Status': 'Activo', 'Fecha Compra': cur['Fecha Compra'], 'Periodo': cur['Periodo'],
+      'Scope': cur['Scope'], 'Moneda': cur['Moneda'] || 'MXN', 'Tipo Cambio': cur['Tipo Cambio'] || 1, 'Archivos': f, 'Notas': cur['Notas'],
+      'Creado Por': cur['Creado Por'], 'Creado En': finNow_() }]);
+    finSetFilesExpense_([f], id);
+    created.push(id);
+  });
+  logAuditEvent('fin_inbox_split', 'Gasto', cur['Expense ID'], { created: created });
+  return jsonResponse({ result: 'ok', created: created });
 }
 
-function finLinkLineAction(body, identity) {
+// New photo order for a ticket (photo 1 = top of the ticket; the AI reads them in this order).
+function finReorderFilesAction(body, identity) {
   const caps = resolveCaps(identity);
-  if (!caps['finance.edit_any']) return finDenied_();
-  const line = finRead_('Gasto Líneas').rows.find(l => l['Line ID'] === finStr_(body.line_id) && l['Status'] === 'Activo');
-  if (!line) return finErr_('No se encontró esa línea.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  const catalogId = finStr_(body.catalog_id);
-  if (!catalogId) return finErr_('Elige un producto del catálogo.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
-  finUpdate_('Gasto Líneas', line._row, { 'Catalog ID': catalogId, 'Vínculo': 'Confirmado' });
-  const ex = finFindExpenseRow_(line['Expense ID']);
-  finMapUpsert_(line['Vendor ID'], line['Código Proveedor'], line['Descripción'], catalogId, line['Piezas por Unidad'], line['Costo Unitario'], ex ? ex['Fecha Compra'] : finToday_(), personKey_(identity));
-  logAuditEvent('fin_link_line', 'Línea', line['Line ID'], { catalog_id: catalogId });
+  const cur = finFindExpenseRow_(finStr_(body.expense_id));
+  if (!cur || !finCanSeeExpense_(cur, identity, caps)) return finErr_('No se encontró ese gasto.');
+  if (!(caps['finance.edit_any'] || String(cur['Creado Por']).toUpperCase() === personKey_(identity))) return finDenied_();
+  const have = finStr_(cur['Archivos']).split('|').filter(Boolean);
+  const want = (Array.isArray(body.files) ? body.files : []).map(finStr_);
+  if (want.length !== have.length || want.some(f => have.indexOf(f) < 0)) return finErr_('Las fotos no coinciden; recarga la página.');   // TROUBLESHOOT: someone changed the photos meanwhile
+  finUpdate_('Gastos', cur._row, { 'Archivos': want.join('|') });
   return jsonResponse({ result: 'ok' });
 }
 
-// Unit cost over time for one product (admin).
-function finCostHistoryGet_(p, identity) {
-  const caps = resolveCaps(identity);
-  if (!caps['finance.view_summary']) return finDenied_();
-  const id = finStr_(p.catalog_id);
-  const exps = {};
-  finRead_('Gastos').rows.forEach(r => { if (r['Status'] === 'Activo') exps[r['Expense ID']] = r; });
-  const vendors = {};
-  finRead_('Proveedores').rows.forEach(v => { vendors[v['Vendor ID']] = v['Nombre']; });
-  const rows = finRead_('Gasto Líneas').rows
-    .filter(l => l['Status'] === 'Activo' && l['Catalog ID'] === id && exps[l['Expense ID']])
-    .map(l => {
-      const ppu = Number(l['Piezas por Unidad']) || 1;
-      return { fecha: exps[l['Expense ID']]['Fecha Compra'], vendor: vendors[l['Vendor ID']] || '', cantidad: l['Cantidad'], costo_unitario: l['Costo Unitario'], costo_pieza: finR2_(Number(l['Costo Unitario']) / ppu), expense_id: l['Expense ID'] };
-    })
-    .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
-  return jsonResponse({ rows: rows });
+// ─── Clean slate + bulk delete (admin only) ───────────────────────────────
+// Both always make a full copy of the Finanzas spreadsheet first; that copy is the undo.
+// Setup stays: Proveedores, Categorías, Mapa Proveedor-Producto, Gastos Fijos, Config.
+// Ticket files themselves are never deleted (Drive / VPS); only their registry rows go.
+const FIN_RESET_TABS = ['Gastos', 'Gasto Líneas', 'Facturas', 'Factura Conceptos', 'Caja Chica', 'Cierres', 'Archivos', 'AI Log', 'Movimientos Inventario'];
+const FIN_RESET_SEQS = ['GST', 'GSL', 'FAC', 'CON', 'CCH'];
+
+function finBackupCopy_(label) {
+  const stamp = Utilities.formatDate(new Date(), MX_TZ, 'yyyy-MM-dd HH-mm');
+  const copy = DriveApp.getFileById(finSsId_()).makeCopy('Finanzas — respaldo ' + label + ' ' + stamp, finRootFolder_());
+  return copy.getUrl();
 }
 
-// ─── Routers (called from doGet / dispatchPostAction in apps-script.gs) ────
-
-function finRouteGet(action, p, identity) {
-  try {
-    if (!identity || identity.service) return finDenied_();   // machines never touch Finanzas
-    switch (action) {
-      case 'fin_bootstrap':        return finBootstrapGet_(p, identity);
-      case 'fin_list_expenses':    return finListExpensesGet_(p, identity);
-      case 'fin_get_expense':      return finGetExpenseGet_(p, identity);
-      case 'fin_pending_invoices': return finPendingInvoicesGet_(p, identity);
-      case 'fin_list_invoices':    return finListInvoicesGet_(p, identity);
-      case 'fin_get_file':         return finGetFileGet_(p, identity);
-      case 'fin_map_suggest':      return finMapSuggestGet_(p, identity);
-      case 'fin_catalog':          return finCatalogGet_(p, identity);
-      case 'fin_unlinked_lines':   return finUnlinkedLinesGet_(p, identity);
-      case 'fin_cost_history':     return finCostHistoryGet_(p, identity);
-      case 'fin_summary':          return finSummaryGet_(p, identity);
-      case 'fin_slim':             return finSlimGet_(p, identity);
-      case 'fin_recurring_list':   return finRecurringListGet_(p, identity);
-      case 'fin_reimbursements':   return finReimbursementsGet_(p, identity);
-      case 'fin_petty_cash':       return finPettyCashGet_(p, identity);
-      case 'fin_close_check':      return finCloseCheckGet_(p, identity);
-      case 'fin_export_month':     return finExportMonthGet_(p, identity);
-      case 'fin_export_zip':       return finExportZipGet_(p, identity);
-      case 'fin_caps_get':         return finCapsGet_(p, identity);
-      case 'fin_ai_status':        return finAiStatusGet_(p, identity);
-      case 'fin_reset_preview':    return finResetPreviewGet_(p, identity);
-      default: return finErr_('Unknown action');   // TROUBLESHOOT: the browser asked for a fin_ action this script version does not know; deploy the latest finanzas*.gs files
-    }
-  } catch (err) {
-    return finErr_(err.message);   // TROUBLESHOOT: read the message; most are explained next to the line that throws it
-  }
+function finResetPreviewGet_(p, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const counts = {};
+  FIN_RESET_TABS.forEach(t => { try { counts[t] = finRead_(t).rows.length; } catch (e) { counts[t] = 0; } });
+  const g = finRead_('Gastos').rows;
+  const fechas = g.map(r => String(r['Fecha Compra'] || '')).filter(Boolean).sort();
+  return jsonResponse({
+    counts: counts, desde: fechas[0] || '', hasta: fechas[fechas.length - 1] || '',
+    total_mxn: finR2_(g.filter(r => r['Status'] === 'Activo').reduce((s, r) => s + finNum_(r['Total MXN']), 0)),
+  });
 }
 
-function finRoutePost(action, body, identity) {
-  try {
-    if (!identity || identity.service) return finDenied_();
-    switch (action) {
-      case 'fin_setup':             return finSetupAction(body, identity);
-      case 'fin_config_save':       return finConfigSaveAction(body, identity);
-      case 'fin_create_expense':    return finCreateExpenseAction(body, identity);
-      case 'fin_update_expense':    return finUpdateExpenseAction(body, identity);
-      case 'fin_void_expense':      return finVoidExpenseAction(body, identity);
-      case 'fin_reset_data':        return finResetDataAction(body, identity);
-      case 'fin_delete_expenses':   return finDeleteExpensesAction(body, identity);
-      case 'fin_mark_paid':         return finMarkPaidAction(body, identity);
-      case 'fin_upload_file':       return finUploadFileAction(body, identity);
-      case 'fin_register_file':     return finRegisterFileAction(body, identity);
-      case 'fin_create_invoice':    return finCreateInvoiceAction(body, identity);
-      case 'fin_link_invoice':      return finLinkInvoiceAction(body, identity);
-      case 'fin_unlink_invoice':    return finUnlinkInvoiceAction(body, identity);
-      case 'fin_void_invoice':      return finVoidInvoiceAction(body, identity);
-      case 'fin_set_invoice_status': return finSetInvoiceStatusAction(body, identity);
-      case 'fin_create_vendor':     return finCreateVendorAction(body, identity);
-      case 'fin_update_vendor':     return finUpdateVendorAction(body, identity);
-      case 'fin_save_category':     return finSaveCategoryAction(body, identity);
-      case 'fin_link_line':         return finLinkLineAction(body, identity);
-      case 'fin_save_recurring':    return finSaveRecurringAction(body, identity);
-      case 'fin_run_daily':         return finRunDailyAction(body, identity);
-      case 'fin_mark_reimbursed':   return finMarkReimbursedAction(body, identity);
-      case 'fin_petty_cash_move':   return finPettyCashMoveAction(body, identity);
-      case 'fin_close_month':       return finCloseMonthAction(body, identity);
-      case 'fin_reopen_month':      return finReopenMonthAction(body, identity);
-      case 'fin_caps_set':          return finCapsSetAction(body, identity);
-      case 'fin_ai_extract':        return finAiExtractAction(body, identity);
-      default: return finErr_('Unknown action');   // TROUBLESHOOT: see finRouteGet
-    }
-  } catch (err) {
-    return finErr_(err.message);   // TROUBLESHOOT: unexpected exception inside an action; open Executions in the Apps Script editor for the stack trace
+function finResetDataAction(body, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  if (finStr_(body.confirm) !== 'BORRAR') return finErr_('Escribe BORRAR para confirmar.');   // TROUBLESHOOT: the browser asks for the word BORRAR before sending
+  let backup;
+  try { backup = finBackupCopy_('antes de empezar de cero'); } catch (e) { return finErr_('No se pudo hacer el respaldo, no se borró nada: ' + e.message); }   // TROUBLESHOOT: Drive copy failed (quota/permissions); nothing was deleted
+  const cleared = {};
+  FIN_RESET_TABS.forEach(t => {
+    let sh;
+    try { sh = finSheet_(t); } catch (e) { return; }
+    const last = sh.getLastRow(), lc = sh.getLastColumn();
+    cleared[t] = Math.max(0, last - 1);
+    if (last > 1 && lc > 0) sh.getRange(2, 1, last - 1, lc).clearContent();   // keeps headers and the text format of the columns
+  });
+  const props = PropertiesService.getScriptProperties();
+  FIN_RESET_SEQS.forEach(s => props.deleteProperty('FIN_SEQ_' + s));
+  logAuditEvent('fin_reset_data', 'Finanzas', 'todo', { backup: backup, cleared: cleared });
+  return jsonResponse({ result: 'ok', backup_url: backup, cleared: cleared });
+}
+
+function finDeleteExpensesAction(body, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(finStr_).filter(Boolean);
+  if (!ids.length) return finErr_('No hay gastos seleccionados.');
+  if (ids.length > 300) return finErr_('Máximo 300 gastos a la vez.');   // TROUBLESHOOT: limit keeps the call under Apps Script's time limit
+  const gastos = finRead_('Gastos').rows.filter(r => ids.indexOf(String(r['Expense ID'])) >= 0);
+  if (!gastos.length) return finErr_('No se encontraron esos gastos.');
+  const closed = gastos.filter(r => finIsClosed_(r['Periodo'])).map(r => r['Periodo']);
+  if (closed.length) return finErr_('Hay gastos en meses cerrados (' + closed.filter((x, i, a) => a.indexOf(x) === i).join(', ') + '). Reabre el mes primero.');   // TROUBLESHOOT: reopen the period in Finanzas > Cierre
+  let backup;
+  try { backup = finBackupCopy_('antes de eliminar ' + gastos.length + ' gastos'); } catch (e) { return finErr_('No se pudo hacer el respaldo, no se borró nada: ' + e.message); }   // TROUBLESHOOT: Drive copy failed; nothing was deleted
+  gastos.forEach(r => { if (r['Invoice ID']) { try { finUnlinkExpenseFromInvoice_(r['Invoice ID'], r['Expense ID']); } catch (e) { /* invoice already gone */ } } });
+  const del = (tab, rows) => {
+    if (!rows.length) return 0;
+    const sh = finSheet_(tab);
+    rows.map(r => r._row).sort((a, b) => b - a).forEach(n => sh.deleteRow(n));   // bottom-up so row numbers stay valid
+    return rows.length;
+  };
+  const isMine = r => ids.indexOf(String(r['Expense ID'])) >= 0;
+  const n = {
+    gastos: del('Gastos', gastos),
+    lineas: del('Gasto Líneas', finRead_('Gasto Líneas').rows.filter(isMine)),
+    archivos: del('Archivos', finRead_('Archivos').rows.filter(isMine)),
+  };
+  logAuditEvent('fin_delete_expenses', 'Gasto', ids.slice(0, 20).join(','), { count: n.gastos, lines: n.lineas, files: n.archivos, backup: backup });
+  return jsonResponse({ result: 'ok', deleted: n, backup_url: backup });
+}
+
+// ─── Permisos screen (Finanzas > Configuración) ────────────────────────────
+
+function finCapsGet_(p, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const users = [];
+  Object.keys(props).forEach(k => {
+    if (k.indexOf('USER_') !== 0) return;
+    const parsed = parseUserProp(props[k]);
+    if (parsed.role === 'admin') return;
+    const name = k.slice(5).toUpperCase();
+    const base = Object.assign({}, cleanCaps_(ROLE_CAPS.staff), cleanCaps_(USER_CAPS[name]));
+    const over = capOverrides_(name);
+    users.push({ name: name, defaults: base, overrides: over, effective: Object.assign({}, base, over), has_override: Object.keys(over).length > 0 });
+  });
+  users.sort((a, b) => a.name.localeCompare(b.name));
+  return jsonResponse({ defs: CAP_DEFS, scopes: FIN_SCOPES, users: users });
+}
+
+function finCapsSetAction(body, identity) {
+  if (!identity || identity.role !== 'admin') return finDenied_();
+  const name = finStr_(body.name).toUpperCase();
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty('USER_' + name);
+  if (!raw) return finErr_('No existe esa persona.');   // TROUBLESHOOT: names come from the USER_<NAME> Script Properties
+  if (parseUserProp(raw).role === 'admin') return finErr_('Los admins siempre tienen acceso total; no se editan aquí.');   // TROUBLESHOOT: admins cannot be restricted; edit USER_<NAME> role in Script Properties if that was the intent
+  if (body.reset === true) {
+    props.deleteProperty('CAPS_' + name);
+    logAuditEvent('fin_caps_reset', 'Permisos', name, {});
+    return jsonResponse({ result: 'ok' });
   }
+  const clean = cleanCaps_(body.caps || {});
+  props.setProperty('CAPS_' + name, JSON.stringify(clean));
+  logAuditEvent('fin_caps_set', 'Permisos', name, { caps: clean });
+  return jsonResponse({ result: 'ok', effective: Object.assign({}, cleanCaps_(ROLE_CAPS.staff), cleanCaps_(USER_CAPS[name]), clean) });
 }
