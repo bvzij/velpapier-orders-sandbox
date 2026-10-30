@@ -347,6 +347,7 @@
         <label class="fin-field">¿Hasta cuándo se puede facturar?<select class="vp-input" id="pv-regla">${['Mismo mes', 'N días', 'Sin límite'].map(r => `<option ${r === (v['Regla Plazo Factura'] || 'Mismo mes') ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
         <label class="fin-field">Días (si es “N días”)<input class="vp-input" id="pv-dias" type="number" min="0" value="${esc(v['Días Plazo'] || '')}"></label>
         <label class="fin-field">Método de pago habitual<select class="vp-input" id="pv-metodo"><option value="">—</option>${(B.enums.metodos || []).map(x => `<option ${x === v['Método Pago Default'] ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+        <label class="fin-field">% del total que se factura<input class="vp-input" id="pv-pct" type="number" min="0" max="100" step="1" value="${esc(v['Porcentaje Factura'] === '' || v['Porcentaje Factura'] === undefined ? '' : v['Porcentaje Factura'])}" placeholder="100"></label>
         <label class="fin-field">Tarjeta / cuenta habitual<input class="vp-input" id="pv-cuenta" list="fin-accounts" value="${esc(v['Cuenta Pago Default'] || '')}" placeholder="Ej. BBVA 4417"></label>
         <label class="fin-field">¿Normalmente dan factura?<select class="vp-input" id="pv-req"><option ${v['Requiere Factura Default'] !== 'No' ? 'selected' : ''}>Sí</option><option ${v['Requiere Factura Default'] === 'No' ? 'selected' : ''}>No</option></select></label>
         <label class="fin-field">Alias (nombres en tickets, separados por |)<input class="vp-input" id="pv-alias" value="${esc(v['Alias'] || '')}"></label>
@@ -361,7 +362,7 @@
     q('#pv-save').onclick = async () => {
       const vendor = {
         nombre: q('#pv-nombre').value.trim(), rfc: q('#pv-rfc').value.trim(), default_category_id: q('#pv-cat').value, portal: q('#pv-portal').value.trim(),
-        regla_plazo: q('#pv-regla').value, dias_plazo: q('#pv-dias').value, requiere_default: q('#pv-req').value, metodo_default: q('#pv-metodo').value, alias: q('#pv-alias').value.trim(),
+        regla_plazo: q('#pv-regla').value, dias_plazo: q('#pv-dias').value, requiere_default: q('#pv-req').value, metodo_default: q('#pv-metodo').value, cuenta_default: q('#pv-cuenta').value.trim(), porcentaje_factura: q('#pv-pct').value, alias: q('#pv-alias').value.trim(),
         contacto: q('#pv-contacto').value.trim(), notas: q('#pv-notas').value.trim(),
       };
       if (!vendor.nombre) { VP.toast('Escribe el nombre del proveedor.', true); return; }
@@ -384,12 +385,13 @@
   /* ── capture form ───────────────────────────────────────────────────────── */
   let FM = null;   // { id, files:[{id,mime,name}], lines:[...], modal }
 
-  const emptyLine = () => ({ codigo: '', descripcion: '', cantidad: 1, unidad: 'pz', ppu: 1, costo: '', tipo: 'Inventario', catalog_id: '', vinculo: 'Sin vincular', _sug: null, _ai: false });
+  const emptyLine = () => ({ codigo: '', descripcion: '', cantidad: 1, unidad: 'pz', ppu: 1, costo: '', descuento: '', condicion: '', tipo: 'Inventario', catalog_id: '', vinculo: 'Sin vincular', _sug: null, _ai: false });
   const lineFromServer = l => ({
     codigo: l['Código Proveedor'] || '', descripcion: l['Descripción'] || '', cantidad: l['Cantidad'], unidad: l['Unidad'] || 'pz', ppu: l['Piezas por Unidad'] || 1,
-    costo: l['Costo Unitario'], tipo: l['Tipo Línea'] || 'Inventario', catalog_id: l['Catalog ID'] || '', vinculo: l['Vínculo'] || 'Sin vincular', _sug: null, _ai: false,
+    costo: l['Costo Unitario'], descuento: num(l['Descuento Línea']) ? l['Descuento Línea'] : '', condicion: l['Condición'] || '',
+    tipo: l['Tipo Línea'] || 'Inventario', catalog_id: l['Catalog ID'] || '', vinculo: l['Vínculo'] || 'Sin vincular', _sug: null, _ai: false,
   });
-  const lineTotal = l => r2(num(l.cantidad) * num(l.costo));
+  const lineTotal = l => r2(num(l.cantidad) * num(l.costo) - num(l.descuento));
 
   function catOptions(selected) {
     const cats = (B.categories || []).filter(c => c['Activa'] === 'Sí' || isAdmin());
@@ -474,7 +476,14 @@
           ${l.catalog_id ? `<span class="fin-badge ${l.vinculo === 'Confirmado' ? 'fin-b-green' : 'fin-b-amber'}">${l.vinculo}</span>` : ''}
           ${l._dup ? '<span class="fin-badge fin-b-amber" title="Puede venir de dos fotos que se enciman">Posible duplicado</span>' : ''}
           ${/producto\s+individual/i.test(l.descripcion || '') ? '<span class="fin-badge fin-b-blue" title="El proveedor no tenía este producto en su sistema. El almacén lo identifica al recibir la mercancía.">Por identificar en recepción</span>' : ''}
+          ${l.condicion === 'Dañado' ? '<span class="fin-badge fin-b-amber">Dañado</span>' : ''}
+          ${num(l.descuento) ? `<span class="fin-badge fin-b-amber">Descuento −${money(l.descuento)}</span>` : ''}
+          <button type="button" class="fin-line-x" data-f="line-more" data-i="${i}" title="Más opciones de la línea (dañado, descuento)" style="margin-left:auto;font-size:16px">⋯</button>
         </div>
+        ${l._more ? `<div class="fin-line-sub">
+          <label class="fin-check" style="margin:0"><input type="checkbox" data-k="condicion" ${l.condicion === 'Dañado' ? 'checked' : ''}> Producto dañado (empaque roto) — el almacén lo cuenta aparte</label>
+          <span>Descuento $</span><input class="vp-input" data-k="descuento" type="number" step="0.01" min="0" inputmode="decimal" style="width:90px" value="${esc(l.descuento)}" placeholder="0.00">
+        </div>` : ''}
       </div>`;
     }).join('');
     updateWarnings();
@@ -523,7 +532,7 @@
     if (vName && !v) { return { error: `El proveedor “${vName}” no está en la lista. Pulsa “+ Nuevo” para crearlo.` }; }
     const lines = FM.lines.map(l => ({
       codigo: l.codigo, descripcion: l.descripcion, cantidad: num(l.cantidad) || 1, unidad: l.unidad, piezas_por_unidad: num(l.ppu) || 1,
-      costo_unitario: num(l.costo), tipo: l.tipo, catalog_id: l.catalog_id || '', vinculo: l.catalog_id ? l.vinculo : 'Sin vincular',
+      costo_unitario: num(l.costo), descuento: num(l.descuento), condicion: l.condicion || '', tipo: l.tipo, catalog_id: l.catalog_id || '', vinculo: l.catalog_id ? l.vinculo : 'Sin vincular',
     })).filter(l => l.codigo || l.descripcion);
     const expense = {
       fecha_compra: val('ff-fecha'), vendor_id: v ? v['Vendor ID'] : '', category_id: val('ff-cat'), descripcion: val('ff-desc').trim(),
@@ -581,7 +590,10 @@
     setIfEmpty('ff-sub', s.subtotal); setIfEmpty('ff-iva', s.iva); setIfEmpty('ff-notas', s.notas);
     FM.aiPiezas = num(s.total_piezas) || 0;
     if (!FM.lines.some(l => l.codigo || l.descripcion) && s.lines && s.lines.length) {
-      FM.lines = s.lines.map(l => Object.assign(emptyLine(), { codigo: l.codigo, descripcion: l.descripcion, cantidad: l.cantidad, costo: l.costo_unitario, _ai: true, _dup: !!l.posible_duplicado }));
+      FM.lines = s.lines.map(l => {
+        const gap = r2(num(l.cantidad) * num(l.costo_unitario) - num(l.total_linea));
+        return Object.assign(emptyLine(), { codigo: l.codigo, descripcion: l.descripcion, cantidad: l.cantidad, costo: l.costo_unitario, descuento: num(l.total_linea) > 0 && gap > 0.5 ? gap : '', _ai: true, _dup: !!l.posible_duplicado });
+      });
       renderLines(); FM.lines.forEach((_, i) => suggestFor(i));
     }
     updateWarnings();
@@ -610,10 +622,10 @@
       const t = ev.target;
       if (t.closest('.fin-line') && t.dataset.k) {
         const i = Number(t.closest('.fin-line').dataset.i), k = t.dataset.k, l = FM.lines[i];
-        if (k === '_prod') return;
+        if (k === '_prod' || k === 'condicion') return;
         l[k] = t.value; l._ai = false;
         const tot = t.closest('.fin-line').querySelector('[data-total]'); if (tot) tot.textContent = money(lineTotal(l));
-        if (['cantidad', 'costo'].indexOf(k) >= 0) updateWarnings();
+        if (['cantidad', 'costo', 'descuento'].indexOf(k) >= 0) updateWarnings();
       } else {
         if (t.classList) t.classList.remove('fin-ai');
         if (['ff-total', 'ff-vendor'].indexOf(t.id) >= 0) updateWarnings();
@@ -632,6 +644,8 @@
           renderLines();
         } else if (['codigo', 'descripcion'].indexOf(k) >= 0) suggestFor(i);
         else if (['unidad', 'tipo'].indexOf(k) >= 0) l[k] = t.value;
+        else if (k === 'condicion') { l.condicion = t.checked ? 'Dañado' : ''; renderLines(); }
+        else if (k === 'descuento') renderLines();
       }
     });
     m.el.addEventListener('keydown', ev => {
@@ -647,6 +661,7 @@
       else if (f === 'save-new') saveForm(true);
       else if (f === 'add-line') { FM.lines.push(emptyLine()); renderLines(); const last = $('ff-lines').lastElementChild; if (last) last.querySelector('[data-k="codigo"]').focus(); }
       else if (f === 'rm-line') { FM.lines.splice(i, 1); renderLines(); }
+      else if (f === 'line-more') { FM.lines[i]._more = !FM.lines[i]._more; renderLines(); }
       else if (f === 'use-sug') { const l = FM.lines[i]; l.catalog_id = l._sug.catalog_id; l.vinculo = 'Confirmado'; l._sug = null; renderLines(); }
       else if (f === 'use-sum') { $('ff-total').value = r2(FM.lines.reduce((s, l) => s + lineTotal(l), 0)); updateWarnings(); }
       else if (f === 'scan') { const code = await scanBarcode(); if (code) { FM.lines[i].codigo = code; renderLines(); suggestFor(i); } }
