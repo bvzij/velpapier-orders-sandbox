@@ -257,6 +257,10 @@ html[data-theme="dark"] .notas-link { color: var(--blue-text); }
 .scm-chip--anotado { background: var(--purple-bg); color: var(--purple-text); border-color: var(--purple-text); }
 .scm-chip--enviado { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-text); }
 .scm-row-warn { font-size: 11px; color: var(--amber-text); margin-top: 4px; text-align: right; }
+.scm-pay-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-top: 6px; }
+.scm-pay-btn { padding: 6px 10px; font-size: 12px; font-weight: 500; border-radius: var(--radius-sm); border: 0.5px solid var(--green-border); background: var(--surface); color: var(--green-text); cursor: pointer; font-family: inherit; text-align: left; }
+.scm-pay-btn:hover { background: var(--green-bg); }
+.scm-pay-btn.active { background: var(--green-bg); border-color: var(--green-text); font-weight: 600; }
 .scm-summary { font-size: 12px; color: var(--amber-text); background: var(--amber-bg); border: 0.5px solid var(--amber-border); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 12px; }
 @media (max-width: 520px) {
   .scm-row-top { flex-wrap: wrap; }
