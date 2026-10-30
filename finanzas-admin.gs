@@ -587,6 +587,7 @@ function finAiExtractAction(body, identity) {
     + 'Only when you truly cannot tell whether two identical consecutive items are an overlap or two separate purchases, list both and set posible_duplicado true on the second.\n'
     + 'HANDWRITING: ignore all pen marks (circles, ticks, numbers inside circles, names, notes, strike-throughs). Read only the printed text.\n'
     + 'COMMON LAYOUT: each item uses two printed rows. Row 1 = CODE then DESCRIPTION. Row 2 = quantity, unit price, line amount. '
+    + 'The printed line amount can be LOWER than quantity x unit price (discounts on damaged goods): always copy the printed line amount into total_linea, never recompute it. '
     + 'Footer: "Cantidades" = total pieces, "Importe" = total. Header: "Numero" = folio.\n'
     + 'codigo = only the first token of row 1, exactly as printed (examples: A2809, YMHM-4, QYSHL-4). '
     + 'descripcion = the rest of row 1, but drop any "COD-<digits>" token and drop a trailing "X <n> PZS" box-size note.\n'
