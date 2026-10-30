@@ -456,8 +456,8 @@ function finExportZipGet_(p, identity) {
   let bytes = 0;
   for (let i = 0; i < reg.length; i++) {
     let file;
-    try { file = DriveApp.getFileById(String(reg[i]['File ID'])); } catch (e) { continue; }   // TROUBLESHOOT: a file listed in Archivos was deleted from Drive; it is skipped
-    const blob = file.getBlob();
+    let blob;
+    try { blob = Utilities.newBlob(finFileBytes_(reg[i]), reg[i]['Mime'], String(reg[i]['Nombre'])); } catch (e) { continue; }   // TROUBLESHOOT: file deleted from Drive/VPS, or VPFILES_FIN_KEY wrong; it is skipped
     bytes += blob.getBytes().length;
     if (bytes > 25 * 1024 * 1024) return finErr_('Los archivos de ' + periodo + ' pesan más de 25 MB. Descarga sin fotos de tickets o por partes.');   // TROUBLESHOOT: Apps Script responses cap near 50 MB; lower or split
     blob.setName((reg[i]['Kind'] === 'ticket' ? 'tickets/' : 'facturas/') + (reg[i]['Expense ID'] || reg[i]['Invoice ID']) + '-' + reg[i]['Nombre']);
@@ -577,7 +577,7 @@ function finAiExtractAction(body, identity) {
     const reg = archivos.find(r => String(r['File ID']) === ids[i]);
     if (!reg || !finMayReadFile_(reg, identity, caps) || String(reg['Mime']).indexOf('image/') !== 0) return finErr_('No se encontró la foto ' + (i + 1) + '.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
     let bytes;
-    try { bytes = DriveApp.getFileById(ids[i]).getBlob().getBytes(); } catch (e) { return finErr_('La foto ' + (i + 1) + ' ya no está en Drive.'); }   // TROUBLESHOOT: file listed in Archivos was deleted from Drive
+    try { bytes = finFileBytes_(reg); } catch (e) { return finErr_('No se pudo leer la foto ' + (i + 1) + ': ' + e.message); }   // TROUBLESHOOT: Drive file deleted, or VPS file missing / VPFILES_FIN_KEY wrong
     if (bytes.length > 4.5 * 1024 * 1024) return finErr_('La foto ' + (i + 1) + ' es muy pesada para la IA. Tómala de nuevo.');   // TROUBLESHOOT: photo over 4.5 MB; the browser normally shrinks photos to ~300 KB before upload
     totalBytes += bytes.length;
     images.push({ mime: reg['Mime'], data: Utilities.base64Encode(bytes) });
