@@ -138,7 +138,7 @@ function finInvoiceCandidates_(inv, vendorId, identity, caps) {
   const out = [];
   const needle = finNorm_([inv['Serie'], inv['Folio'], inv._conceptos || ''].join(' '));
   finRead_('Gastos').rows.forEach(r => {
-    if (r['Status'] !== 'Activo' || r['Invoice ID'] || r['Captura Status'] === 'Por capturar') return;
+    if (r['Status'] !== 'Activo' || r['Invoice ID'] || finIsDraft_(r)) return;
     if (!finCanSeeExpense_(r, identity, caps)) return;
     const sameCurrency = r['Moneda'] === inv['Moneda'];
     const totalDiff = Math.abs(finNum_(sameCurrency ? r['Total'] : r['Total MXN']) - finNum_(inv['Total']));
