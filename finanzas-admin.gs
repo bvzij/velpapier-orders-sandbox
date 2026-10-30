@@ -507,38 +507,62 @@ function finAiExtractAction(body, identity) {
   const cfg = finConfig_();
   const cap = Number(cfg.ai_monthly_cap_usd) || 5;
   if (finAiMonthSpend_() >= cap) return finErr_('Se alcanzó el tope mensual de IA (' + cap + ' USD). Un admin puede subirlo en Configuración.');   // TROUBLESHOOT: monthly AI spend reached ai_monthly_cap_usd (Configuración); raise it or wait for next month
-  const id = finStr_(body.file_id);
-  const reg = finRead_('Archivos').rows.find(r => String(r['File ID']) === id);
-  if (!reg || !finMayReadFile_(reg, identity, caps) || String(reg['Mime']).indexOf('image/') !== 0) return finErr_('No se encontró esa foto.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  let bytes;
-  try { bytes = DriveApp.getFileById(id).getBlob().getBytes(); } catch (e) { return finErr_('La foto ya no está en Drive.'); }   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
-  if (bytes.length > 4.5 * 1024 * 1024) return finErr_('La foto es muy pesada para la IA. Toma una más ligera.');   // TROUBLESHOOT: photo over 4.5 MB; the browser normally shrinks photos to ~300 KB before upload
+
+  // One ticket can come as several overlapping photos (long tickets), sent in top-to-bottom order.
+  const idsIn = Array.isArray(body.file_ids) ? body.file_ids : [body.file_id];
+  const ids = [];
+  idsIn.forEach(x => { const s = finStr_(x); if (s && ids.indexOf(s) < 0) ids.push(s); });
+  if (!ids.length) return finErr_('Agrega primero la foto del ticket.');
+  if (ids.length > 10) return finErr_('Máximo 10 fotos por ticket. Si el ticket es más largo, divídelo en dos gastos.');   // TROUBLESHOOT: raise the 10 here only if the AI keeps up; more photos = slower and pricier
+  const archivos = finRead_('Archivos').rows;
+  const images = [];
+  let totalBytes = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const reg = archivos.find(r => String(r['File ID']) === ids[i]);
+    if (!reg || !finMayReadFile_(reg, identity, caps) || String(reg['Mime']).indexOf('image/') !== 0) return finErr_('No se encontró la foto ' + (i + 1) + '.');   // TROUBLESHOOT: the id the browser sent is not in the tab, or the person's scopes hide it; check the id in the Finanzas sheet
+    let bytes;
+    try { bytes = DriveApp.getFileById(ids[i]).getBlob().getBytes(); } catch (e) { return finErr_('La foto ' + (i + 1) + ' ya no está en Drive.'); }   // TROUBLESHOOT: file listed in Archivos was deleted from Drive
+    if (bytes.length > 4.5 * 1024 * 1024) return finErr_('La foto ' + (i + 1) + ' es muy pesada para la IA. Tómala de nuevo.');   // TROUBLESHOOT: photo over 4.5 MB; the browser normally shrinks photos to ~300 KB before upload
+    totalBytes += bytes.length;
+    images.push({ mime: reg['Mime'], data: Utilities.base64Encode(bytes) });
+  }
+  if (totalBytes > 20 * 1024 * 1024) return finErr_('Las fotos juntas pesan demasiado. Usa menos fotos.');   // TROUBLESHOOT: API request limit; normally ~300 KB per photo
 
   const vendors = finRead_('Proveedores').rows.filter(v => v['Status'] !== 'Inactivo');
   const names = vendors.slice(0, 80).map(v => v['Nombre']).join('; ');
-  const system = 'You read photos of Mexican purchase receipts (tickets) for a small stationery business. Reply with ONLY one JSON object, no prose, no markdown. '
+  const system = 'You read photos of Mexican purchase receipts (tickets) for a small stationery business. Reply with ONLY one JSON object, no prose, no markdown.\n'
+    + 'PHOTOS: you may get several photos of ONE long ticket, in order from top to bottom. Consecutive photos overlap by one or more items. '
+    + 'List every purchased item exactly once, in ticket order. An item at the bottom of one photo that reappears at the top of the next is the SAME item: list it once. '
+    + 'Only when you truly cannot tell whether two identical consecutive items are an overlap or two separate purchases, list both and set posible_duplicado true on the second.\n'
+    + 'HANDWRITING: ignore all pen marks (circles, ticks, numbers inside circles, names, notes, strike-throughs). Read only the printed text.\n'
+    + 'COMMON LAYOUT: each item uses two printed rows. Row 1 = CODE then DESCRIPTION. Row 2 = quantity, unit price, line amount. '
+    + 'Footer: "Cantidades" = total pieces, "Importe" = total. Header: "Numero" = folio.\n'
+    + 'codigo = only the first token of row 1, exactly as printed (examples: A2809, YMHM-4, QYSHL-4). '
+    + 'descripcion = the rest of row 1, but drop any "COD-<digits>" token and drop a trailing "X <n> PZS" box-size note.\n'
     + 'Fields: vendor_name (string|null), fecha (YYYY-MM-DD|null), folio (string|null), metodo_pago (one of "Efectivo","Tarjeta débito","Tarjeta crédito","Transferencia"|null), '
-    + 'total (number|null), subtotal (number|null), iva (number|null), lineas (array of {codigo (string|null), descripcion (string), cantidad (number), costo_unitario (number), total_linea (number)}), notas (string|null). '
+    + 'total (number|null), subtotal (number|null), iva (number|null), total_piezas (number|null, the printed total pieces), '
+    + 'lineas (array of {codigo (string|null), descripcion (string), cantidad (number), costo_unitario (number), total_linea (number), foto (number, 1-based photo where the item was read), posible_duplicado (boolean)}), notas (string|null). '
     + 'Use plain numbers (no currency symbols). Never invent values you cannot read; use null. Known vendors (prefer these exact spellings if one matches): ' + names;
+  const content = [];
+  images.forEach((im, i) => {
+    content.push({ type: 'text', text: 'Foto ' + (i + 1) + ' de ' + images.length + ':' });
+    content.push({ type: 'image', source: { type: 'base64', media_type: im.mime, data: im.data } });
+  });
+  content.push({ type: 'text', text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
+  const logId = ids.join(',');
   let out, parsed;
   try {
-    out = finAiCall_(key, {
-      model: FIN_AI_MODEL, max_tokens: 2000, system: system,
-      messages: [{ role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: reg['Mime'], data: Utilities.base64Encode(bytes) } },
-        { type: 'text', text: 'Read this ticket.' },
-      ] }],
-    });
+    out = finAiCall_(key, { model: FIN_AI_MODEL, max_tokens: 8000, system: system, messages: [{ role: 'user', content: content }] });
     const text = (out.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     const a = text.indexOf('{'), z = text.lastIndexOf('}');
     parsed = JSON.parse(text.slice(a, z + 1));
   } catch (e) {
-    finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': id, 'Modelo': FIN_AI_MODEL, 'Tokens In': 0, 'Tokens Out': 0, 'Costo USD': 0, 'Resultado': 'error: ' + String(e.message).slice(0, 120) }]);
-    return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; the model answered but not with valid JSON
+    finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': FIN_AI_MODEL, 'Tokens In': 0, 'Tokens Out': 0, 'Costo USD': 0, 'Resultado': 'error: ' + String(e.message).slice(0, 120) }]);
+    return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; the model answered but not with valid JSON (a very long ticket can hit max_tokens: check Tokens Out near 8000)
   }
   const tin = Number(out.usage && out.usage.input_tokens) || 0, tout = Number(out.usage && out.usage.output_tokens) || 0;
   const cost = Math.round((tin * FIN_AI_PRICE_IN + tout * FIN_AI_PRICE_OUT) / 1e6 * 1e6) / 1e6;
-  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': id, 'Modelo': FIN_AI_MODEL, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok' }]);
+  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': FIN_AI_MODEL, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s)' }]);
 
   // Normalise + match vendor (suggest-only: the person confirms in the form).
   let vendorId = '';
@@ -550,16 +574,27 @@ function finAiExtractAction(body, identity) {
       cands.forEach(c => { const s = finNorm_(c) === vn ? 1 : finSimilar_(vn, finNorm_(c)); if (s > best && s >= 0.8) { best = s; vendorId = v['Vendor ID']; } });
     });
   }
+  // Lines: clean the code/description again (in case the model missed a rule), then flag
+  // identical items sitting on a photo boundary -- flagged, never deleted.
+  const lines = (Array.isArray(parsed.lineas) ? parsed.lineas : []).slice(0, 300).map(l => ({
+    codigo: finStr_(l.codigo).replace(/\s+/g, '').toUpperCase(),
+    descripcion: finStr_(l.descripcion).replace(/\bCOD-\d+\b/gi, '').replace(/\s+X\s*\d+\s*PZS\.?\s*$/i, '').replace(/\s{2,}/g, ' ').trim(),
+    cantidad: finNum_(l.cantidad) || 1, costo_unitario: finR2_(finNum_(l.costo_unitario)), total_linea: finR2_(finNum_(l.total_linea)),
+    foto: Number(l.foto) || 0, posible_duplicado: l.posible_duplicado === true,
+  }));
+  for (let i = 1; i < lines.length; i++) {
+    const a = lines[i - 1], b = lines[i];
+    if (a.foto && b.foto && b.foto === a.foto + 1 && a.codigo === b.codigo && a.descripcion === b.descripcion && a.cantidad === b.cantidad && a.costo_unitario === b.costo_unitario) b.posible_duplicado = true;
+  }
   const metodos = ['Efectivo', 'Tarjeta débito', 'Tarjeta crédito', 'Transferencia'];
   const suggestion = {
     vendor_name: finStr_(parsed.vendor_name), vendor_id: vendorId, fecha_compra: finIsDate_(parsed.fecha) ? parsed.fecha : '', folio_ticket: finStr_(parsed.folio),
     metodo_pago: metodos.indexOf(parsed.metodo_pago) >= 0 ? parsed.metodo_pago : '', total: finR2_(finNum_(parsed.total)), subtotal: parsed.subtotal == null ? '' : finR2_(finNum_(parsed.subtotal)),
     iva: parsed.iva == null ? '' : finR2_(finNum_(parsed.iva)), notas: finStr_(parsed.notas),
-    lines: (Array.isArray(parsed.lineas) ? parsed.lineas : []).slice(0, 80).map(l => ({
-      codigo: finStr_(l.codigo), descripcion: finStr_(l.descripcion), cantidad: finNum_(l.cantidad) || 1, costo_unitario: finR2_(finNum_(l.costo_unitario)), total_linea: finR2_(finNum_(l.total_linea)),
-    })),
+    total_piezas: parsed.total_piezas == null ? '' : finNum_(parsed.total_piezas),
+    photos: images.length, lines: lines,
   };
-  logAuditEvent('fin_ai_extract', 'Archivo', id, { cost_usd: cost, tokens_in: tin, tokens_out: tout });
+  logAuditEvent('fin_ai_extract', 'Archivo', logId, { cost_usd: cost, tokens_in: tin, tokens_out: tout, photos: images.length, lines: lines.length });
   return jsonResponse({ result: 'ok', suggestion: suggestion, cost_usd: cost, model: FIN_AI_MODEL });
 }
 
