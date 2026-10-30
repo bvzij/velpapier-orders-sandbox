@@ -644,7 +644,7 @@ window.VP = (function () {
     </div>`;
     const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
     const onKey = e => { if (e.key === 'Escape') close(); };
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    // Clicking outside never closes a modal (too easy to lose work); only Esc or the × button do.
     overlay.querySelector('.vp-modal-close').addEventListener('click', close);
     document.addEventListener('keydown', onKey);
     document.body.appendChild(overlay);
