@@ -46,7 +46,7 @@ const FIN_TABS = {
   },
   'Proveedores': {
     headers: ['Vendor ID', 'Nombre', 'Alias', 'RFC', 'Status', 'Default Category ID', 'Portal Facturación URL', 'Regla Plazo Factura',
-      'Días Plazo', 'Requiere Factura Default', 'Contacto', 'Teléfono', 'Notas', 'Creado Por', 'Creado En'],
+      'Días Plazo', 'Requiere Factura Default', 'Contacto', 'Teléfono', 'Notas', 'Creado Por', 'Creado En', 'Método Pago Default'],
     num: ['Días Plazo'],
   },
   'Categorías': {
@@ -959,6 +959,7 @@ function finCreateVendorAction(body, identity) {
     'Default Category ID': finStr_(v.default_category_id), 'Portal Facturación URL': finStr_(v.portal),
     'Regla Plazo Factura': rule, 'Días Plazo': Math.max(0, Math.floor(finNum_(v.dias_plazo))),
     'Requiere Factura Default': v.requiere_default === 'No' ? 'No' : 'Sí', 'Contacto': finStr_(v.contacto),
+    'Método Pago Default': FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '',
     'Teléfono': finStr_(v.telefono), 'Notas': finStr_(v.notas), 'Creado Por': personKey_(identity), 'Creado En': finNow_(),
   };
   finAppend_('Proveedores', [row]);
@@ -980,6 +981,7 @@ function finUpdateVendorAction(body, identity) {
   if (v.regla_plazo !== undefined && ['Mismo mes', 'N días', 'Sin límite'].indexOf(v.regla_plazo) >= 0) patch['Regla Plazo Factura'] = v.regla_plazo;
   if (v.dias_plazo !== undefined) patch['Días Plazo'] = Math.max(0, Math.floor(finNum_(v.dias_plazo)));
   if (v.requiere_default !== undefined) patch['Requiere Factura Default'] = v.requiere_default === 'No' ? 'No' : 'Sí';
+  if (v.metodo_default !== undefined) patch['Método Pago Default'] = FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '';
   if (patch['Nombre'] === '') return finErr_('El nombre no puede quedar vacío.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
   finUpdate_('Proveedores', cur._row, patch);
   logAuditEvent('fin_update_vendor', 'Proveedor', cur['Vendor ID'], { fields: Object.keys(patch) });
