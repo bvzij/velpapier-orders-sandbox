@@ -469,6 +469,7 @@
           <input class="vp-input" data-k="_prod" list="fin-products" placeholder="Producto del catálogo (opcional)" style="flex:1;min-width:150px" value="${esc(linked)}">
           ${l._sug && !l.catalog_id ? `<span class="fin-badge fin-b-blue fin-sug" data-f="use-sug" data-i="${i}">Sugerido: ${esc((prodById(l._sug.catalog_id) || {}).name || l._sug.catalog_id)} — usar</span>` : ''}
           ${l.catalog_id ? `<span class="fin-badge ${l.vinculo === 'Confirmado' ? 'fin-b-green' : 'fin-b-amber'}">${l.vinculo}</span>` : ''}
+          ${l._dup ? '<span class="fin-badge fin-b-amber" title="Puede venir de dos fotos que se enciman">Posible duplicado</span>' : ''}
         </div>
       </div>`;
     }).join('');
@@ -483,6 +484,9 @@
     const hasLines = FM.lines.some(l => l.codigo || l.descripcion);
     sumEl.textContent = hasLines ? `Las líneas suman ${money(sum)}${total ? ' · el ticket dice ' + money(total) : ''}.` : '';
     const out = [];
+    const pzs = FM.lines.reduce((s, l) => s + num(l.cantidad), 0);
+    if (hasLines && FM.aiPiezas && Math.abs(pzs - FM.aiPiezas) > 0.001) out.push(`<div class="fin-msg warn">Las líneas suman ${pzs} piezas, pero el ticket dice ${FM.aiPiezas}. Puede faltar o sobrar una línea (revisa las marcadas como posible duplicado).</div>`);
+    if (FM.lines.some(l => l._dup)) out.push('<div class="fin-msg info">Hay líneas marcadas como posible duplicado: pueden venir de dos fotos que se enciman. Si es la misma, quítala con ×.</div>');
     if (hasLines && total && Math.abs(sum - total) > 1) out.push(`<div class="fin-msg warn">Las líneas (${money(sum)}) no coinciden con el total del ticket (${money(total)}). <button type="button" class="fin-link" data-f="use-sum">Usar la suma de las líneas</button></div>`);
     const limit = num((B.config || {}).cash_limit) || 2000;
     if (val('ff-metodo') === 'Efectivo' && total > limit && (val('ff-moneda') || 'MXN') === 'MXN') out.push(`<div class="fin-msg warn">Pago en efectivo mayor a ${money(limit)}: normalmente no es deducible. Confírmalo con el contador.</div>`);
@@ -562,8 +566,9 @@
     setIfEmpty('ff-fecha', s.fecha_compra); setIfEmpty('ff-total', s.total); setIfEmpty('ff-folio', s.folio_ticket);
     if (s.metodo_pago && $('ff-metodo')) { $('ff-metodo').value = s.metodo_pago; $('ff-metodo').classList.add('fin-ai'); }
     setIfEmpty('ff-sub', s.subtotal); setIfEmpty('ff-iva', s.iva); setIfEmpty('ff-notas', s.notas);
+    FM.aiPiezas = num(s.total_piezas) || 0;
     if (!FM.lines.some(l => l.codigo || l.descripcion) && s.lines && s.lines.length) {
-      FM.lines = s.lines.map(l => Object.assign(emptyLine(), { codigo: l.codigo, descripcion: l.descripcion, cantidad: l.cantidad, costo: l.costo_unitario, _ai: true }));
+      FM.lines = s.lines.map(l => Object.assign(emptyLine(), { codigo: l.codigo, descripcion: l.descripcion, cantidad: l.cantidad, costo: l.costo_unitario, _ai: true, _dup: !!l.posible_duplicado }));
       renderLines(); FM.lines.forEach((_, i) => suggestFor(i));
     }
     updateWarnings();
@@ -646,10 +651,11 @@
   }
 
   async function aiFill() {
-    if (!FM.files.length) { VP.toast('Agrega primero la foto del ticket.', true); return; }
-    const ov = busy('Leyendo el ticket…');
+    const ids = FM.files.filter(f => String(f.mime || 'image/').indexOf('image/') === 0).map(f => f.id);
+    if (!ids.length) { VP.toast('Agrega primero la foto del ticket.', true); return; }
+    const ov = busy(ids.length > 1 ? 'Leyendo ' + ids.length + ' fotos del ticket…' : 'Leyendo el ticket…');
     try {
-      const r = await post('fin_ai_extract', { file_id: FM.files[0].id });
+      const r = await post('fin_ai_extract', { file_ids: ids });
       applySuggestion(r.suggestion);
       VP.toast('Listo. Revisa los campos marcados en azul antes de guardar.');
     } catch (e) { fail(e); }
