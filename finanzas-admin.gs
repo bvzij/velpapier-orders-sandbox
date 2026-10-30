@@ -469,12 +469,30 @@ function finExportZipGet_(p, identity) {
   return jsonResponse({ name: 'archivos-' + periodo + '.zip', mime: 'application/zip', data: Utilities.base64Encode(zip.getBytes()), files: blobs.length });
 }
 
-// ─── AI ticket reading (dormant until FIN_ANTHROPIC_KEY exists) ────────────
-// The key lives ONLY in Script Properties; the browser never sees it.
+// ─── AI ticket reading (dormant until an AI key exists) ─────────────────────
+// Provider-agnostic: Gemini or Claude, picked by which key exists in Script Properties.
+// Keys live ONLY in Script Properties; the browser never sees them.
+//   FIN_GEMINI_KEY     -> Google Gemini (free tier available; aistudio.google.com)
+//   FIN_ANTHROPIC_KEY  -> Anthropic Claude (console.anthropic.com)
+//   FIN_AI_PROVIDER    -> optional: 'gemini' or 'anthropic' to force one when both keys exist
+//   FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL -> optional: override the model name without a code change
 
-const FIN_AI_MODEL = 'claude-haiku-5-5';
-const FIN_AI_PRICE_IN = 0.10;    // USD per million input tokens (prompts up to 100K)
-const FIN_AI_PRICE_OUT = 0.50;   // USD per million output tokens
+const FIN_AI_PROVIDERS = {
+  gemini:    { keyProp: 'FIN_GEMINI_KEY',    modelProp: 'FIN_GEMINI_MODEL',    model: 'gemini-2.5-flash', priceIn: 0,    priceOut: 0 },      // free tier: cost logged as 0
+  anthropic: { keyProp: 'FIN_ANTHROPIC_KEY', modelProp: 'FIN_ANTHROPIC_MODEL', model: 'claude-haiku-5-5', priceIn: 0.10, priceOut: 0.50 },  // USD per million tokens
+};
+
+function finAiProvider_() {
+  const props = PropertiesService.getScriptProperties();
+  const forced = String(props.getProperty('FIN_AI_PROVIDER') || '').toLowerCase().trim();
+  const order = FIN_AI_PROVIDERS[forced] ? [forced] : ['anthropic', 'gemini'];
+  for (let i = 0; i < order.length; i++) {
+    const def = FIN_AI_PROVIDERS[order[i]];
+    const key = props.getProperty(def.keyProp);
+    if (key) return { name: order[i], key: key, model: props.getProperty(def.modelProp) || def.model, priceIn: def.priceIn, priceOut: def.priceOut };
+  }
+  return null;
+}
 
 function finAiMonthSpend_() {
   const prefix = finToday_().slice(0, 7);
@@ -485,25 +503,58 @@ function finAiStatusGet_(p, identity) {
   const caps = resolveCaps(identity);
   if (!caps['finance.ai_prefill']) return finDenied_();
   const cap = Number(finConfig_().ai_monthly_cap_usd) || 5;
-  return jsonResponse({ ready: !!PropertiesService.getScriptProperties().getProperty('FIN_ANTHROPIC_KEY'), month_spend_usd: finAiMonthSpend_(), cap_usd: cap, model: FIN_AI_MODEL });
+  const prov = finAiProvider_();
+  return jsonResponse({ ready: !!prov, provider: prov ? prov.name : '', month_spend_usd: finAiMonthSpend_(), cap_usd: cap, model: prov ? prov.model : '—' });
 }
 
-function finAiCall_(key, payload) {
-  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, payload: JSON.stringify(payload),
-  });
+// One call, any provider. req = { system, parts: [{text} | {image: {mime, data(base64)}}], maxTokens, json }.
+// Returns { text, tokensIn, tokensOut } in the same shape for every provider.
+function finAiCall_(prov, req) {
+  let url, headers, payload;
+  if (prov.name === 'gemini') {
+    url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(prov.model) + ':generateContent';
+    headers = { 'x-goog-api-key': prov.key };
+    const gen = { maxOutputTokens: req.maxTokens || 2000, temperature: 0 };
+    if (req.json) gen.responseMimeType = 'application/json';
+    if (/^gemini-2\.5-flash/.test(prov.model)) gen.thinkingConfig = { thinkingBudget: 0 };   // no hidden "thinking" eating the output budget
+    payload = {
+      contents: [{ role: 'user', parts: req.parts.map(p => p.image ? { inline_data: { mime_type: p.image.mime, data: p.image.data } } : { text: p.text }) }],
+      generationConfig: gen,
+    };
+    if (req.system) payload.systemInstruction = { parts: [{ text: req.system }] };
+  } else {
+    url = 'https://api.anthropic.com/v1/messages';
+    headers = { 'x-api-key': prov.key, 'anthropic-version': '2023-06-01' };
+    payload = {
+      model: prov.model, max_tokens: req.maxTokens || 2000,
+      messages: [{ role: 'user', content: req.parts.map(p => p.image ? { type: 'image', source: { type: 'base64', media_type: p.image.mime, data: p.image.data } } : { type: 'text', text: p.text }) }],
+    };
+    if (req.system) payload.system = req.system;
+  }
+  const res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
   const code = res.getResponseCode();
-  const text = res.getContentText();
-  if (code !== 200) throw new Error('La IA no respondió (HTTP ' + code + ').');   // TROUBLESHOOT: 401 = wrong key in FIN_ANTHROPIC_KEY; 404 = model name (FIN_AI_MODEL) no longer exists; 429 = rate limit; 400 = see body in Executions log
-  return JSON.parse(text);
+  const body = res.getContentText();
+  if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
+  if (code !== 200) { Logger.log('AI ' + prov.name + ' HTTP ' + code + ': ' + body.slice(0, 1000)); throw new Error('La IA no respondió (HTTP ' + code + ').'); }   // TROUBLESHOOT: 400/403 = wrong key or model; 404 = model name no longer exists (set FIN_GEMINI_MODEL / FIN_ANTHROPIC_MODEL); body is in the Executions log
+  const out = JSON.parse(body);
+  if (prov.name === 'gemini') {
+    const cand = (out.candidates || [])[0] || {};
+    const text = ((cand.content || {}).parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+    if (!text) throw new Error('La IA no devolvió texto (' + (cand.finishReason || 'sin motivo') + ').');   // TROUBLESHOOT: finishReason SAFETY/RECITATION = blocked by Google; MAX_TOKENS = ticket too long for maxTokens
+    const u = out.usageMetadata || {};
+    return { text: text, tokensIn: Number(u.promptTokenCount) || 0, tokensOut: (Number(u.candidatesTokenCount) || 0) + (Number(u.thoughtsTokenCount) || 0) };
+  }
+  return {
+    text: (out.content || []).filter(b => b.type === 'text').map(b => b.text).join(''),
+    tokensIn: Number(out.usage && out.usage.input_tokens) || 0, tokensOut: Number(out.usage && out.usage.output_tokens) || 0,
+  };
 }
 
 function finAiExtractAction(body, identity) {
   const caps = resolveCaps(identity);
   if (!caps['finance.ai_prefill'] || !caps['finance.create']) return finDenied_();
-  const key = PropertiesService.getScriptProperties().getProperty('FIN_ANTHROPIC_KEY');
-  if (!key) return finErr_('La lectura con IA todavía no está activada. Un admin debe agregar la llave (FIN_ANTHROPIC_KEY).');   // TROUBLESHOOT: add Script Property FIN_ANTHROPIC_KEY with an API key from console.anthropic.com
+  const prov = finAiProvider_();
+  if (!prov) return finErr_('La lectura con IA todavía no está activada. Un admin debe agregar una llave (FIN_GEMINI_KEY o FIN_ANTHROPIC_KEY).');   // TROUBLESHOOT: add Script Property FIN_GEMINI_KEY (aistudio.google.com) or FIN_ANTHROPIC_KEY (console.anthropic.com)
   const cfg = finConfig_();
   const cap = Number(cfg.ai_monthly_cap_usd) || 5;
   if (finAiMonthSpend_() >= cap) return finErr_('Se alcanzó el tope mensual de IA (' + cap + ' USD). Un admin puede subirlo en Configuración.');   // TROUBLESHOOT: monthly AI spend reached ai_monthly_cap_usd (Configuración); raise it or wait for next month
@@ -543,26 +594,26 @@ function finAiExtractAction(body, identity) {
     + 'total (number|null), subtotal (number|null), iva (number|null), total_piezas (number|null, the printed total pieces), '
     + 'lineas (array of {codigo (string|null), descripcion (string), cantidad (number), costo_unitario (number), total_linea (number), foto (number, 1-based photo where the item was read), posible_duplicado (boolean)}), notas (string|null). '
     + 'Use plain numbers (no currency symbols). Never invent values you cannot read; use null. Known vendors (prefer these exact spellings if one matches): ' + names;
-  const content = [];
+  const parts = [];
   images.forEach((im, i) => {
-    content.push({ type: 'text', text: 'Foto ' + (i + 1) + ' de ' + images.length + ':' });
-    content.push({ type: 'image', source: { type: 'base64', media_type: im.mime, data: im.data } });
+    parts.push({ text: 'Foto ' + (i + 1) + ' de ' + images.length + ':' });
+    parts.push({ image: im });
   });
-  content.push({ type: 'text', text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
+  parts.push({ text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
   const logId = ids.join(',');
   let out, parsed;
   try {
-    out = finAiCall_(key, { model: FIN_AI_MODEL, max_tokens: 8000, system: system, messages: [{ role: 'user', content: content }] });
-    const text = (out.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    out = finAiCall_(prov, { system: system, parts: parts, maxTokens: 8000, json: true });
+    const text = out.text;
     const a = text.indexOf('{'), z = text.lastIndexOf('}');
     parsed = JSON.parse(text.slice(a, z + 1));
   } catch (e) {
-    finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': FIN_AI_MODEL, 'Tokens In': 0, 'Tokens Out': 0, 'Costo USD': 0, 'Resultado': 'error: ' + String(e.message).slice(0, 120) }]);
+    finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': 0, 'Tokens Out': 0, 'Costo USD': 0, 'Resultado': 'error: ' + String(e.message).slice(0, 120) }]);
     return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; the model answered but not with valid JSON (a very long ticket can hit max_tokens: check Tokens Out near 8000)
   }
-  const tin = Number(out.usage && out.usage.input_tokens) || 0, tout = Number(out.usage && out.usage.output_tokens) || 0;
-  const cost = Math.round((tin * FIN_AI_PRICE_IN + tout * FIN_AI_PRICE_OUT) / 1e6 * 1e6) / 1e6;
-  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': FIN_AI_MODEL, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s)' }]);
+  const tin = out.tokensIn, tout = out.tokensOut;
+  const cost = Math.round((tin * prov.priceIn + tout * prov.priceOut) / 1e6 * 1e6) / 1e6;
+  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s)' }]);
 
   // Normalise + match vendor (suggest-only: the person confirms in the form).
   let vendorId = '';
@@ -595,15 +646,16 @@ function finAiExtractAction(body, identity) {
     photos: images.length, lines: lines,
   };
   logAuditEvent('fin_ai_extract', 'Archivo', logId, { cost_usd: cost, tokens_in: tin, tokens_out: tout, photos: images.length, lines: lines.length });
-  return jsonResponse({ result: 'ok', suggestion: suggestion, cost_usd: cost, model: FIN_AI_MODEL });
+  return jsonResponse({ result: 'ok', suggestion: suggestion, cost_usd: cost, model: prov.model });
 }
 
-// Editor helper: run once after adding FIN_ANTHROPIC_KEY to check the key + model name.
+
+// Editor helper: run once after adding a key to check the key + model name.
 function finAiSelfTest() {
-  const key = PropertiesService.getScriptProperties().getProperty('FIN_ANTHROPIC_KEY');
-  if (!key) { Logger.log('Falta FIN_ANTHROPIC_KEY en Script Properties.'); return; }
-  const out = finAiCall_(key, { model: FIN_AI_MODEL, max_tokens: 20, messages: [{ role: 'user', content: 'Reply with the single word OK.' }] });
-  Logger.log('Respuesta: ' + JSON.stringify(out.content) + ' · tokens: ' + JSON.stringify(out.usage));
+  const prov = finAiProvider_();
+  if (!prov) { Logger.log('Falta FIN_GEMINI_KEY o FIN_ANTHROPIC_KEY en Script Properties.'); return; }
+  const out = finAiCall_(prov, { parts: [{ text: 'Reply with the single word OK.' }], maxTokens: 20 });
+  Logger.log('Proveedor: ' + prov.name + ' · modelo: ' + prov.model + ' · respuesta: ' + out.text + ' · tokens: ' + out.tokensIn + '/' + out.tokensOut);
 }
 
 // ─── Permisos screen (Finanzas > Configuración) ────────────────────────────
