@@ -844,8 +844,12 @@
     res.rows.forEach(o => { if (o['Cuenta Pago']) accounts[o['Cuenta Pago']] = 1; });
     $('fin-accounts').innerHTML = Object.keys(accounts).map(a => `<option value="${esc(a)}"></option>`).join('');
     if (!res.rows.length) { box.innerHTML = '<div class="fin-empty">No hay gastos con estos filtros.</div>'; return; }
-    box.innerHTML = `<table class="fin-tbl"><thead><tr><th>Fecha</th><th>Proveedor</th><th>Descripción</th><th>Pago</th><th class="num">Total</th><th>Factura</th><th>📎</th><th>Capturó</th></tr></thead><tbody>
+    // Admins can tick rows to delete several at once; the bar only appears once something is ticked.
+    const adm = isAdmin();
+    SEL.clear();
+    box.innerHTML = `${adm ? '<div id="g-selbar" class="fin-pad" style="display:none;align-items:center;gap:10px;border-bottom:0.5px solid var(--border)"><b id="g-selcount"></b><button class="btn btn-sm" data-act="sel-clear">Quitar selección</button><button class="btn btn-sm" data-act="del-selected" style="color:var(--red-text)">Eliminar seleccionados</button></div>' : ''}<table class="fin-tbl"><thead><tr>${adm ? '<th style="width:28px"><input type="checkbox" data-act="sel-all" title="Seleccionar todos"></th>' : ''}<th>Fecha</th><th>Proveedor</th><th>Descripción</th><th>Pago</th><th class="num">Total</th><th>Factura</th><th>📎</th><th>Capturó</th></tr></thead><tbody>
       ${res.rows.map(o => `<tr class="fin-row ${o['Status'] !== 'Activo' ? 'is-void' : ''}" data-act="open-expense" data-id="${esc(o['Expense ID'])}">
+        ${adm ? `<td data-act="sel-exp" data-id="${esc(o['Expense ID'])}" data-total="${esc(o['Total MXN'] || 0)}" style="cursor:default"><input type="checkbox" data-act="sel-exp" data-id="${esc(o['Expense ID'])}" data-total="${esc(o['Total MXN'] || 0)}"></td>` : ''}
         <td style="white-space:nowrap">${fdate(o['Fecha Compra'])}</td>
         <td>${esc(vendorName(o['Vendor ID']) || '—')}</td>
         <td>${esc(o['Descripción'] || '')} <div class="fin-sub">${esc(catName(o['Category ID']))} ${capturaBadge(o)} ${flagChips(o['Flags'])}</div></td>
@@ -854,7 +858,7 @@
         <td>${facturaBadge(o)}</td>
         <td>${o.files.length || ''}</td>
         <td class="fin-sub">${esc(o['Creado Por'])}</td></tr>`).join('')}
-      </tbody>${res.totals ? `<tfoot><tr><td colspan="4">Total de lo que se ve${res.truncated ? ' (primeros 500)' : ''}</td><td class="num">${money(res.totals.total_mxn)}</td><td colspan="3"></td></tr></tfoot>` : ''}</table>
+      </tbody>${res.totals ? `<tfoot><tr><td colspan="${adm ? 5 : 4}">Total de lo que se ve${res.truncated ? ' (primeros 500)' : ''}</td><td class="num">${money(res.totals.total_mxn)}</td><td colspan="3"></td></tr></tfoot>` : ''}</table>
       ${res.truncated ? '<div class="fin-note fin-pad">Hay más gastos; usa los filtros para acotar.</div>' : ''}`;
   }
 
@@ -1220,6 +1224,69 @@
   /* ── Configuración (admins only) ────────────────────────────────────────── */
   const TIPOS = ['COGS', 'Operativo', 'Envíos', 'Marketing', 'Software', 'Renta', 'Servicios', 'Nómina', 'Honorarios', 'Comisiones', 'Impuestos', 'Financiero', 'Retiro socio'];
 
+  // ── Multi-select + bulk delete (admin) ──
+  const SEL = new Map();   // Expense ID -> Total MXN
+  function syncSel() {
+    const boxes = document.querySelectorAll('#g-list input[data-act="sel-exp"]');
+    boxes.forEach(cb => { cb.checked = SEL.has(cb.dataset.id); });
+    const all = document.querySelector('#g-list input[data-act="sel-all"]');
+    if (all) all.checked = boxes.length > 0 && SEL.size === boxes.length;
+    const bar = $('g-selbar'); if (!bar) return;
+    bar.style.display = SEL.size ? 'flex' : 'none';
+    const tot = Array.from(SEL.values()).reduce((a, b) => a + num(b), 0);
+    $('g-selcount').textContent = `${SEL.size} seleccionado${SEL.size === 1 ? '' : 's'} · ${money(tot)}`;
+  }
+  ACT['sel-exp'] = el => { const id = el.dataset.id; if (SEL.has(id)) SEL.delete(id); else SEL.set(id, el.dataset.total); syncSel(); };
+  ACT['sel-all'] = () => {
+    const boxes = document.querySelectorAll('#g-list input[data-act="sel-exp"]');
+    if (SEL.size === boxes.length) SEL.clear(); else boxes.forEach(cb => SEL.set(cb.dataset.id, cb.dataset.total));
+    syncSel();
+  };
+  ACT['sel-clear'] = () => { SEL.clear(); syncSel(); };
+  ACT['del-selected'] = async () => {
+    if (!SEL.size) return;
+    const ids = Array.from(SEL.keys()), tot = Array.from(SEL.values()).reduce((a, b) => a + num(b), 0);
+    const ok = await ask(`Eliminar ${ids.length} gasto${ids.length === 1 ? '' : 's'}`,
+      `<p>Se borran por completo (con sus líneas) ${ids.length} gasto${ids.length === 1 ? '' : 's'} por ${money(tot)}. Las fotos se quedan en Archivos.</p><p class="fin-note">Antes de borrar se guarda una copia completa de la hoja de Finanzas en Drive; esa copia es la forma de deshacerlo.</p>`,
+      [{ label: 'Cancelar', value: false }, { label: 'Eliminar ' + ids.length, value: true, primary: true }]);
+    if (!ok) return;
+    const ov = busy('Respaldando y eliminando…');
+    try {
+      const r = await post('fin_delete_expenses', { ids: ids });
+      SEL.clear();
+      VP.toast(`Eliminados ${r.deleted.gastos}. Respaldo guardado en Drive.`);
+      await loadGastos();
+    } catch (e) { fail(e); }
+    ov.done();
+  };
+
+  // ── Clean slate (admin): wipe all expense data, keep the setup ──
+  ACT['reset-data'] = async () => {
+    let pv;
+    try { pv = await api('fin_reset_preview'); } catch (e) { fail(e); return; }
+    const c = pv.counts || {};
+    const rows = [['Gastos', 'Gastos'], ['Gasto Líneas', 'Líneas de productos'], ['Facturas', 'Facturas'], ['Caja Chica', 'Caja chica'], ['Cierres', 'Cierres de mes'], ['Archivos', 'Registro de archivos'], ['AI Log', 'Registro de IA']];
+    const m = VP.showModal(`<h3 class="fin-modal-h">Empezar de cero</h3>
+      <p>Se borran todos los movimientos de Finanzas${pv.desde ? ` (del ${fdate(pv.desde)} al ${fdate(pv.hasta)}, ${money(pv.total_mxn)} en gastos activos)` : ''}:</p>
+      <table class="fin-tbl" style="margin:8px 0">${rows.map(r => `<tr><td>${r[1]}</td><td class="num">${c[r[0]] || 0}</td></tr>`).join('')}</table>
+      <p class="fin-note">Se quedan: proveedores, categorías, productos aprendidos, gastos fijos y configuración. Las fotos se quedan en Drive y en Archivos. Los folios vuelven a empezar en GST-000001.</p>
+      <p class="fin-note">Antes de borrar se guarda una copia completa de la hoja en Drive; esa copia es la forma de deshacerlo.</p>
+      <label class="fin-field">Escribe BORRAR para confirmar<input class="vp-input" id="rs-confirm" autocomplete="off"></label>
+      <div class="fin-actions-row"><button class="btn" id="rs-cancel">Cancelar</button><button class="btn btn-primary" id="rs-go" disabled>Borrar todo</button></div>`, { maxWidth: '520px' });
+    const q = s => m.el.querySelector(s);
+    q('#rs-confirm').oninput = e => { q('#rs-go').disabled = e.target.value.trim() !== 'BORRAR'; };
+    q('#rs-cancel').onclick = () => m.close();
+    q('#rs-go').onclick = async () => {
+      const ov = busy('Respaldando y borrando…');
+      try {
+        const r = await post('fin_reset_data', { confirm: 'BORRAR' });
+        m.close(); ov.done();
+        await ask('Listo', `<p>Finanzas quedó en blanco.</p><p><a href="${esc(r.backup_url)}" target="_blank" rel="noopener">Abrir el respaldo en Drive</a></p>`, [{ label: 'Cerrar', value: true, primary: true }]);
+        show('gastos');
+      } catch (e) { ov.done(); fail(e); }
+    };
+  };
+
   RENDER.config = async function () {
     const cfg = B.config || {};
     const c = $('fin-content');
@@ -1256,7 +1323,8 @@
       <div class="fin-card fin-pad"><div class="fin-actions-row" style="justify-content:flex-start;margin:0">
         <button class="btn btn-sm" data-act="open-sheet">Abrir la hoja de Finanzas</button>
         <button class="btn btn-sm" data-act="repair">Reparar estructura</button>
-        <button class="btn btn-sm" data-act="run-daily">Generar gastos fijos ahora</button></div>
+        <button class="btn btn-sm" data-act="run-daily">Generar gastos fijos ahora</button>
+        ${isAdmin() ? '<button class="btn btn-sm" data-act="reset-data" style="color:var(--red-text);margin-left:auto">Empezar de cero…</button>' : ''}</div>
         <div class="fin-note">Versión ${esc(B.version)}. “Reparar estructura” recrea pestañas o columnas que falten y nunca borra datos.</div></div>`;
     $('cf-save').onclick = async () => {
       const config = {};
