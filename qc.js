@@ -1293,6 +1293,24 @@ document.getElementById('qc-notes').addEventListener('change', pushNotesAndOrder
 
 // ── Submit ───────────────────────────────────────────────────────────────
 
+// Three-button prompt for unticked Anotado add-ons -> 'ship' | 'return' | 'cancel'.
+function askUntickedAddons(list) {
+  return new Promise(resolve => {
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+    const items = list.map(o => `<li style="padding:6px 0;border-bottom:1px solid var(--border)"><b>${escapeHtml(addonLabel(o))}</b><br><span style="font-size:13px">${escapeHtml(addonNamesText(o))}</span></li>`).join('');
+    ov.innerHTML = `<div style="background:var(--surface,#fff);color:var(--text,#111);border-radius:12px;max-width:440px;width:100%;padding:18px">
+      <h3 style="margin:0 0 6px;font-size:17px">⚠ Artículos anotados sin marcar</h3>
+      <p style="margin:0 0 10px;font-size:14px">Estaban anotados para esta guía pero no están marcados:</p>
+      <ul style="list-style:none;margin:0 0 14px;padding:0">${items}</ul>
+      <button data-c="ship" class="btn btn-primary" style="width:100%;min-height:52px;margin-bottom:8px">Sí van en la caja</button>
+      <button data-c="return" class="btn btn-danger" style="width:100%;min-height:52px;margin-bottom:8px">No van — regresar a oficina</button>
+      <button data-c="cancel" class="btn" style="width:100%;min-height:44px">Cancelar</button></div>`;
+    ov.addEventListener('click', e => { const c = e.target.dataset && e.target.dataset.c; if (!c) return; ov.remove(); resolve(c); });
+    document.body.appendChild(ov);
+  });
+}
+
 async function submitQC() {
   const btn = document.getElementById('qc-submit');
   if (!selected) { showToast('Error: no hay orden seleccionada', true); return; }
@@ -1354,6 +1372,18 @@ async function submitQC() {
     return;
   }
 
+  // Anotado add-ons left unticked: "Sí van" ticks them now; "No van" ships
+  // without them and the server sends them back to the office (Pagado, red
+  // flag in Pedidos). Mayorista excluded -- the server leaves those Anotado.
+  const pickedIds = new Set(selectedAddons.map(a => String(a.id)));
+  const unticked = (anotadoOrdersByTracking()[selected.tracking_id] || [])
+    .filter(o => o['Channel'] !== 'Mayorista' && !pickedIds.has(String(o['Order ID'])));
+  if (unticked.length) {
+    const choice = await askUntickedAddons(unticked);
+    if (choice === 'cancel') { btn.disabled = false; btn.textContent = 'Enviar'; return; }
+    if (choice === 'ship') unticked.forEach(o => selectedAddons.push({ id: String(o['Order ID']), channel: o['Channel'] }));
+  }
+
   localFinalizeInProgress = true;  // suppress "shipped elsewhere" false-positive from our own poll tick
 
   savingInProgress = true;
@@ -1395,7 +1425,9 @@ async function submitQC() {
       console.table(res._timings);
     }
 
-    showToast('✓ Empacado y enviado');
+    showToast(res.returned_to_office && res.returned_to_office.length
+      ? `✓ Enviado · ${res.returned_to_office.length} artículo(s) regresado(s) a oficina`
+      : '✓ Empacado y enviado');
     if (gen === captureGen) backToPending();
 
   } catch (e) {
