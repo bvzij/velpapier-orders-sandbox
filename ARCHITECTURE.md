@@ -110,7 +110,7 @@ Ubuntu, 2 CPU cores, 8 GB RAM, 96 GB disk (≈85% RAM and 90% disk free on 28-10
 | `n8n` | Automation: TikTok import webhook, Shopify order webhook | Own subdomain |
 | `tiktok-import` | Python/FastAPI: parses TikTok CSV + label PDF, sends batches to Apps Script | No |
 | `image-service` | Public image hosting (role to confirm) | Own subdomain |
-| `vp-files` | Archivos: self-hosted file storage, mainly product photos (`files.srv2017849.hstgr.cloud`) | Own subdomain |
+| `vp-files` | Archivos: self-hosted file storage — product photos, plus Finanzas purchase tickets in the admin-only `Finanzas/<yyyy-mm>/<proveedor>/` folder (`files.srv2017849.hstgr.cloud`) | Own subdomain |
 | `postgres` | PostgreSQL 17 — the future database *(empty, schema not applied yet)* | **No** — no ports exposed |
 | `adminer` | Database browser | **No** — `127.0.0.1:8080`, reached through a VS Code SSH tunnel |
 
