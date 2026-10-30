@@ -253,23 +253,134 @@
   const refresh = () => show(TAB);
 
   /* ── Bandeja (photo inbox) ──────────────────────────────────────────────── */
+  // ── Bandeja ──────────────────────────────────────────────────────────────
+  // Tickets waiting for a person: 'Por capturar' (just photos) and 'Borrador IA' (the AI filled a draft).
+  // Selecting cards (in tap order) opens a bar to read them with AI or join them into one ticket.
+  const INBOX_SEL = [];          // Expense IDs in the order they were tapped (photo 1 = top of the ticket)
+  let INBOX_POLL = null, INBOX_KICK = 0;
+  function ensureAiStyle() {
+    if (document.getElementById('fin-ai-style')) return;
+    const st = document.createElement('style');
+    st.id = 'fin-ai-style';
+    st.textContent = `
+      .fin-inbox-card { position: relative; }
+      .fin-inbox-card.ai-ready { box-shadow: 0 0 0 2px #3b82f6, 0 0 16px 3px rgba(59,130,246,.35); animation: finAiGlow 2.6s ease-in-out infinite; }
+      @keyframes finAiGlow { 0%,100% { box-shadow: 0 0 0 2px #3b82f6, 0 0 10px 1px rgba(59,130,246,.25); } 50% { box-shadow: 0 0 0 2px #3b82f6, 0 0 20px 5px rgba(59,130,246,.45); } }
+      .fin-inbox-card.is-sel { outline: 2px solid var(--text); outline-offset: 2px; }
+      .fin-sel-dot { position: absolute; top: 8px; left: 8px; z-index: 2; width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff;
+        background: rgba(0,0,0,.35); color: #fff; font: 600 13px/22px var(--sans, sans-serif); text-align: center; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+      .fin-inbox-card.is-sel .fin-sel-dot { background: var(--text); border-color: var(--text); color: var(--surface); }
+      .fin-ai-tag { position: absolute; top: 8px; right: 8px; z-index: 2; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--surface); border: 0.5px solid var(--border-strong); }
+      .fin-ai-tag.ready { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+      .fin-ai-tag.err { background: var(--red-bg, #fde8e8); color: var(--red-text, #b42318); border-color: transparent; }
+      .fin-spin { display: inline-block; width: 9px; height: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: finSpin .8s linear infinite; vertical-align: -1px; margin-right: 4px; }
+      @keyframes finSpin { to { transform: rotate(360deg); } }
+      .fin-selbar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; margin-bottom: 10px;
+        background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.08); }
+      .fin-photo-move { position: absolute; bottom: 4px; left: 4px; right: 4px; display: flex; justify-content: space-between; }
+      .fin-photo-move button { width: 22px; height: 22px; border-radius: 50%; border: 0.5px solid var(--border-strong); background: var(--surface); font-size: 11px; line-height: 1; cursor: pointer; padding: 0; }
+      .fin-photo-num { position: absolute; top: 4px; left: 4px; font-size: 11px; background: rgba(0,0,0,.55); color: #fff; border-radius: 8px; padding: 0 6px; }`;
+    document.head.appendChild(st);
+  }
+
   RENDER.bandeja = async function () {
-    const res = await api('fin_list_expenses&' + qsOf({ captura: 'Por capturar', periodo: 'all', limit: 100 }));
+    ensureAiStyle();
+    clearTimeout(INBOX_POLL);
+    // Always fresh: AI states change on the server while the page is open.
+    const res = await VP.get('action=fin_list_expenses&' + qsOf({ captura: 'Por capturar,Borrador IA', periodo: 'all', limit: 200 }));
     setInbox(res.count);
+    const ids = res.rows.map(o => o['Expense ID']);
+    for (let i = INBOX_SEL.length - 1; i >= 0; i--) if (ids.indexOf(INBOX_SEL[i]) < 0) INBOX_SEL.splice(i, 1);
     const c = $('fin-content');
+    const tag = o => {
+      if (o['AI Estado'] === 'En cola') return '<span class="fin-ai-tag"><span class="fin-spin"></span>En cola</span>';
+      if (o['AI Estado'] === 'Leyendo') return '<span class="fin-ai-tag"><span class="fin-spin"></span>Leyendo…</span>';
+      if (o['AI Estado'] === 'Error') return `<span class="fin-ai-tag err" title="${esc(o.ai_error || '')}">Error IA</span>`;
+      if (o['Captura Status'] === 'Borrador IA') return '<span class="fin-ai-tag ready">✨ Por revisar</span>';
+      return '';
+    };
     c.innerHTML = `
       <div class="fin-dropzone" id="fin-dz" data-act="pick">Toma o sube la foto del ticket ahora y captura los datos después. También puedes arrastrar fotos aquí.</div>
-      ${res.rows.length ? `<div class="fin-inbox">${res.rows.map(o => `
-        <div class="fin-inbox-card">
+      <div id="fin-selbar-wrap"></div>
+      ${res.rows.length ? `<div class="fin-inbox">${res.rows.map(o => {
+        const id = o['Expense ID'], n = INBOX_SEL.indexOf(id) + 1, ready = o['Captura Status'] === 'Borrador IA';
+        return `
+        <div class="fin-inbox-card ${ready ? 'ai-ready' : ''} ${n ? 'is-sel' : ''}" data-id="${esc(id)}">
+          <div class="fin-sel-dot" data-act="inbox-sel" data-id="${esc(id)}" title="Seleccionar (el orden en que tocas = orden de las fotos)">${n || ''}</div>
+          ${tag(o)}
           ${o.files.length ? thumb(o.files[0]) : '<div class="fin-thumb-doc" style="width:100%;height:150px">Sin foto</div>'}
           <div><b>${fdate(o['Fecha Compra'])}</b> ${o.files.length > 1 ? `<span class="fin-sub">· ${o.files.length} fotos</span>` : ''}<div class="fin-sub">Subió ${esc(o['Creado Por'])}${o['Notas'] ? ' · ' + esc(o['Notas']) : ''}</div></div>
-          <div class="fin-inbox-acts"><button class="btn btn-primary btn-sm" data-act="edit-expense" data-id="${esc(o['Expense ID'])}">Capturar</button><button class="btn btn-sm" data-act="void-inbox" data-id="${esc(o['Expense ID'])}" title="Quitar esta foto">✕</button></div>
-        </div>`).join('')}</div>` : '<div class="fin-card"><div class="fin-empty">La bandeja está vacía. Cada foto que subas aparece aquí hasta que captures el ticket.</div></div>'}`;
+          <div class="fin-inbox-acts"><button class="btn ${ready ? 'btn-primary' : ''} btn-sm" data-act="edit-expense" data-id="${esc(id)}">${ready ? 'Revisar' : 'Capturar'}</button><button class="btn btn-sm" data-act="void-inbox" data-id="${esc(id)}" title="Quitar esta foto">✕</button></div>
+        </div>`;
+      }).join('')}</div>` : '<div class="fin-card"><div class="fin-empty">La bandeja está vacía. Cada foto que subas aparece aquí hasta que captures el ticket.</div></div>'}`;
     hydrate(c);
+    renderSelBar(res.rows.length);
     const dz = $('fin-dz');
     ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('is-over'); }));
     ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('is-over'); }));
     dz.addEventListener('drop', e => { if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
+    // While the AI is busy, refresh by itself; if tickets wait but nothing is being read, (re)start the worker.
+    const busyRows = res.rows.filter(o => o['AI Estado'] === 'En cola' || o['AI Estado'] === 'Leyendo');
+    if (busyRows.length) {
+      if (!res.rows.some(o => o['AI Estado'] === 'Leyendo') && Date.now() - INBOX_KICK > 60000) kickAi();
+      const poll = () => {
+        if (TAB !== 'bandeja') return;
+        if (document.visibilityState === 'hidden' || document.querySelector('.vp-modal-card')) { INBOX_POLL = setTimeout(poll, 15000); return; }
+        RENDER.bandeja().catch(() => { INBOX_POLL = setTimeout(poll, 30000); });
+      };
+      INBOX_POLL = setTimeout(poll, 15000);
+    }
+  };
+
+  function renderSelBar(total) {
+    const w = $('fin-selbar-wrap'); if (!w) return;
+    if (!total) { w.innerHTML = ''; return; }
+    if (!INBOX_SEL.length) { w.innerHTML = `<div style="text-align:right;margin:-4px 0 8px"><button class="fin-link" data-act="inbox-sel-all">Seleccionar todo</button></div>`; return; }
+    const n = INBOX_SEL.length;
+    w.innerHTML = `<div class="fin-selbar"><b>${n} seleccionada${n === 1 ? '' : 's'}</b>
+      ${B.ai_ready ? `<button class="btn btn-primary btn-sm" data-act="inbox-ai">✨ Leer con IA</button>` : ''}
+      ${n > 1 ? `<button class="btn btn-sm" data-act="inbox-merge" title="Las fotos quedan en el orden en que las tocaste">🔗 Unir en un ticket</button>` : ''}
+      <span style="margin-left:auto"></span><button class="fin-link" data-act="inbox-sel-all">Seleccionar todo</button><button class="btn btn-sm" data-act="inbox-sel-clear">Quitar selección</button></div>`;
+  }
+  function syncInboxSel() {
+    document.querySelectorAll('.fin-inbox-card').forEach(card => {
+      const n = INBOX_SEL.indexOf(card.dataset.id) + 1;
+      card.classList.toggle('is-sel', !!n);
+      const d = card.querySelector('.fin-sel-dot'); if (d) d.textContent = n || '';
+    });
+    renderSelBar(document.querySelectorAll('.fin-inbox-card').length);
+  }
+  function kickAi() { INBOX_KICK = Date.now(); post('fin_ai_work', {}).catch(() => {}); }   // runs on the server; we don't wait for it
+
+  ACT['inbox-sel'] = el => { const id = el.dataset.id, i = INBOX_SEL.indexOf(id); if (i >= 0) INBOX_SEL.splice(i, 1); else INBOX_SEL.push(id); syncInboxSel(); };
+  ACT['inbox-sel-all'] = () => {
+    const all = Array.from(document.querySelectorAll('.fin-inbox-card')).map(c => c.dataset.id);
+    if (INBOX_SEL.length === all.length) INBOX_SEL.length = 0; else all.forEach(id => { if (INBOX_SEL.indexOf(id) < 0) INBOX_SEL.push(id); });
+    syncInboxSel();
+  };
+  ACT['inbox-sel-clear'] = () => { INBOX_SEL.length = 0; syncInboxSel(); };
+  ACT['inbox-ai'] = async () => {
+    if (!INBOX_SEL.length) return;
+    try {
+      const r = await post('fin_ai_enqueue', { expense_ids: INBOX_SEL.slice() });
+      VP.toast(r.queued.length ? `${r.queued.length} en cola para la IA${r.skipped.length ? ` (${r.skipped.length} sin foto o ya leyéndose)` : ''}. Puedes seguir trabajando.` : 'Ninguna se pudo poner en cola (sin foto o ya leyéndose).', !r.queued.length);
+      INBOX_SEL.length = 0;
+      if (r.queued.length) kickAi();
+      await RENDER.bandeja();
+    } catch (e) { fail(e); }
+  };
+  ACT['inbox-merge'] = async () => {
+    if (INBOX_SEL.length < 2) return;
+    const n = INBOX_SEL.length;
+    const ok = await ask('Unir en un ticket', `<p style="margin:0">Las ${n} fotos quedan en un solo ticket, en el orden en que las tocaste (1 = parte de arriba del ticket). Si alguna ya tenía un borrador de la IA, se descarta para leerlas juntas.</p>`,
+      [{ label: 'Cancelar', value: false }, { label: 'Unir ' + n, value: true, primary: true }]);
+    if (!ok) return;
+    try {
+      const r = await post('fin_inbox_merge', { expense_ids: INBOX_SEL.slice() });
+      INBOX_SEL.length = 0;
+      VP.toast(`Ticket ${r.expense_id} con ${r.photos} fotos`);
+      await RENDER.bandeja();
+    } catch (e) { fail(e); }
   };
 
   async function handleFiles(fileList) {
@@ -461,9 +572,12 @@
 
   function renderPhotos() {
     const el = $('ff-photos'); if (!el) return;
-    el.innerHTML = FM.files.map(f => `<div style="position:relative">${thumb(f.id)}<button type="button" class="fin-line-x" data-f="rm-photo" data-id="${esc(f.id)}" style="position:absolute;top:-6px;right:-6px;background:var(--surface);border-radius:50%;width:22px;height:22px;line-height:1;font-size:14px;border:0.5px solid var(--border-strong)">×</button></div>`).join('')
+    // Several photos of one ticket: number them and allow reordering (1 = top of the ticket; the AI reads them in this order).
+    const many = FM.files.length > 1, last = FM.files.length - 1;
+    el.innerHTML = FM.files.map((f, i) => `<div style="position:relative">${thumb(f.id)}<button type="button" class="fin-line-x" data-f="rm-photo" data-id="${esc(f.id)}" style="position:absolute;top:-6px;right:-6px;background:var(--surface);border-radius:50%;width:22px;height:22px;line-height:1;font-size:14px;border:0.5px solid var(--border-strong)">×</button>${many ? `<span class="fin-photo-num">${i + 1}</span><div class="fin-photo-move">${i > 0 ? `<button type="button" data-f="photo-left" data-i="${i}" title="Mover antes">◀</button>` : '<span></span>'}${i < last ? `<button type="button" data-f="photo-right" data-i="${i}" title="Mover después">▶</button>` : '<span></span>'}</div>` : ''}</div>`).join('')
       + Array.from({ length: FM.uploading || 0 }, () => '<div class="fin-thumb-doc">Subiendo…</div>').join('')
-      + `<button class="btn btn-sm" type="button" data-f="add-photo">📷 Agregar foto</button>`;
+      + `<button class="btn btn-sm" type="button" data-f="add-photo">📷 Agregar foto</button>`
+      + (many && FM.inbox && FM.id ? ` <button class="fin-link" type="button" data-f="split" title="Cada foto vuelve a la bandeja como ticket propio">Separar fotos</button>` : '');
     hydrate(el);
   }
 
@@ -633,9 +747,14 @@
     if (can('finance.create')) ensureCatalog();
     const isNew = !opts.expenseId;
     const m = VP.showModal(formHtml(e, isNew), { maxWidth: '900px' });
-    FM = { id: opts.expenseId || '', files: files, lines: lines.length ? lines : [], modal: m, inbox: e['Captura Status'] === 'Por capturar' };
+    FM = { id: opts.expenseId || '', files: files, lines: lines.length ? lines : [], modal: m, inbox: ['Por capturar', 'Borrador IA'].indexOf(e['Captura Status']) >= 0, serverFiles: files.map(f => f.id) };
+    ensureAiStyle();
     renderPhotos(); renderLines();
     if (B.ai_ready) { $('ff-ai').style.display = ''; $('ff-ai-hint').style.display = ''; }
+    // Bandeja ticket the AI already read: its saved draft fills the form (in blue) until someone saves.
+    if (e['Captura Status'] === 'Borrador IA' && e['AI Borrador']) { try { applySuggestion(JSON.parse(e['AI Borrador'])); } catch (err) { /* unreadable draft: the form stays as is */ } }
+    else if (e['AI Estado'] === 'En cola' || e['AI Estado'] === 'Leyendo') { if (B.ai_ready) watchAi(FM); }
+    else if (e['AI Estado'] === 'Error' && e['AI Borrador']) { const msg = $('ff-msg'); msg.dataset.sticky = '1'; msg.innerHTML = `<div class="fin-msg warn">La IA no pudo leer este ticket: ${esc(e['AI Borrador'])}</div>`; }
     const syncTc = () => { $('ff-tc-wrap').style.display = val('ff-moneda') !== 'MXN' ? '' : 'none'; };
     syncTc();
 
@@ -689,6 +808,11 @@
       else if (f === 'scan') { const code = await scanBarcode(); if (code) { FM.lines[i].codigo = code; renderLines(); suggestFor(i); } }
       else if (f === 'new-vendor') openVendorForm({ nombre: b.dataset.name || val('ff-vendor').trim(), onSaved: v => { $('ff-vendor').value = v['Nombre']; applyVendorDefaults(); const msg = $('ff-msg'); msg.dataset.sticky = ''; updateWarnings(); } });
       else if (f === 'rm-photo') { FM.files = FM.files.filter(x => x.id !== b.dataset.id); renderPhotos(); }
+      else if (f === 'photo-left' || f === 'photo-right') {
+        const j = f === 'photo-left' ? i - 1 : i + 1;
+        if (FM.files[j]) { const t = FM.files[i]; FM.files[i] = FM.files[j]; FM.files[j] = t; FM.orderChanged = true; renderPhotos(); }
+      }
+      else if (f === 'split') splitInbox();
       else if (f === 'ai') aiFill();
       else if (f === 'add-photo') {
         const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*,application/pdf'; inp.multiple = true;
@@ -714,7 +838,63 @@
     if (FM.reading) return;
     const ids = FM.files.filter(f => String(f.mime || 'image/').indexOf('image/') === 0).map(f => f.id);
     if (!ids.length) { VP.toast('Agrega primero la foto del ticket.', true); return; }
-    // Reads in the background: the button shows progress and the form stays usable.
+    // Captured expenses are read directly (their status must not change).
+    // New and Bandeja tickets go through the server queue: the result is saved on the ticket even if this window closes.
+    if (FM.id && !FM.inbox) return aiFillDirect(ids);
+    const form = FM, btn = $('ff-ai');
+    const all = form.files.map(f => f.id), srv = form.serverFiles || [];
+    if (form.id && (srv.length !== all.length || all.some(x => srv.indexOf(x) < 0))) { VP.toast('Guarda primero para incluir las fotos nuevas, y luego lee con IA.', true); return; }
+    btn.disabled = true; btn.textContent = '✨ Poniendo en cola…';
+    try {
+      if (!form.id) {
+        const r = await post('fin_create_expense', { expense: { captura_status: 'Por capturar', archivos: all, fecha_compra: B.today } });
+        form.id = r.expense['Expense ID']; form.inbox = true; form.serverFiles = all.slice();
+        refreshInboxCount();
+      } else if (form.orderChanged) {
+        await post('fin_reorder_files', { expense_id: form.id, files: all });
+        form.orderChanged = false;
+      }
+      await post('fin_ai_enqueue', { expense_ids: [form.id] });
+      kickAi();
+      watchAi(form);
+    } catch (e) { btn.disabled = false; btn.textContent = '✨ Leer ticket con IA'; fail(e); }
+  }
+
+  // Follows a queued ticket while its form is open. Closing the form only stops watching:
+  // the reading continues on the server and the result waits on the ticket in the Bandeja.
+  function watchAi(form) {
+    const btn = $('ff-ai'); if (!btn) return;
+    const t0 = Date.now();
+    form.reading = true; btn.disabled = true; btn.textContent = '✨ Leyendo…';
+    const tick = setInterval(() => { if (btn.isConnected) btn.textContent = `✨ Leyendo… ${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
+    const stop = () => { clearInterval(tick); form.reading = false; if (btn.isConnected) { btn.disabled = false; btn.textContent = '✨ Leer ticket con IA'; } };
+    const poll = async () => {
+      if (FM !== form || !form.modal.el.isConnected) { stop(); return; }
+      let r;
+      try { r = await VP.get('action=fin_get_expense&id=' + encodeURIComponent(form.id)); } catch (e) { setTimeout(poll, 8000); return; }
+      if (FM !== form || !form.modal.el.isConnected) { stop(); return; }
+      const e = r.expense || {};
+      if (e['Captura Status'] === 'Borrador IA' && e['AI Borrador']) {
+        stop();
+        try { applySuggestion(JSON.parse(e['AI Borrador'])); VP.toast('Listo. Revisa los campos marcados en azul antes de guardar.'); } catch (err) { fail(err); }
+        return;
+      }
+      if (e['AI Estado'] === 'Error') { stop(); fail(new Error('La IA no pudo leer el ticket: ' + (e['AI Borrador'] || 'error desconocido'))); return; }
+      if (e['AI Estado'] === 'En cola' && Date.now() - INBOX_KICK > 60000) kickAi();
+      setTimeout(poll, 5000);
+    };
+    setTimeout(poll, 4000);
+  }
+
+  async function splitInbox() {
+    const ok = await ask('Separar fotos', '<p style="margin:0">Cada foto vuelve a la bandeja como un ticket propio. Lo que hayas escrito en este formulario sin guardar se pierde.</p>',
+      [{ label: 'Cancelar', value: false }, { label: 'Separar', value: true, primary: true }]);
+    if (!ok) return;
+    try { await post('fin_inbox_split', { expense_id: FM.id }); FM.modal.close(); VP.toast('Fotos separadas en la bandeja'); show('bandeja'); } catch (e) { fail(e); }
+  }
+
+  async function aiFillDirect(ids) {
+    // Captured expense: read now, in this window (the result is only put in the form, never saved by itself).
     const form = FM, btn = $('ff-ai'), label = btn.textContent, t0 = Date.now();
     form.reading = true; btn.disabled = true;
     const tick = setInterval(() => { btn.textContent = `✨ Leyendo… ${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
@@ -808,7 +988,7 @@
 
   async function refreshInboxCount() {
     if (!can('finance.create')) return;
-    try { const r = await api('fin_list_expenses&' + qsOf({ captura: 'Por capturar', periodo: 'all', limit: 1 })); setInbox(r.count); } catch (e) { /* badge is optional */ }
+    try { const r = await api('fin_list_expenses&' + qsOf({ captura: 'Por capturar,Borrador IA', periodo: 'all', limit: 1 })); setInbox(r.count); } catch (e) { /* badge is optional */ }
   }
 
   /* ── Gastos (list) ──────────────────────────────────────────────────────── */
