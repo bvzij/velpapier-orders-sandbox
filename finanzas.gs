@@ -31,7 +31,7 @@ const FIN_TABS = {
   },
   'Gasto Líneas': {
     headers: ['Line ID', 'Expense ID', 'Línea #', 'Vendor ID', 'Código Proveedor', 'Descripción', 'Catalog ID', 'Vínculo', 'Tipo Línea',
-      'Cantidad', 'Unidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea', 'Status', 'Creado Por', 'Creado En'],
+      'Cantidad', 'Unidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea', 'Status', 'Creado Por', 'Creado En', 'Condición'],
     num: ['Línea #', 'Cantidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea'],
   },
   'Facturas': {
@@ -46,7 +46,7 @@ const FIN_TABS = {
   },
   'Proveedores': {
     headers: ['Vendor ID', 'Nombre', 'Alias', 'RFC', 'Status', 'Default Category ID', 'Portal Facturación URL', 'Regla Plazo Factura',
-      'Días Plazo', 'Requiere Factura Default', 'Contacto', 'Teléfono', 'Notas', 'Creado Por', 'Creado En', 'Método Pago Default', 'Cuenta Pago Default'],
+      'Días Plazo', 'Requiere Factura Default', 'Contacto', 'Teléfono', 'Notas', 'Creado Por', 'Creado En', 'Método Pago Default', 'Cuenta Pago Default', 'Porcentaje Factura'],
     num: ['Días Plazo'],
   },
   'Categorías': {
@@ -497,6 +497,7 @@ function finNormLines_(lines, vendorId, identity) {
       'Unidad': FIN_UNIDADES.indexOf(l.unidad) >= 0 ? l.unidad : 'pz',
       'Piezas por Unidad': Math.max(0, finNum_(l.piezas_por_unidad)) || 1,
       'Costo Unitario': finR2_(cost), 'Descuento Línea': finR2_(disc), 'Total Línea': finR2_(qty * cost - disc),
+      'Condición': l.condicion === 'Dañado' ? 'Dañado' : '',
     });
   });
   return out;
@@ -961,6 +962,7 @@ function finCreateVendorAction(body, identity) {
     'Requiere Factura Default': v.requiere_default === 'No' ? 'No' : 'Sí', 'Contacto': finStr_(v.contacto),
     'Método Pago Default': FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '',
     'Cuenta Pago Default': finStr_(v.cuenta_default),
+    'Porcentaje Factura': finStr_(v.porcentaje_factura) === '' ? '' : Math.min(100, Math.max(0, finNum_(v.porcentaje_factura))),
     'Teléfono': finStr_(v.telefono), 'Notas': finStr_(v.notas), 'Creado Por': personKey_(identity), 'Creado En': finNow_(),
   };
   finAppend_('Proveedores', [row]);
@@ -984,6 +986,7 @@ function finUpdateVendorAction(body, identity) {
   if (v.requiere_default !== undefined) patch['Requiere Factura Default'] = v.requiere_default === 'No' ? 'No' : 'Sí';
   if (v.metodo_default !== undefined) patch['Método Pago Default'] = FIN_METODOS.indexOf(v.metodo_default) >= 0 ? v.metodo_default : '';
   if (v.cuenta_default !== undefined) patch['Cuenta Pago Default'] = finStr_(v.cuenta_default);
+  if (v.porcentaje_factura !== undefined) patch['Porcentaje Factura'] = finStr_(v.porcentaje_factura) === '' ? '' : Math.min(100, Math.max(0, finNum_(v.porcentaje_factura)));
   if (patch['Nombre'] === '') return finErr_('El nombre no puede quedar vacío.');   // TROUBLESHOOT: a required field was empty or malformed; the browser form normally prevents this
   finUpdate_('Proveedores', cur._row, patch);
   logAuditEvent('fin_update_vendor', 'Proveedor', cur['Vendor ID'], { fields: Object.keys(patch) });
