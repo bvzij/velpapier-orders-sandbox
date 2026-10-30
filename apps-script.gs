@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-29.2';   // finanzas
+const SCRIPT_VERSION = '2026-10-30.1';   // finanzas
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -946,7 +946,7 @@ function doPost(e) {
     // Productos (products.gs) takes the write lock itself, so slow AI calls never block other saves.
     if (String(action).indexOf('prod_') === 0) return prodDispatchPost(action, body, identity);
     // Finanzas AI reading takes a minute or more: it runs outside the write lock (it only locks for its log row).
-    if (action === 'fin_ai_extract') { const r = dispatchPostAction(action, body, role); queueAuditEntries(); return r; }
+    if (action === 'fin_ai_extract' || action === 'fin_ai_work') { const r = dispatchPostAction(action, body, role); queueAuditEntries(); return r; }
     return withWriteLock(function () {
       const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
