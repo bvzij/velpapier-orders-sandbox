@@ -153,6 +153,7 @@ function mapFromApi(r) {
     OrderDate: r['Order Date'] || '',
     ShipBy: r['Ship By'] || '',          // importar-v2: TikTok "In transit by" deadline
     NotaFuente: r['Nota Fuente'] || '',
+    ReturnedFrom: r['Returned From'] || '',   // "tracking · ISO date" when Empacar sent it back
     'Fecha Creación': r['Created Date']
   };
 }
@@ -2262,6 +2263,26 @@ function renderOrderRow(r, showActions) {
   }
   row.addEventListener('mouseenter', () => hoverZone.classList.add('visible'));
   row.addEventListener('mouseleave', () => hoverZone.classList.remove('visible'));
+  // Returned from Empacar: was Anotado on a TikTok box that left without it.
+  // Clears on re-link (server side) or when the office taps the ❗.
+  if (r.ReturnedFrom && !isShipped(status)) {
+    const [trk, when] = String(r.ReturnedFrom).split(' · ');
+    const info = `Regresó de empaque — no se envió con ${trk}${when ? ', ' + formatDateTime(when) : ''}`;
+    row.style.outline = '2px solid #d93025'; row.style.outlineOffset = '-2px'; row.style.position = 'relative';
+    const flag = document.createElement('button');
+    flag.textContent = '❗'; flag.title = info;
+    flag.style.cssText = 'position:absolute;top:2px;right:4px;background:none;border:0;font-size:16px;cursor:pointer;color:#d93025;padding:2px';
+    flag.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm(info + '\n\n¿Quitar el aviso?')) return;
+      try {
+        const res = await performOrderUpdate(id, { 'Returned From': '' });
+        if (res.result !== 'updated') throw new Error(res.error || 'Error');
+        r.ReturnedFrom = ''; row.style.outline = ''; flag.remove();
+      } catch (err) { showToast('Error: ' + err.message); }
+    });
+    row.appendChild(flag);
+  }
   return row;
 }
 
