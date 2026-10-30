@@ -793,6 +793,7 @@ function finAiWorker() {
         .sort((a, b) => String(a['AI Fecha']).localeCompare(String(b['AI Fecha'])))[0];
       if (!next) { props.deleteProperty('FIN_AI_QUEUE'); break; }
       const id = next['Expense ID'];
+      if (done > 0) Utilities.sleep(4000);   // a short gap between reads, so a rate limit doesn't just get re-triggered immediately
       finAiPatch_(id, { 'AI Estado': 'Leyendo', 'AI Fecha': finNow_() });
       const who = { name: finStr_(next['AI Pedido Por']) || 'IA', role: 'admin' };   // permission was checked when it was queued
       let out;
@@ -808,7 +809,7 @@ function finAiWorker() {
         const msg = String((out && out.error) || 'Error desconocido');
         // Overload / rate limit is temporary: back in the queue (behind the others), up to 3 tries, before showing Error.
         const cache = CacheService.getScriptCache(), rk = 'finai_retry_' + id, tries = Number(cache.get(rk) || 0) + 1;
-        if (/saturada|HTTP 5\d\d|límite gratuito/i.test(msg) && tries <= 3) {
+        if (/saturada|HTTP 5\d\d|HTTP 429|límite gratuito/i.test(msg) && tries <= 3) {
           cache.put(rk, String(tries), 21600);
           finAiPatch_(id, { 'AI Estado': 'En cola', 'AI Fecha': finNow_() });
           props.setProperty('FIN_AI_QUEUE', '1');
