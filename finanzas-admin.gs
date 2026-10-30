@@ -502,6 +502,29 @@ function finAiLog_(row) {
   try { finAppend_('AI Log', [row]); } finally { lock.releaseLock(); }
 }
 
+// Ticket dates come in several shapes. Rules (Mexico): a 4-digit year first means Y-M-D (ISO);
+// year last means D-M-Y, unless the first number is over 12 and the second is not (then M-D-Y, US style).
+// A 2-digit year is taken as 20YY. Anything that is not a real calendar date returns ''.
+function finParseTicketDate_(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const pad = n => String(n).padStart(2, '0');
+  const ok = (y, m, d) => {
+    if (y < 100) y += 2000;
+    const iso = y + '-' + pad(m) + '-' + pad(d);
+    return m >= 1 && m <= 12 && d >= 1 && d <= 31 && finIsDate_(iso) ? iso : '';
+  };
+  let m = s.match(/(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
+  if (m) return ok(+m[1], +m[2], +m[3]);
+  m = s.match(/(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/);
+  if (m) {
+    const a = +m[1], b = +m[2], y = +m[3];
+    if (b > 12 && a <= 12) return ok(y, a, b);   // only possible as month-first
+    return ok(y, b, a);                          // default: day-first
+  }
+  return '';
+}
+
 function finAiMonthSpend_() {
   const prefix = finToday_().slice(0, 7);
   return Math.round(finRead_('AI Log').rows.filter(r => String(r['Fecha']).indexOf(prefix) === 0).reduce((s, r) => s + finNum_(r['Costo USD']), 0) * 10000) / 10000;
@@ -543,9 +566,13 @@ function finAiCall_(prov, req) {
   }
   const send = () => UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
   let res = send();
-  let thinking = payload.generationConfig && payload.generationConfig.thinkingConfig ? 'reducido' : '';
-  // A model that does not accept the thinking setting answers 400: retry once without it.
-  if (res.getResponseCode() === 400 && thinking) { delete payload.generationConfig.thinkingConfig; thinking = 'rechazado'; res = send(); }
+  const tc = payload.generationConfig && payload.generationConfig.thinkingConfig;
+  let thinking = tc ? (tc.thinkingLevel || 'off') : '';
+  if (res.getResponseCode() === 400 && thinking) {
+    // Not every model accepts every level: step down minimal -> low before dropping the setting entirely.
+    if (tc.thinkingLevel === 'minimal') { payload.generationConfig.thinkingConfig = { thinkingLevel: 'low' }; thinking = 'low'; res = send(); }
+    if (res.getResponseCode() === 400) { delete payload.generationConfig.thinkingConfig; thinking = 'rechazado'; res = send(); }
+  }
   const code = res.getResponseCode();
   const body = res.getContentText();
   if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
@@ -604,7 +631,7 @@ function finAiExtractAction(body, identity) {
     + 'Footer: "Cantidades" = total pieces, "Importe" = total. Header: "Numero" = folio.\n'
     + 'codigo = only the first token of row 1, exactly as printed (examples: A2809, YMHM-4, QYSHL-4). '
     + 'descripcion = the rest of row 1, but drop any "COD-<digits>" token and drop a trailing "X <n> PZS" box-size note.\n'
-    + 'Fields: vendor_name (string|null), fecha (YYYY-MM-DD|null), folio (string|null), metodo_pago (one of "Efectivo","Tarjeta débito","Tarjeta crédito","Transferencia"|null), '
+    + 'Fields: vendor_name (string|null), fecha (YYYY-MM-DD|null), fecha_texto (string|null, the purchase date exactly as printed, e.g. "2026-10-16" or "16/10/26"), folio (string|null), metodo_pago (one of "Efectivo","Tarjeta débito","Tarjeta crédito","Transferencia"|null), '
     + 'total (number|null), subtotal (number|null), iva (number|null), total_piezas (number|null, the printed total pieces), '
     + 'lineas (array of {codigo (string|null), descripcion (string), cantidad (number), costo_unitario (number), total_linea (number), foto (number, 1-based photo where the item was read), posible_duplicado (boolean)}), notas (string|null). '
     + 'Use plain numbers (no currency symbols). Never invent values you cannot read; use null. Known vendors (prefer these exact spellings if one matches): ' + names;
@@ -679,7 +706,7 @@ function finAiExtractAction(body, identity) {
   }
   const metodos = ['Efectivo', 'Tarjeta débito', 'Tarjeta crédito', 'Transferencia'];
   const suggestion = {
-    vendor_name: finStr_(parsed.vendor_name), vendor_id: vendorId, fecha_compra: finIsDate_(parsed.fecha) ? parsed.fecha : '', folio_ticket: finStr_(parsed.folio),
+    vendor_name: finStr_(parsed.vendor_name), vendor_id: vendorId, fecha_compra: finParseTicketDate_(parsed.fecha) || finParseTicketDate_(parsed.fecha_texto), folio_ticket: finStr_(parsed.folio),
     metodo_pago: metodos.indexOf(parsed.metodo_pago) >= 0 ? parsed.metodo_pago : '', total: finR2_(finNum_(parsed.total)), subtotal: parsed.subtotal == null ? '' : finR2_(finNum_(parsed.subtotal)),
     iva: parsed.iva == null ? '' : finR2_(finNum_(parsed.iva)), notas: finStr_(parsed.notas),
     total_piezas: parsed.total_piezas == null ? '' : finNum_(parsed.total_piezas),
