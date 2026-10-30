@@ -36,8 +36,19 @@
   const isAdmin = () => !!(B && B.caps && B.caps._admin);
 
   /* ── api ────────────────────────────────────────────────────────────────── */
-  const api = qs => VP.get('action=' + qs);
-  const post = (action, data) => VP.post(Object.assign({ action: action }, data || {}));
+  const CACHE_TTL = 2 * 60 * 1000;   // reads stay fresh for 2 minutes; any write clears everything
+  const NO_CACHE = /^(fin_bootstrap|fin_get_file|fin_get_expense|fin_export_|fin_map_suggest|fin_cost_history|fin_ai_)/;
+  const CACHE = new Map();           // query string -> { ts, data }
+  const api = qs => {
+    if (NO_CACHE.test(qs)) return VP.get('action=' + qs);
+    const hit = CACHE.get(qs);
+    if (hit && Date.now() - hit.ts < CACHE_TTL) return Promise.resolve(hit.data);
+    return VP.get('action=' + qs).then(data => { CACHE.set(qs, { ts: Date.now(), data: data }); return data; });
+  };
+  const post = (action, data) => {
+    CACHE.clear();
+    return VP.post(Object.assign({ action: action }, data || {})).then(r => { CACHE.clear(); return r; });
+  };
   const qsOf = o => Object.keys(o).filter(k => o[k] !== '' && o[k] !== undefined && o[k] !== null && o[k] !== false).map(k => k + '=' + encodeURIComponent(o[k] === true ? '1' : o[k])).join('&');
   const fail = e => { console.error(e); VP.toast(e && e.message ? e.message : 'Algo salió mal. Intenta de nuevo.', true); };   // TROUBLESHOOT: message comes from the server (see finanzas*.gs); console shows the full error
   const loading = '<div class="vp-loading">Cargando</div>';
@@ -1278,7 +1289,7 @@
   /* ── wiring + start ─────────────────────────────────────────────────────── */
   document.addEventListener('click', ev => {
     const tab = ev.target.closest('#fin-tabs [data-tab]');
-    if (tab) { show(tab.dataset.tab); return; }
+    if (tab) { if (tab.dataset.tab === TAB) CACHE.clear(); show(tab.dataset.tab); return; }
     const el = ev.target.closest('[data-act]');
     if (!el || !ACT[el.dataset.act]) return;
     Promise.resolve(ACT[el.dataset.act](el, ev)).catch(fail);
