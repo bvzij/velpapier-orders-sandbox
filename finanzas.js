@@ -347,6 +347,7 @@
         <label class="fin-field">¿Hasta cuándo se puede facturar?<select class="vp-input" id="pv-regla">${['Mismo mes', 'N días', 'Sin límite'].map(r => `<option ${r === (v['Regla Plazo Factura'] || 'Mismo mes') ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
         <label class="fin-field">Días (si es “N días”)<input class="vp-input" id="pv-dias" type="number" min="0" value="${esc(v['Días Plazo'] || '')}"></label>
         <label class="fin-field">Método de pago habitual<select class="vp-input" id="pv-metodo"><option value="">—</option>${(B.enums.metodos || []).map(x => `<option ${x === v['Método Pago Default'] ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+        <label class="fin-field">Tarjeta / cuenta habitual<input class="vp-input" id="pv-cuenta" list="fin-accounts" value="${esc(v['Cuenta Pago Default'] || '')}" placeholder="Ej. BBVA 4417"></label>
         <label class="fin-field">¿Normalmente dan factura?<select class="vp-input" id="pv-req"><option ${v['Requiere Factura Default'] !== 'No' ? 'selected' : ''}>Sí</option><option ${v['Requiere Factura Default'] === 'No' ? 'selected' : ''}>No</option></select></label>
         <label class="fin-field">Alias (nombres en tickets, separados por |)<input class="vp-input" id="pv-alias" value="${esc(v['Alias'] || '')}"></label>
         <label class="fin-field">Teléfono / contacto<input class="vp-input" id="pv-contacto" value="${esc(v['Contacto'] || v['Teléfono'] || '')}"></label>
@@ -412,8 +413,8 @@
         <label class="fin-field fin-span2">✨ Proveedor<div style="display:flex;gap:6px"><input class="vp-input" id="ff-vendor" list="fin-vendors" autocomplete="off" placeholder="Escribe para buscar…" value="${esc(vendorName(e['Vendor ID']))}"><button class="btn btn-sm" type="button" data-f="new-vendor">+ Nuevo</button></div></label>
         <label class="fin-field">✨ Fecha de compra<input class="vp-input" id="ff-fecha" type="date" value="${esc(e['Fecha Compra'] || B.today)}"></label>
         <label class="fin-field">✨ Total del ticket<input class="vp-input" id="ff-total" type="number" step="0.01" min="0" inputmode="decimal" value="${num(e['Total']) ? esc(e['Total']) : ''}" placeholder="0.00"></label>
-        <label class="fin-field">Método de pago<select class="vp-input" id="ff-metodo">${(B.enums.metodos || []).map(x => `<option ${x === m ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
-        <label class="fin-field">Tarjeta / cuenta<input class="vp-input" id="ff-cuenta" list="fin-accounts" value="${esc(e['Cuenta Pago'] || '')}" placeholder="Ej. BBVA 4417"></label>
+        <label class="fin-field">✨ Método de pago<select class="vp-input" id="ff-metodo">${(B.enums.metodos || []).map(x => `<option ${x === m ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+        <label class="fin-field">✨ Tarjeta / cuenta<input class="vp-input" id="ff-cuenta" list="fin-accounts" value="${esc(e['Cuenta Pago'] || '')}" placeholder="Ej. BBVA 4417"></label>
         <label class="fin-field">Categoría<select class="vp-input" id="ff-cat">${catOptions(e['Category ID'])}</select></label>
         <label class="fin-field">✨ Folio del ticket<input class="vp-input" id="ff-folio" value="${esc(e['Folio Ticket'] || '')}"></label>
         <label class="fin-field fin-span2">Descripción<input class="vp-input" id="ff-desc" value="${esc(e['Descripción'] || '')}" placeholder="¿Qué se compró?"></label>
@@ -472,6 +473,7 @@
           ${l._sug && !l.catalog_id ? `<span class="fin-badge fin-b-blue fin-sug" data-f="use-sug" data-i="${i}">Sugerido: ${esc((prodById(l._sug.catalog_id) || {}).name || l._sug.catalog_id)} — usar</span>` : ''}
           ${l.catalog_id ? `<span class="fin-badge ${l.vinculo === 'Confirmado' ? 'fin-b-green' : 'fin-b-amber'}">${l.vinculo}</span>` : ''}
           ${l._dup ? '<span class="fin-badge fin-b-amber" title="Puede venir de dos fotos que se enciman">Posible duplicado</span>' : ''}
+          ${/producto\s+individual/i.test(l.descripcion || '') ? '<span class="fin-badge fin-b-blue" title="El proveedor no tenía este producto en su sistema. El almacén lo identifica al recibir la mercancía.">Por identificar en recepción</span>' : ''}
         </div>
       </div>`;
     }).join('');
@@ -503,6 +505,7 @@
     // Payment method and invoice rule follow the supplier; the person can still change them for this expense.
     if (v['Método Pago Default'] && (B.enums.metodos || []).indexOf(v['Método Pago Default']) >= 0) $('ff-metodo').value = v['Método Pago Default'];
     if (v['Requiere Factura Default'] && !val('ff-req')) $('ff-req').value = v['Requiere Factura Default'];
+    if (v['Cuenta Pago Default'] && !val('ff-cuenta')) $('ff-cuenta').value = v['Cuenta Pago Default'];
   }
 
   async function suggestFor(i) {
