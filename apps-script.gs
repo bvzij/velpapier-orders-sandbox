@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-30.1';   // finanzas
+const SCRIPT_VERSION = '2026-10-30.2';   // anotado return-to-office
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -1299,6 +1299,9 @@ function updateOrderStatus(body) {
 // Mutates fields in place. Returns an error string, or null when fine.
 function normalizeAnotadoFields(sheet, rowIndex, headers, fields, oldStatus) {
   if (!fields) return null;
+  // A new link means the office re-assigned a returned item: drop the red flag.
+  if (fields['Linked Shipment'] && String(fields['Linked Shipment']).trim() &&
+      headers.indexOf('Returned From') >= 0) fields['Returned From'] = '';
   const iLink = headers.indexOf('Linked Shipment');
   const iChan = headers.indexOf('Channel');
 
@@ -3149,6 +3152,38 @@ function saveQC(body) {
     } catch (notaErr) {
       // TROUBLESHOOT: Notas stay Anotado; harmless, fix by hand in Pedidos.
       _timings.notas_error = String(notaErr);
+    }
+    // Anotado add-ons still linked here but NOT shipped in this finalize did
+    // not go in the box: back to Pagado, unlinked, flagged via Returned From
+    // (red outline in Pedidos). Ticked add-ons are already Enviado above, so
+    // they're skipped. Mayorista excluded: Mayoristas sheet owns its status.
+    try {
+      const sentIds = new Set(allOrderIds.map(String));
+      if (iLink >= 0 && body.tracking_id && orders.getLastRow() > 1) {
+        const hits = orders.getRange(2, iLink + 1, orders.getLastRow() - 1, 1)
+          .createTextFinder(String(body.tracking_id)).matchEntireCell(true).findAll();
+        const backIdx = [], backIds = [];
+        hits.forEach(hh => {
+          const rr = hh.getRow();
+          const ch = String(orders.getRange(rr, iChan + 1).getValue());
+          if (ch === 'TikTok' || ch === 'Nota' || ch === 'Mayorista') return;
+          if (String(orders.getRange(rr, iStat + 1).getValue()) !== 'Anotado') return;
+          const oid = String(orders.getRange(rr, iOrderId + 1).getValue());
+          if (sentIds.has(oid)) return;
+          backIdx.push(rr - 2); backIds.push(oid);
+        });
+        if (backIdx.length) {
+          const iRet = ensureHeader(orders, 'Returned From');
+          setCellsToValue(orders, iStat, backIdx, 'Pagado', false);
+          setCellsToValue(orders, iLink, backIdx, '', true);
+          setCellsToValue(orders, iRet, backIdx, body.tracking_id + ' · ' + now, true);
+          backIds.forEach(id => logAudit('return_to_office', 'Order', id, 'Status', 'Anotado', 'Pagado'));
+          result.returned_to_office = backIds;
+        }
+      }
+    } catch (retErr) {
+      // TROUBLESHOOT: items stay Anotado (old behaviour); re-link or set Pagado by hand in Pedidos.
+      _timings.return_error = String(retErr);
     }
     _timings.set_cells_ms = Date.now() - _t2;
 
