@@ -18,7 +18,7 @@ const QC_SHEET_ID = '1HFzeXHMOxQ3dNb8g4wvU1bp-psGlWMZUlXO0tQYWFxc';
 const AUDIT_LOG_SHEET_ID = '1J7dMUqj_uj_D24YgR5avCmSTdcbFCUmpU2YpO4uRGwU';
 const MAYOREO_SHEET_ID = '1GY5tdhqUavajwPdCTbsF-Imh_6i2XmQqAF7APftzZwQ';
 
-const SCRIPT_VERSION = '2026-10-29.1';
+const SCRIPT_VERSION = '2026-10-29.2';   // finanzas
 
 // ─── Fix-pack 2026-10-19 settings (see FIX_LOG.md) ─────────────────────────
 // Staff tokens receive Orders rows WITHOUT money columns (owner-only data).
@@ -361,6 +361,7 @@ function doGet(e) {
     if (!serviceActionAllowed(identity, action)) return jsonResponse({ error: 'unauthorized' });
     if (action === 'ping') return jsonResponse({ ok: true, role: role, name: identity.name, scopes: scopesForResponse_(identity) });
     if (action === 'whoami') return jsonResponse({ role: role, name: identity.name, scopes: scopesForResponse_(identity) });
+    if (String(action).indexOf('fin_') === 0) return finRouteGet(action, e.parameter, identity);   // Finanzas (finanzas.gs)
     if (action === 'shopify_matches') return getShopifyMatches(e);
     if (action === 'shopify_matches_review') return getShopifyMatchesReview(e);
     if (action === 'get_upload_signature') return getUploadSignature(e);
@@ -944,6 +945,8 @@ function doPost(e) {
     if (!serviceActionAllowed(identity, action)) { flushAudit(); return jsonResponse({ error: 'unauthorized' }); }
     // Productos (products.gs) takes the write lock itself, so slow AI calls never block other saves.
     if (String(action).indexOf('prod_') === 0) return prodDispatchPost(action, body, identity);
+    // Finanzas AI reading takes a minute or more: it runs outside the write lock (it only locks for its log row).
+    if (action === 'fin_ai_extract') { const r = dispatchPostAction(action, body, role); queueAuditEntries(); return r; }
     return withWriteLock(function () {
       const _tDispatch = Date.now();
       const result = dispatchPostAction(action, body, role);
@@ -973,6 +976,7 @@ function doPost(e) {
 }
 
 function dispatchPostAction(action, body, role) {
+    if (String(action).indexOf('fin_') === 0) return finRoutePost(action, body, _currentIdentity);   // Finanzas (finanzas.gs)
     const identity = _currentIdentity;
     if (String(action).indexOf('cli_') === 0) return cliDispatchPost(action, body, identity);
     if (action === 'mayoreo_save_settings') return mayoreoAllowed(_currentIdentity) ? mayoreoSaveSettingsAction(body) : jsonResponse({ error: 'unauthorized' });
@@ -2223,7 +2227,9 @@ function hasScope(identity, scope) {
 
 function scopesForResponse_(identity) {
   if (identity && identity.role === 'admin') return SCOPEABLE_PAGES.map(p => p.id);
-  return getScopesFor_(identity ? identity.name : '');
+  // Finanzas has its own finer permissions (permisos.gs); anyone allowed to open it gets a 'finanzas' nav entry here.
+  const extra = can(identity, 'finance.view') ? ['finanzas'] : [];
+  return getScopesFor_(identity ? identity.name : '').concat(extra);
 }
 
 // GET get_staff_scopes (admin) -> { pages, users:[{name, scopes}] } for the Ajustes modal. Staff only.
@@ -8776,6 +8782,7 @@ function importContextAction(body) {
       notes: String(val(r, 'notes') || ''), linked_shipment: link,
       shopify_order_number: String(val(r, 'sNum') || ''), shopify_order_id: String(val(r, 'sId') || ''),
       created: cr instanceof Date ? cr.toISOString() : String(cr || ''), matched_by_username: !!byUser,
+      assigned: chan === 'Nota' ? String(val(r, 'nAsig') || '') : '', gift: chan === 'Nota' ? giftParse_(val(r, 'nGift')) : null,
     });
   }
   return jsonResponse({ shipments: shipments, candidates: candidates, notas: notas });
