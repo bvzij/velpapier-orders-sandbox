@@ -494,6 +494,14 @@ function finAiProvider_() {
   return null;
 }
 
+// AI reads run OUTSIDE the global write lock (they take a minute or more), so the log row takes
+// the lock only for the instant of the append. If it can't, the row is skipped rather than blocking.
+function finAiLog_(row) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return;   // TROUBLESHOOT: another save held the lock for 10 s; this one AI Log row is skipped, nothing else is affected
+  try { finAppend_('AI Log', [row]); } finally { lock.releaseLock(); }
+}
+
 function finAiMonthSpend_() {
   const prefix = finToday_().slice(0, 7);
   return Math.round(finRead_('AI Log').rows.filter(r => String(r['Fecha']).indexOf(prefix) === 0).reduce((s, r) => s + finNum_(r['Costo USD']), 0) * 10000) / 10000;
@@ -535,8 +543,9 @@ function finAiCall_(prov, req) {
   }
   const send = () => UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(payload) });
   let res = send();
+  let thinking = payload.generationConfig && payload.generationConfig.thinkingConfig ? 'reducido' : '';
   // A model that does not accept the thinking setting answers 400: retry once without it.
-  if (res.getResponseCode() === 400 && payload.generationConfig && payload.generationConfig.thinkingConfig) { delete payload.generationConfig.thinkingConfig; res = send(); }
+  if (res.getResponseCode() === 400 && thinking) { delete payload.generationConfig.thinkingConfig; thinking = 'rechazado'; res = send(); }
   const code = res.getResponseCode();
   const body = res.getContentText();
   if (code === 429) throw new Error('La IA está saturada o se llegó al límite gratuito. Espera un minuto y reintenta.');   // TROUBLESHOOT: Gemini free tier = few requests/minute and a daily cap per project; check limits in aistudio.google.com
@@ -547,7 +556,7 @@ function finAiCall_(prov, req) {
     const text = ((cand.content || {}).parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
     if (!text) throw new Error('La IA no devolvió texto (' + (cand.finishReason || 'sin motivo') + ').');   // TROUBLESHOOT: finishReason SAFETY/RECITATION = blocked by Google; MAX_TOKENS = ticket too long for maxTokens
     const u = out.usageMetadata || {};
-    return { text: text, tokensIn: Number(u.promptTokenCount) || 0, tokensOut: (Number(u.candidatesTokenCount) || 0) + (Number(u.thoughtsTokenCount) || 0) };
+    return { text: text, tokensIn: Number(u.promptTokenCount) || 0, tokensOut: (Number(u.candidatesTokenCount) || 0) + (Number(u.thoughtsTokenCount) || 0), thoughts: Number(u.thoughtsTokenCount) || 0, thinking: thinking };
   }
   return {
     text: (out.content || []).filter(b => b.type === 'text').map(b => b.text).join(''),
@@ -592,7 +601,6 @@ function finAiExtractAction(body, identity) {
     + 'Only when you truly cannot tell whether two identical consecutive items are an overlap or two separate purchases, list both and set posible_duplicado true on the second.\n'
     + 'HANDWRITING: ignore all pen marks (circles, ticks, numbers inside circles, names, notes, strike-throughs). Read only the printed text.\n'
     + 'COMMON LAYOUT: each item uses two printed rows. Row 1 = CODE then DESCRIPTION. Row 2 = quantity, unit price, line amount. '
-    + 'The printed line amount can be LOWER than quantity x unit price (discounts on damaged goods): always copy the printed line amount into total_linea, never recompute it. '
     + 'Footer: "Cantidades" = total pieces, "Importe" = total. Header: "Numero" = folio.\n'
     + 'codigo = only the first token of row 1, exactly as printed (examples: A2809, YMHM-4, QYSHL-4). '
     + 'descripcion = the rest of row 1, but drop any "COD-<digits>" token and drop a trailing "X <n> PZS" box-size note.\n'
@@ -607,20 +615,45 @@ function finAiExtractAction(body, identity) {
   });
   parts.push({ text: images.length > 1 ? 'Read this ticket. The photos overlap; list each item once.' : 'Read this ticket.' });
   const logId = ids.join(',');
+  // Same photos asked again within 10 min (a double click, or Google re-sending a slow request):
+  // hand back the answer already read, or wait for the read that is still running, instead of paying twice.
+  const cache = CacheService.getScriptCache();
+  const ckey = 'finai_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, logId)).slice(0, 22);
+  const done = cache.get(ckey + '_done');
+  if (done) return jsonResponse(JSON.parse(done));
+  if (cache.get(ckey + '_run')) {
+    for (let w = 0; w < 60; w++) {
+      Utilities.sleep(3000);
+      const d = cache.get(ckey + '_done');
+      if (d) return jsonResponse(JSON.parse(d));
+      if (!cache.get(ckey + '_run')) break;
+    }
+  }
+  cache.put(ckey + '_run', '1', 360);
   const t0 = Date.now();
-  let out, parsed;
+  const secs = () => Math.round((Date.now() - t0) / 1000);
+  let out, parsed, tries = 0;
   try {
-    out = finAiCall_(prov, { system: system, parts: parts, maxTokens: 8000, json: true });
-    const text = out.text;
-    const a = text.indexOf('{'), z = text.lastIndexOf('}');
-    parsed = JSON.parse(text.slice(a, z + 1));
+    // The model sometimes returns broken JSON; one more attempt usually comes back clean.
+    while (!parsed) {
+      tries++;
+      out = finAiCall_(prov, { system: system, parts: parts, maxTokens: 8000, json: true });
+      const text = out.text, a = text.indexOf('{'), z = text.lastIndexOf('}');
+      try { parsed = JSON.parse(text.slice(a, z + 1)); }
+      catch (pe) {
+        try { parsed = JSON.parse(text.slice(a, z + 1).replace(/,\s*([\]}])/g, '$1')); }   // trailing commas are the usual culprit
+        catch (pe2) { if (tries >= 2) throw new Error('JSON inválido dos veces: ' + pe.message); }
+      }
+    }
   } catch (e) {
-    finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': 0, 'Tokens Out': 0, 'Costo USD': 0, 'Resultado': 'error: ' + String(e.message).slice(0, 120) }]);
-    return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; the model answered but not with valid JSON (a very long ticket can hit max_tokens: check Tokens Out near 8000)
+    cache.remove(ckey + '_run');
+    finAiLog_({ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': out ? out.tokensIn : 0, 'Tokens Out': out ? out.tokensOut : 0, 'Costo USD': 0, 'Resultado': 'error · ' + secs() + ' s · ' + String(e.message).slice(0, 120) });
+    return finErr_(e.message.indexOf('IA') >= 0 ? e.message : 'La IA devolvió algo que no se pudo leer. Intenta de nuevo o captura el ticket a mano.');   // TROUBLESHOOT: see AI Log tab; broken JSON twice in a row, or max_tokens hit on a very long ticket (Tokens Out near 8000)
   }
   const tin = out.tokensIn, tout = out.tokensOut;
   const cost = Math.round((tin * prov.priceIn + tout * prov.priceOut) / 1e6 * 1e6) / 1e6;
-  finAppend_('AI Log', [{ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost, 'Resultado': 'ok · ' + images.length + ' foto(s) · ' + Math.round((Date.now() - t0) / 1000) + ' s' }]);;
+  finAiLog_({ 'Fecha': finNow_(), 'Persona': personKey_(identity), 'File ID': logId, 'Modelo': prov.model, 'Tokens In': tin, 'Tokens Out': tout, 'Costo USD': cost,
+    'Resultado': 'ok · ' + images.length + ' foto(s) · ' + secs() + ' s' + (tries > 1 ? ' · 2 intentos' : '') + (out.thinking ? ' · thinking ' + out.thinking : '') + (out.thoughts ? ' · ' + out.thoughts + ' tok pensando' : '') });
 
   // Normalise + match vendor (suggest-only: the person confirms in the form).
   let vendorId = '';
@@ -653,7 +686,10 @@ function finAiExtractAction(body, identity) {
     photos: images.length, lines: lines,
   };
   logAuditEvent('fin_ai_extract', 'Archivo', logId, { cost_usd: cost, tokens_in: tin, tokens_out: tout, photos: images.length, lines: lines.length });
-  return jsonResponse({ result: 'ok', suggestion: suggestion, cost_usd: cost, model: prov.model });
+  const answer = { result: 'ok', suggestion: suggestion, cost_usd: cost, model: prov.model };
+  try { cache.put(ckey + '_done', JSON.stringify(answer), 600); } catch (e) { /* over 100 KB: just not cached */ }
+  cache.remove(ckey + '_run');
+  return jsonResponse(answer);
 }
 
 
