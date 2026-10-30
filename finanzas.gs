@@ -30,8 +30,9 @@ const FIN_TABS = {
     num: ['Tipo Cambio', 'Subtotal', 'IVA', 'Otros Impuestos', 'Total', 'Total MXN'],
   },
   'Gasto Líneas': {
-    headers: ['Line ID', 'Expense ID', 'Línea #', 'Vendor ID', 'Código Proveedor', 'Descripción', 'Catalog ID', 'Vínculo', 'Tipo Línea', 'Category ID',
+    headers: ['Line ID', 'Expense ID', 'Línea #', 'Vendor ID', 'Código Proveedor', 'Descripción', 'Catalog ID', 'Vínculo', 'Tipo Línea',
       'Cantidad', 'Unidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea', 'Status', 'Creado Por', 'Creado En'],
+    num: ['Línea #', 'Cantidad', 'Piezas por Unidad', 'Costo Unitario', 'Descuento Línea', 'Total Línea'],
   },
   'Facturas': {
     headers: ['Invoice ID', 'UUID', 'Status', 'Scope', 'RFC Emisor', 'Nombre Emisor', 'Vendor ID', 'RFC Receptor', 'Uso CFDI', 'Fecha Emisión',
@@ -478,7 +479,7 @@ function finInvoiceDeadline_(fechaCompra, vendor) {
   return finEndOfMonth_(fechaCompra);
 }
 
-function finNormLines_(lines, vendorId, identity, defaultCategoryId) {
+function finNormLines_(lines, vendorId, identity) {
   const out = [];
   (Array.isArray(lines) ? lines : []).forEach((l, i) => {
     const desc = finStr_(l.descripcion), code = finStr_(l.codigo);
@@ -488,12 +489,11 @@ function finNormLines_(lines, vendorId, identity, defaultCategoryId) {
     const disc = Math.max(0, finNum_(l.descuento));
     const tipo = FIN_TIPOS_LINEA.indexOf(l.tipo) >= 0 ? l.tipo : 'Inventario';
     const catalogId = finStr_(l.catalog_id);
-    const lineCategoryId = finStr_(l.category_id) || defaultCategoryId || '';
     let vinculo = ['Sin vincular', 'Sugerido', 'Confirmado'].indexOf(l.vinculo) >= 0 ? l.vinculo : 'Sin vincular';
     if (!catalogId) vinculo = 'Sin vincular';
     out.push({
       'Línea #': out.length + 1, 'Vendor ID': vendorId || '', 'Código Proveedor': code, 'Descripción': desc,
-      'Catalog ID': catalogId, 'Vínculo': vinculo, 'Tipo Línea': tipo, 'Category ID': lineCategoryId, 'Cantidad': qty,
+      'Catalog ID': catalogId, 'Vínculo': vinculo, 'Tipo Línea': tipo, 'Cantidad': qty,
       'Unidad': FIN_UNIDADES.indexOf(l.unidad) >= 0 ? l.unidad : 'pz',
       'Piezas por Unidad': Math.max(0, finNum_(l.piezas_por_unidad)) || 1,
       'Costo Unitario': finR2_(cost), 'Descuento Línea': finR2_(disc), 'Total Línea': finR2_(qty * cost - disc),
