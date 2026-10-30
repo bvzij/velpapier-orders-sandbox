@@ -1240,7 +1240,7 @@
     const s = await api('fin_ai_status');
     box.innerHTML = `<div class="fin-msg ${s.ready ? 'ok' : 'info'}" style="margin-top:0">${s.ready ? 'Activa.' : 'Todavía no está activada.'} Modelo: ${esc(s.model)} · gasto del mes: US$${Number(s.month_spend_usd).toFixed(4)} de US$${s.cap_usd}</div>
       <div class="fin-note">${s.ready ? 'Para quien tenga el permiso “Leer tickets con IA” aparece un botón ✨ en el formulario del gasto: llena los campos y tú revisas antes de guardar. Nunca guarda nada sola.' :
-        'Para activarla: en Apps Script → Configuración del proyecto → Propiedades del script, agrega <b>FIN_ANTHROPIC_KEY</b> con tu llave de la API de Anthropic. Después ejecuta <b>finAiSelfTest</b> una vez para comprobarla, y dale el permiso a quien lo vaya a usar. Cada ticket cuesta una fracción de centavo de dólar.'}</div>`;
+        'Para activarla: en Apps Script → Configuración del proyecto → Propiedades del script, agrega <b>FIN_GEMINI_KEY</b> (gratis, aistudio.google.com) o <b>FIN_ANTHROPIC_KEY</b> (Claude). Después ejecuta <b>finAiSelfTest</b> una vez para comprobarla, y dale el permiso a quien lo vaya a usar.'}</div>`;
   }
 
   function openCatForm(k) {
