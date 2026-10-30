@@ -1218,6 +1218,7 @@ function finRouteGet(action, p, identity) {
       case 'fin_export_zip':       return finExportZipGet_(p, identity);
       case 'fin_caps_get':         return finCapsGet_(p, identity);
       case 'fin_ai_status':        return finAiStatusGet_(p, identity);
+      case 'fin_reset_preview':    return finResetPreviewGet_(p, identity);
       default: return finErr_('Unknown action');   // TROUBLESHOOT: the browser asked for a fin_ action this script version does not know; deploy the latest finanzas*.gs files
     }
   } catch (err) {
@@ -1234,6 +1235,8 @@ function finRoutePost(action, body, identity) {
       case 'fin_create_expense':    return finCreateExpenseAction(body, identity);
       case 'fin_update_expense':    return finUpdateExpenseAction(body, identity);
       case 'fin_void_expense':      return finVoidExpenseAction(body, identity);
+      case 'fin_reset_data':        return finResetDataAction(body, identity);
+      case 'fin_delete_expenses':   return finDeleteExpensesAction(body, identity);
       case 'fin_mark_paid':         return finMarkPaidAction(body, identity);
       case 'fin_upload_file':       return finUploadFileAction(body, identity);
       case 'fin_register_file':     return finRegisterFileAction(body, identity);
