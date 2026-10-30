@@ -153,7 +153,7 @@
     let blob = file, mime = file.type, name = file.name || 'ticket';
     if (/^image\//.test(file.type) || /\.(heic|heif)$/i.test(name)) {
       if (typeof compressImage !== 'function') throw new Error('Falta uploader.js en la página.');   // TROUBLESHOOT: finanzas.html must load uploader.js before finanzas.js
-      blob = await compressImage(file, 1600, 0.8);
+      blob = await compressImage(file, 2400, 0.85);   // sharp for the AI; the VPS shrinks it to 1600 px once the expense is saved
       mime = 'image/jpeg'; name = name.replace(/\.\w+$/, '') + '.jpg';
     } else if (file.type !== 'application/pdf') {
       throw new Error('Usa una foto o un PDF.');
